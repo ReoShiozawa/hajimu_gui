@@ -1,0 +1,13 @@
+# ビルド成果物
+*.hjp
+*.o
+*.dSYM/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+*.swp
+*.swo
+*~
