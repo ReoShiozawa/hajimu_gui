@@ -34,6 +34,25 @@ egui のシンプルさと PyQt の本格ウィジェットを融合した、**1
 
 ### ビルド & インストール
 
+#### パッケージマネージャ（推奨）
+
+はじむ内蔵のパッケージマネージャを使うと、コンパイル不要で一行でインストールできます。
+
+```bash
+hajimu パッケージ 追加 ReoShiozawa/hajimu_gui
+```
+
+プロジェクトの `hajimu.json` に依存として記録されるので、チーム内で共有する際に導入コストがかかりません。
+
+```bash
+# 別のメンバーが hajimu.json の依存を一括インストール
+hajimu パッケージ インストール
+```
+
+#### ソースからビルド
+
+手動でビルドする場合:
+
 ```bash
 git clone https://github.com/ReoShiozawa/hajimu_gui.git
 cd hajimu_gui
