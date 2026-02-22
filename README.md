@@ -1,8 +1,8 @@
 # hajimu_gui
 
-**はじむ言語用 GUI パッケージ v13.0.0** — 自作プラットフォーム層 + 即時モード GUI フレームワーク
+**はじむ言語用 GUI パッケージ v14.0.0** — 自作プラットフォーム層 + 即時モード GUI フレームワーク
 
-egui のシンプルさと PyQt の本格ウィジェットを融合した、**1,074関数**搭載の完全日本語 API GUI ライブラリです。
+egui のシンプルさと PyQt の本格ウィジェットを融合した、**1,101関数**搭載の完全日本語 API GUI ライブラリです。
 
 ---
 
@@ -16,7 +16,9 @@ egui のシンプルさと PyQt の本格ウィジェットを融合した、**1
 - **依存ゼロ** — Qt/GTK/SDL2 不要、自作プラットフォーム層のみ
 - **クロスプラットフォーム** — macOS (Cocoa) / Linux (X11+GLX) / Windows (Win32+Win64)
 - **ダークテーマ** — モダンなダーク UI をデフォルト搭載
-- **単一ファイル構成** — hajimu_gui.c 1ファイルで全1,074関数を実装
+- **宣言的 UI** — React 風の仮想ノードツリー + O(n) 差分レンダリング (`VUI.*` API)
+- **ホットリロード** — `.jp` ファイル変更を自動検知し即時反映
+- **DevTools** — F12 でオンスクリーン FPS グラフ・ウィジェットインスペクタを表示
 
 ---
 
@@ -170,7 +172,8 @@ GUI.アプリ終了(アプリ)
 | **Phase 91-100** | v9.1.0 – v10.0.0 | UML / リボンUI / 無限キャンバス / a11y / DevTools | 834 |
 | **Phase 101-110** | v10.1.0 – v11.0.0 | Qt6/wxWidgets統合 / チャート / IoT / ハードウェア | 914 |
 | **Phase 111-120** | v11.1.0 – v12.0.0 | PDF / エクスポート / ネットワーク / バリデーション | 994 |
-| **Phase 121-130** | v12.1.0 – v13.0.0 | 適応UI / スクロール物理 / リモートUI / 産業プロトコル | **1,074** |
+| **Phase 121-130** | v12.1.0 – v13.0.0 | 適応UI / スクロール物理 / リモートUI / 産業プロトコル | 1,074 |
+| **Phase 131-134** | v14.0.0 | 宣言的UI(VNodeツリー) / フレームスケジューラ / ホットリロード / DevTools | **1,101** |
 
 ---
 
@@ -207,14 +210,19 @@ jp-gui/
 ├── fonts/
 │   └── NotoSansCJKjp-Regular.otf  日本語フォント同梱
 ├── src/
-│   ├── hajimu_gui.c            プラグイン本体 (全1,074関数 — 23,000行超)
+│   ├── hajimu_gui.c            プラグイン本体 (全1,101関数 — 23,000行超)
 │   ├── hjp_platform.h          プラットフォーム抽象化ヘッダ
 │   ├── hjp_platform_macos.m    macOS (Cocoa + OpenGL)
 │   ├── hjp_platform_linux.c    Linux (X11 + GLX)
 │   ├── hjp_platform_win32.c    Windows (Win32 + WGL)
 │   ├── hjp_render.c            自作ベクターレンダラ
 │   ├── hjp_render.h            レンダラヘッダ
-│   └── hjp_gl_funcs.h          OpenGL関数ローダー
+│   ├── hjp_gl_funcs.h          OpenGL関数ローダー
+│   ├── hjp_vnode.h / .c        仮想UIツリー + 差分レンダリングエンジン
+│   ├── hjp_frame.h / .c        フレームスケジューラ (VSync / FPS / 描画キュー)
+│   ├── hjp_hotreload.h / .c    ホットリロード (stat mtime ポーリング)
+│   ├── hjp_devtools.h / .c     開発者ツール オーバーレイ
+│   └── hjp_lifecycle.h         ウィジェットライフサイクル / 参照カウント
 ```
 
 ---
