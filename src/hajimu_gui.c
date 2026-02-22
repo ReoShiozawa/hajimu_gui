@@ -19,6 +19,11 @@
 #include "hajimu_plugin.h"
 
 #include "hjp_platform.h"
+#include "hjp_vnode.h"
+#include "hjp_frame.h"
+#include "hjp_hotreload.h"
+#include "hjp_devtools.h"
+#include "hjp_lifecycle.h"
 #include <math.h>
 #include <ctype.h>
 #include <time.h>
@@ -23043,13 +23048,48 @@ static HajimuPluginFunc gui_functions[] = {
     {"TUIOマルチタッチ",       fn_tuio_multitouch,        1, 2},
     {"UIテスト実行",           fn_ui_test_run,            1, 1},
     {"Protobufシリアライズ",   fn_protobuf_serialize,     1, 2},
+
+    /* Phase 131: 宣言的UI / 仮想UIツリー */
+    {"VUI.開始",              fn_vnode_begin,           1, 1},
+    {"VUI.終了",              fn_vnode_end,             0, 1},
+    {"VUI.ボックス",          fn_vnode_box,             1, 3},
+    {"VUI.テキスト",          fn_vnode_text,            2, 2},
+    {"VUI.ボタン",            fn_vnode_button,          2, 3},
+    {"VUI.行",               fn_vnode_row,             1, 1},
+    {"VUI.列",               fn_vnode_col,             1, 1},
+    {"VUI.スクロール",        fn_vnode_scroll,          3, 3},
+    {"VUI.入力",              fn_vnode_input,           2, 2},
+    {"VUI.スタイル",          fn_vnode_style,           1, 1},
+    {"VUI.コミット",          fn_vnode_commit,          0, 2},
+    {"VUI.無効化",            fn_vnode_invalidate,      1, 1},
+
+    /* Phase 132: フレームスケジューラ */
+    {"フレーム設定",          fn_フレーム設定,          1, 2},
+    {"フレームレート取得",    fn_フレームレート取得,    0, 0},
+    {"フレーム時間",          fn_フレーム時間,          0, 0},
+    {"フレーム要求",          fn_フレーム要求,          0, 0},
+    {"描画コール数",          fn_描画コール数,          0, 0},
+
+    /* Phase 133: ホットリロード */
+    {"ホットリロード開始",    fn_ホットリロード開始,    0, 1},
+    {"ホットリロード監視",    fn_ホットリロード監視,    1, 1},
+    {"ホットリロード確認",    fn_ホットリロード確認,    1, 1},
+    {"ホットリロードリセット",fn_ホットリロードリセット,0, 0},
+    {"ホットリロード回数",    fn_ホットリロード回数,    0, 0},
+
+    /* Phase 134: 開発者ツール */
+    {"DevTools開始",          fn_DevTools開始,          0, 2},
+    {"DevTools表示",          fn_DevTools表示,          0, 0},
+    {"DevTools非表示",        fn_DevTools非表示,        0, 0},
+    {"DevToolsログ",          fn_DevToolsログ,          1, 1},
+    {"DevToolsオプション",    fn_DevToolsオプション,    2, 2},
 };
 
 /* プラグイン初期化 */
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "13.0.0",
+        .version        = "14.0.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,

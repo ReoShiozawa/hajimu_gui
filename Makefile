@@ -18,7 +18,8 @@
 PLUGIN_NAME = hajimu_gui
 
 # ソースファイル
-SRC_C = src/hajimu_gui.c src/hjp_render.c
+SRC_C = src/hajimu_gui.c src/hjp_render.c \
+	    src/hjp_vnode.c src/hjp_frame.c src/hjp_hotreload.c src/hjp_devtools.c
 
 # はじむインクルードパス
 HAJIMU_INCLUDE ?= $(shell \
