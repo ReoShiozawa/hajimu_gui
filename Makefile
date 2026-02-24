@@ -7,7 +7,9 @@ PLUGIN_NAME = hajimu_gui
 SRC_C = src/hajimu_gui.c src/hjp_render.c \
         src/hjp_vnode.c src/hjp_frame.c src/hjp_hotreload.c src/hjp_devtools.c
 OUT   = $(PLUGIN_NAME).hjp
-CC   ?= gcc
+# CC ?= gcc だと GNU make 組み込みデフォルト(cc)が優先されるため = で上書き
+# コマンドラインから make CC=clang のように引き続きオーバーライド可能
+CC   = gcc
 
 # OS 判定 ($(OS) は Windows CMD/PowerShell で "Windows_NT" になる)
 ifeq ($(OS),Windows_NT)
