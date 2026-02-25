@@ -3,6 +3,7 @@
   "バージョン": "13.0.1",
   "説明": "はじむ言語用 GUI パッケージ — egui風の即時モード + PyQt風ウィジェット",
   "作者": "はじむ開発チーム",
+  "リポジトリ": "https://github.com/ReoShiozawa/hajimu_gui",
   "メイン": "hajimu_gui.hjp",
   "ビルド": "make hajimu_gui.hjp",
   "依存": {}
