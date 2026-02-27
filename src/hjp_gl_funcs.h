@@ -108,6 +108,27 @@ HJP_GL_FUNC(void,   glGenerateMipmap,  (GLenum target))
 HJP_GL_FUNC(void,   glBlendFuncSeparate,(GLenum sfactorRGB, GLenum dfactorRGB, GLenum sfactorAlpha, GLenum dfactorAlpha))
 HJP_GL_FUNC(void,   glStencilOpSeparate,(GLenum face, GLenum sfail, GLenum dpfail, GLenum dppass))
 
+/* Framebuffer */
+#ifndef GL_FRAMEBUFFER
+#define GL_FRAMEBUFFER                    0x8D40
+#define GL_RENDERBUFFER                   0x8D41
+#define GL_COLOR_ATTACHMENT0              0x8CE0
+#define GL_DEPTH_ATTACHMENT               0x8D00
+#define GL_FRAMEBUFFER_COMPLETE           0x8CD5
+#define GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT 0x8CD6
+#define GL_READ_FRAMEBUFFER               0x8CA8
+#define GL_DRAW_FRAMEBUFFER               0x8CA9
+#endif
+#ifndef GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT
+#define GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT 0x8A34
+#endif
+HJP_GL_FUNC(void,   glGenFramebuffers,       (GLsizei n, GLuint *framebuffers))
+HJP_GL_FUNC(void,   glDeleteFramebuffers,    (GLsizei n, const GLuint *framebuffers))
+HJP_GL_FUNC(void,   glBindFramebuffer,       (GLenum target, GLuint framebuffer))
+HJP_GL_FUNC(void,   glFramebufferTexture2D,  (GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level))
+HJP_GL_FUNC(GLenum, glCheckFramebufferStatus,(GLenum target))
+HJP_GL_FUNC(void,   glBlitFramebuffer,       (GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter))
+
 /* =====================================================================
  * ローダー実装 (hjp_gl_funcs.c の代わりにヘッダーinline)
  * HJP_GL_LOADER_IMPL を1つのCファイルで定義してからインクルード
@@ -151,6 +172,13 @@ HJP_GL_FUNC(void,   glVertexAttribPointer,(GLuint index, GLint size, GLenum type
 HJP_GL_FUNC(void,   glGenerateMipmap,  (GLenum target))
 HJP_GL_FUNC(void,   glBlendFuncSeparate,(GLenum sfactorRGB, GLenum dfactorRGB, GLenum sfactorAlpha, GLenum dfactorAlpha))
 HJP_GL_FUNC(void,   glStencilOpSeparate,(GLenum face, GLenum sfail, GLenum dpfail, GLenum dppass))
+/* Framebuffer (IMPL global vars) */
+HJP_GL_FUNC(void,   glGenFramebuffers,       (GLsizei n, GLuint *framebuffers))
+HJP_GL_FUNC(void,   glDeleteFramebuffers,    (GLsizei n, const GLuint *framebuffers))
+HJP_GL_FUNC(void,   glBindFramebuffer,       (GLenum target, GLuint framebuffer))
+HJP_GL_FUNC(void,   glFramebufferTexture2D,  (GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level))
+HJP_GL_FUNC(GLenum, glCheckFramebufferStatus,(GLenum target))
+HJP_GL_FUNC(void,   glBlitFramebuffer,       (GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter))
 
 static void hjp_gl_load_functions(void) {
 #undef HJP_GL_FUNC
@@ -189,6 +217,13 @@ static void hjp_gl_load_functions(void) {
     HJP_GL_FUNC(void,   glGenerateMipmap,  (GLenum target))
     HJP_GL_FUNC(void,   glBlendFuncSeparate,(GLenum sfactorRGB, GLenum dfactorRGB, GLenum sfactorAlpha, GLenum dfactorAlpha))
     HJP_GL_FUNC(void,   glStencilOpSeparate,(GLenum face, GLenum sfail, GLenum dpfail, GLenum dppass))
+    /* Framebuffer */
+    HJP_GL_FUNC(void,   glGenFramebuffers,       (GLsizei n, GLuint *framebuffers))
+    HJP_GL_FUNC(void,   glDeleteFramebuffers,    (GLsizei n, const GLuint *framebuffers))
+    HJP_GL_FUNC(void,   glBindFramebuffer,       (GLenum target, GLuint framebuffer))
+    HJP_GL_FUNC(void,   glFramebufferTexture2D,  (GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level))
+    HJP_GL_FUNC(GLenum, glCheckFramebufferStatus,(GLenum target))
+    HJP_GL_FUNC(void,   glBlitFramebuffer,       (GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter))
 }
 
 #endif /* HJP_GL_LOADER_IMPL */

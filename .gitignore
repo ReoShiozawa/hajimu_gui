@@ -11,3 +11,9 @@
 *.swp
 *.swo
 *~
+
+# ルートレベルの旧ビルド成果物（dist/ を使用）
+hajimu_gui.hjp
+
+# ローカルヘッダーコピー（jp/include から参照）
+include/

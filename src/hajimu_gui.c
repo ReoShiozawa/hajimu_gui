@@ -16,6 +16,14 @@
  * インクルード
  * ===================================================================*/
 
+/* macOS: hajimu_plugin.h が _POSIX_C_SOURCE を定義すると dlfcn.h の
+   Dl_info / dladdr が隠れるため、最初に _DARWIN_C_SOURCE を宣言する */
+#ifdef __APPLE__
+  #ifndef _DARWIN_C_SOURCE
+    #define _DARWIN_C_SOURCE
+  #endif
+#endif
+
 #include "hajimu_plugin.h"
 
 #include "hjp_platform.h"
@@ -50,6 +58,11 @@
   #include <io.h>
   #define access _access
   #define F_OK   0
+  /* OpenGL 3.0+ 関数ポインタを hjp_platform_win32.c の実装から参照 */
+  #ifndef HJP_GL_LOADER
+    #define HJP_GL_LOADER
+  #endif
+  #include "hjp_gl_funcs.h"
 #endif
 
 /* --- hjp_render (自作描画エンジン) --- */

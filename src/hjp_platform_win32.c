@@ -39,6 +39,7 @@
 #include "hjp_platform.h"
 
 /* GL関数ローダー */
+#define HJP_GL_LOADER
 #define HJP_GL_LOADER_IMPL
 #include "hjp_gl_funcs.h"
 
@@ -797,7 +798,7 @@ uint32_t hjp_get_mouse_state(int *x, int *y) {
  * ===================================================================*/
 
 HjpCursor hjp_create_system_cursor(int id) {
-    LPCWSTR cur;
+    LPCTSTR cur;
     switch (id) {
         case HJP_CURSOR_HAND:      cur = IDC_HAND; break;
         case HJP_CURSOR_IBEAM:     cur = IDC_IBEAM; break;
@@ -805,7 +806,7 @@ HjpCursor hjp_create_system_cursor(int id) {
         case HJP_CURSOR_SIZEALL:   cur = IDC_SIZEALL; break;
         default:                   cur = IDC_ARROW; break;
     }
-    return (HjpCursor)LoadCursorW(NULL, cur);
+    return (HjpCursor)LoadCursor(NULL, cur);
 }
 
 void hjp_set_cursor(HjpCursor cursor) {

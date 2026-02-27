@@ -107,3 +107,37 @@ help:
 	@echo "  Windows: MSYS2 MinGW64 ターミナルで実行してください"
 	@echo "    pacman -S mingw-w64-x86_64-gcc"
 	@echo ""
+
+# ── クロスプラットフォームビルド (macOS ホストでビルドして配布) ──
+# Linux は X11/GL ヘッダー必須のためクロスビルド不可 → macOS/Windows のみ
+DIST       = dist
+HAJIMU_INC = $(abspath $(firstword $(wildcard ../../jp/include ../jp/include ./include)))
+WIN_CC     ?= x86_64-w64-mingw32-gcc
+SRC_ALL    = src/hajimu_gui.c src/hjp_render.c src/hjp_vnode.c src/hjp_frame.c \
+             src/hjp_hotreload.c src/hjp_devtools.c
+NCPU       := $(shell sysctl -n hw.ncpu 2>/dev/null || echo 4)
+
+.PHONY: build-all build-macos build-windows
+
+build-all: build-macos build-windows
+	@echo "  全プラットフォームビルド完了: $(DIST)/"
+
+build-macos:
+	@mkdir -p $(DIST)
+	gcc -shared -dynamiclib -fPIC -O2 -DGL_SILENCE_DEPRECATION \
+	  -I$(HAJIMU_INC) -Isrc \
+	  $(SRC_ALL) src/hjp_platform_macos.m \
+	  -framework OpenGL -framework Cocoa -framework CoreText \
+	  -framework CoreGraphics -framework ImageIO -lpthread \
+	  -o $(DIST)/$(PLUGIN_NAME)-macos.hjp
+	@echo "  macOS: $(DIST)/$(PLUGIN_NAME)-macos.hjp"
+
+build-windows:
+	@mkdir -p $(DIST)
+	$(WIN_CC) -shared -O2 \
+	  -I$(HAJIMU_INC) -Isrc \
+	  -D_WIN32_WINNT=0x0601 -DWIN32_LEAN_AND_MEAN \
+	  $(SRC_ALL) src/hjp_platform_win32.c \
+	  -lopengl32 -lgdi32 -luser32 -lshell32 -lkernel32 -lpthread -static-libgcc \
+	  -o $(DIST)/$(PLUGIN_NAME)-windows-x64.hjp
+	@echo "  Windows: $(DIST)/$(PLUGIN_NAME)-windows-x64.hjp"
