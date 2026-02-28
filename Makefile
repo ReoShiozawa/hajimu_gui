@@ -109,7 +109,7 @@ help:
 	@echo ""
 
 # ── クロスプラットフォームビルド (macOS ホストでビルドして配布) ──
-# Linux は X11/GL ヘッダー必須のためクロスビルド不可 → macOS/Windows のみ
+# Linux: XQuartz X11/GL ヘッダー + Homebrew freetype2 でクロスビルド可能
 DIST       = dist
 HAJIMU_INC = $(abspath $(firstword $(wildcard ../../jp/include ../jp/include ./include)))
 WIN_CC     ?= x86_64-w64-mingw32-gcc
@@ -117,9 +117,12 @@ SRC_ALL    = src/hajimu_gui.c src/hjp_render.c src/hjp_vnode.c src/hjp_frame.c \
              src/hjp_hotreload.c src/hjp_devtools.c
 NCPU       := $(shell sysctl -n hw.ncpu 2>/dev/null || echo 4)
 
-.PHONY: build-all build-macos build-windows
+LINUX_CC   ?= x86_64-linux-musl-gcc
+FREETYPE_INC = /opt/homebrew/opt/freetype/include/freetype2
 
-build-all: build-macos build-windows
+.PHONY: build-all build-macos build-linux build-windows
+
+build-all: build-macos build-linux build-windows
 	@echo "  全プラットフォームビルド完了: $(DIST)/"
 
 build-macos:
@@ -131,7 +134,16 @@ build-macos:
 	  -framework CoreGraphics -framework ImageIO -lpthread \
 	  -o $(DIST)/$(PLUGIN_NAME)-macos.hjp
 	@echo "  macOS: $(DIST)/$(PLUGIN_NAME)-macos.hjp"
-
+build-linux:
+	@mkdir -p $(DIST)
+	$(LINUX_CC) -shared -fPIC -O2 \
+	  -I$(HAJIMU_INC) -Isrc \
+	  -I/opt/X11/include \
+	  -I$(FREETYPE_INC) \
+	  $(SRC_ALL) src/hjp_platform_linux.c \
+	  -Wl,--allow-shlib-undefined \
+	  -o $(DIST)/$(PLUGIN_NAME)-linux-x64.hjp
+	@echo "  Linux: $(DIST)/$(PLUGIN_NAME)-linux-x64.hjp"
 build-windows:
 	@mkdir -p $(DIST)
 	$(WIN_CC) -shared -O2 \

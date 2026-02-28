@@ -24,6 +24,13 @@
   #endif
 #endif
 
+/* Linux: dladdr は GNU 拡張のため _GNU_SOURCE が必要 */
+#ifdef __linux__
+  #ifndef _GNU_SOURCE
+    #define _GNU_SOURCE
+  #endif
+#endif
+
 #include "hajimu_plugin.h"
 
 #include "hjp_platform.h"
