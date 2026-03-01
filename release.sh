@@ -39,9 +39,9 @@ fi
 echo "=== $PLUGIN_NAME $VERSION リリース ==="
 
 if [[ "$PUSH_ONLY" == false ]]; then
-  echo "--- macOS ビルド ---"
-  make clean && make
-  echo "  → $HJP_FILE"
+  echo "--- 全プラットフォームビルド ---"
+  make build-all
+  echo "  → dist/"
 fi
 
 echo "--- Git push ---"
@@ -58,15 +58,23 @@ fi
 git push origin "$VERSION"
 
 if command -v gh >/dev/null 2>&1; then
-  echo "--- GitHub Release 作成 ---"
-  mkdir -p dist
-  cp "$HJP_FILE" "dist/${PLUGIN_NAME}-macos.hjp"
+  echo "--- GitHub Release 作成/更新 ---"
+  ASSETS=(
+    "dist/${PLUGIN_NAME}-macos.hjp"
+    "dist/${PLUGIN_NAME}-linux-x64.hjp"
+    "dist/${PLUGIN_NAME}-windows-x64.hjp"
+  )
 
-  gh release create "$VERSION" "dist/${PLUGIN_NAME}-macos.hjp" \
-    --title "$PLUGIN_NAME $VERSION" \
-    --generate-notes 2>/dev/null || \
-  gh release upload "$VERSION" "dist/${PLUGIN_NAME}-macos.hjp" --clobber 2>/dev/null || \
-  echo "⚠ Release 作成/アップロードに失敗"
+  # Release が存在しなければ作成、存在すれば upload --clobber で上書き
+  if gh release view "$VERSION" >/dev/null 2>&1; then
+    for f in "${ASSETS[@]}"; do
+      gh release upload "$VERSION" "$f" --clobber
+    done
+  else
+    gh release create "$VERSION" "${ASSETS[@]}" \
+      --title "$PLUGIN_NAME $VERSION" \
+      --generate-notes
+  fi
 fi
 
 echo ""
