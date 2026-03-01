@@ -62,6 +62,7 @@
 #else
   #include <GL/gl.h>
   #include <windows.h>
+  #include <shellapi.h>
   #include <io.h>
   #define access _access
   #define F_OK   0
@@ -13559,23 +13560,58 @@ static Value fn_gesture_region(int argc, Value *argv) {
 static Value fn_print(int argc, Value *argv) {
     (void)argc;
     const char *content = argv[0].string.data;
-    /* macOS: lprコマンドでプリント */
+#ifdef _WIN32
+    /* Windows: %TEMP% に書き出して ShellExecute で印刷 */
+    const char *tmp = getenv("TEMP");
+    if (!tmp) tmp = getenv("TMP");
+    if (!tmp) tmp = "C:\\Windows\\Temp";
+    char path[1024];
+    snprintf(path, sizeof(path), "%s\\hajimu_print.txt", tmp);
+    FILE *fp = fopen(path, "w");
+    if (!fp) return hajimu_bool(false);
+    fprintf(fp, "%s", content);
+    fclose(fp);
+    HINSTANCE r = ShellExecuteA(NULL, "print", path, NULL, NULL, SW_HIDE);
+    return hajimu_bool((intptr_t)r > 32);
+#elif defined(__APPLE__)
     char cmd[2048];
     char esc[1024];
     gui_shell_escape(esc, sizeof(esc), content);
     snprintf(cmd, sizeof(cmd), "echo %s | lpr 2>/dev/null", esc);
     int ret = system(cmd);
     return hajimu_bool(ret == 0);
+#else
+    char cmd[2048];
+    char esc[1024];
+    gui_shell_escape(esc, sizeof(esc), content);
+    snprintf(cmd, sizeof(cmd), "echo %s | lpr 2>/dev/null", esc);
+    int ret = system(cmd);
+    return hajimu_bool(ret == 0);
+#endif
 }
 
 /* 印刷プレビュー(内容) → 無 */
 static Value fn_print_preview(int argc, Value *argv) {
     (void)argc;
     const char *content = argv[0].string.data;
-    /* プレビュー: ファイルに書き出してopen */
+#ifdef _WIN32
+    const char *tmp = getenv("TEMP");
+    if (!tmp) tmp = getenv("TMP");
+    if (!tmp) tmp = "C:\\Windows\\Temp";
+    char path[1024];
+    snprintf(path, sizeof(path), "%s\\hajimu_print_preview.txt", tmp);
+    FILE *fp = fopen(path, "w");
+    if (fp) { fprintf(fp, "%s", content); fclose(fp); }
+    ShellExecuteA(NULL, "open", path, NULL, NULL, SW_SHOWNORMAL);
+#elif defined(__APPLE__)
     FILE *fp = fopen("/tmp/hajimu_print_preview.txt", "w");
     if (fp) { fprintf(fp, "%s", content); fclose(fp); }
     system("open /tmp/hajimu_print_preview.txt 2>/dev/null");
+#else
+    FILE *fp = fopen("/tmp/hajimu_print_preview.txt", "w");
+    if (fp) { fprintf(fp, "%s", content); fclose(fp); }
+    system("xdg-open /tmp/hajimu_print_preview.txt 2>/dev/null");
+#endif
     return hajimu_null();
 }
 
