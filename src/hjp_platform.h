@@ -287,6 +287,18 @@ void hjp_image_free(unsigned char *pixels);
  * ===================================================================*/
 #define HJP_WINDOWPOS_CENTERED  0x2FFF0000
 
+/* =====================================================================
+ * ネイティブメニューバー (macOS)
+ * ===================================================================*/
+#ifdef __APPLE__
+void     hjp_native_menubar_init(void);
+void     hjp_native_menubar_begin_menu(const char *title);
+void     hjp_native_menubar_add_item(const char *title, const char *shortcut, uint32_t tag);
+void     hjp_native_menubar_add_separator(void);
+void     hjp_native_menubar_end_menu(void);
+uint32_t hjp_native_menubar_poll_clicked(void);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

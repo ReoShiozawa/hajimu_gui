@@ -240,6 +240,7 @@ struct Hjpcontext {
 
     /* --- キャッシュ state filter --- */
     GLuint boundTexture;
+    GLuint dummyTex;  /* macOS: sampler が常に有効なテクスチャを参照するためのダミー (1×1 白) */
     GLuint stencilMask;
     GLenum stencilFunc;
     GLint stencilFuncRef;
@@ -848,10 +849,23 @@ static int hjp__renderCreateTexture(Hjpcontext *ctx, int type, int w, int h,
     glGenTextures(1, &tex->tex);
     glBindTexture(GL_TEXTURE_2D, tex->tex);
     ctx->boundTexture = tex->tex;
-    if (type == HJP_TEXTURE_RGBA)
+    /* macOS: NULL データで glTexImage2D すると "unloadable" としてマークされる。
+     * そのあとデータをアップロードしても解除されないため、NULL の場合はゼロ初期化バッファを使う。 */
+    unsigned char *zero_buf = NULL;
+    if (!data) {
+        size_t bufsize = (size_t)w * (size_t)h * ((type == HJP_TEXTURE_RGBA) ? 4 : 1);
+        zero_buf = (unsigned char*)calloc(1, bufsize);
+        data = zero_buf;
+    }
+    if (type == HJP_TEXTURE_RGBA) {
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
-    else
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, w, h, 0, GL_RED, GL_UNSIGNED_BYTE, data);
+    } else {
+        /* macOS Core Profile: sized format GL_R8 を使う (GL_RED unsized は非対応) */
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, w, h, 0, GL_RED, GL_UNSIGNED_BYTE, data);
+    }
+    if (zero_buf) { free(zero_buf); zero_buf = NULL; data = NULL; }
     if (imageFlags & HJP_IMAGE_GENERATE_MIPMAPS) {
         if (imageFlags & HJP_IMAGE_NEAREST) {
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
@@ -868,7 +882,6 @@ static int hjp__renderCreateTexture(Hjpcontext *ctx, int type, int w, int h,
                     (imageFlags & HJP_IMAGE_REPEATX) ? GL_REPEAT : GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,
                     (imageFlags & HJP_IMAGE_REPEATY) ? GL_REPEAT : GL_CLAMP_TO_EDGE);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, (type==HJP_TEXTURE_RGBA) ? 4 : 1);
     if (imageFlags & HJP_IMAGE_GENERATE_MIPMAPS)
         glGenerateMipmap(GL_TEXTURE_2D);
     glBindTexture(GL_TEXTURE_2D, 0);
@@ -1501,8 +1514,10 @@ static void hjp__setUniforms(Hjpcontext *ctx, int uniformOffset, int image) {
             ctx->boundTexture = tex->tex;
         }
     } else {
-        glBindTexture(GL_TEXTURE_2D, 0);
-        ctx->boundTexture = 0;
+        /* macOS: texture 0 (非バインド) は sampler2D の警告を引き起こすため
+         * ダミーテクスチャをバインドする */
+        glBindTexture(GL_TEXTURE_2D, ctx->dummyTex);
+        ctx->boundTexture = ctx->dummyTex;
     }
 }
 
@@ -1737,13 +1752,15 @@ void hjpStroke(Hjpcontext *ctx) {
  * フォントアトラス + テキスト描画
  * ===================================================================*/
 static int hjp__fontImageCreate(Hjpcontext *ctx, int w, int h) {
-    return hjp__renderCreateTexture(ctx, HJP_TEXTURE_ALPHA, w, h, 0, NULL);
+    /* フォントアトラスはRGBAで作成（GL_R8のmacOSドライバ問題回避） */
+    return hjp__renderCreateTexture(ctx, HJP_TEXTURE_RGBA, w, h, 0, NULL);
 }
 
 static void hjp__fontAtlasInit(Hjpcontext *ctx) {
     ctx->fontAtlasW = HJP_INIT_FONTIMAGE_SIZE;
     ctx->fontAtlasH = HJP_INIT_FONTIMAGE_SIZE;
-    ctx->fontAtlasData = (unsigned char*)calloc(1, ctx->fontAtlasW * ctx->fontAtlasH);
+    /* RGBAフォーマット: 4 bytes/pixel */
+    ctx->fontAtlasData = (unsigned char*)calloc(4, ctx->fontAtlasW * ctx->fontAtlasH);
     ctx->fontImageIdx = 0;
     ctx->fontImages[0] = hjp__fontImageCreate(ctx, ctx->fontAtlasW, ctx->fontAtlasH);
     ctx->glyphAtlasX = 1;
@@ -1783,7 +1800,6 @@ static HjpGlyph *hjp__renderGlyph(Hjpcontext *ctx, uint32_t cp, int fontId, floa
                                  &bitmap, &gw, &gh, &gxoff, &gyoff, &advance);
     if (!ok || !bitmap) { if (bitmap) free(bitmap); return NULL; }
 
-    /* Pack into atlas */
     if (ctx->glyphAtlasX + gw + 1 >= ctx->fontAtlasW) {
         ctx->glyphAtlasX = 1;
         ctx->glyphAtlasY += ctx->glyphAtlasRowH + 1;
@@ -1799,11 +1815,11 @@ static HjpGlyph *hjp__renderGlyph(Hjpcontext *ctx, uint32_t cp, int fontId, floa
             ctx->glyphAtlasX = 1;
             ctx->glyphAtlasY = 1;
             ctx->glyphAtlasRowH = 0;
-            memset(ctx->fontAtlasData, 0, ctx->fontAtlasW * ctx->fontAtlasH);
+            memset(ctx->fontAtlasData, 0, ctx->fontAtlasW * ctx->fontAtlasH * 4);
         } else {
-            unsigned char *newData = (unsigned char*)calloc(1, ctx->fontAtlasW * newH);
+            unsigned char *newData = (unsigned char*)calloc(4, ctx->fontAtlasW * newH);
             if (newData) {
-                memcpy(newData, ctx->fontAtlasData, ctx->fontAtlasW * ctx->fontAtlasH);
+                memcpy(newData, ctx->fontAtlasData, ctx->fontAtlasW * ctx->fontAtlasH * 4);
                 free(ctx->fontAtlasData);
                 ctx->fontAtlasData = newData;
                 ctx->fontAtlasH = newH;
@@ -1814,12 +1830,19 @@ static HjpGlyph *hjp__renderGlyph(Hjpcontext *ctx, uint32_t cp, int fontId, floa
         ctx->fontImages[0] = hjp__fontImageCreate(ctx, ctx->fontAtlasW, ctx->fontAtlasH);
     }
 
-    /* Blit glyph into atlas data */
+    /* Blit glyph into atlas data (RGBA: 4 bytes/pixel, all channels = glyph alpha) */
     int ax = ctx->glyphAtlasX, ay = ctx->glyphAtlasY;
     for (int row = 0; row < gh; row++) {
         if (ay+row < ctx->fontAtlasH) {
-            memcpy(ctx->fontAtlasData + (ay+row)*ctx->fontAtlasW + ax,
-                   bitmap + row*gw, gw);
+            unsigned char *dst = ctx->fontAtlasData + ((ay+row)*ctx->fontAtlasW + ax) * 4;
+            const unsigned char *src = bitmap + row*gw;
+            for (int col = 0; col < gw; col++) {
+                unsigned char a = src[col];
+                dst[col*4+0] = a;
+                dst[col*4+1] = a;
+                dst[col*4+2] = a;
+                dst[col*4+3] = a;
+            }
         }
     }
     free(bitmap);
@@ -1831,8 +1854,10 @@ static HjpGlyph *hjp__renderGlyph(Hjpcontext *ctx, uint32_t cp, int fontId, floa
     HjpTexture *tex = hjp__findTexture(ctx, ctx->fontImages[0]);
     if (tex) {
         glBindTexture(GL_TEXTURE_2D, tex->tex);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, ctx->fontAtlasW, ctx->fontAtlasH,
-                     0, GL_RED, GL_UNSIGNED_BYTE, ctx->fontAtlasData);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, ctx->fontAtlasW, ctx->fontAtlasH,
+                        GL_RGBA, GL_UNSIGNED_BYTE, ctx->fontAtlasData);
+        glBindTexture(GL_TEXTURE_2D, 0);
         glBindTexture(GL_TEXTURE_2D, 0);
     }
 
@@ -2034,17 +2059,20 @@ float hjpText(Hjpcontext *ctx, float x, float y, const char *str, const char *en
         float gy = baselineY + g->yoff;
         float gw = (float)g->w;
         float gh = (float)g->h;
-        float u0 = g->x * iw, v0 = g->y * ih;
-        float u1 = (g->x + g->w) * iw, v1 = (g->y + g->h) * ih;
+        float u0 = g->x * iw;
+        float u1 = (g->x + g->w) * iw;
+        /* CoreGraphics ビットマップは行0=下 (Y-up) なので V 座標を反転 */
+        float v0 = (g->y + g->h) * ih;   /* アトラス下端 → 画面上端 */
+        float v1 = g->y * ih;             /* アトラス上端 → 画面下端 */
 
-        /* Two triangles = one quad */
+        /* Two triangles = one quad (NanoVG CCW winding order) */
         Hjpvertex *v = &ctx->glverts[vertOff + triCount];
-        hjp__vset(&v[0], gx, gy, u0, v0);
-        hjp__vset(&v[1], gx+gw, gy, u1, v0);
-        hjp__vset(&v[2], gx+gw, gy+gh, u1, v1);
-        hjp__vset(&v[3], gx, gy, u0, v0);
-        hjp__vset(&v[4], gx+gw, gy+gh, u1, v1);
-        hjp__vset(&v[5], gx, gy+gh, u0, v1);
+        hjp__vset(&v[0], gx,    gy,    u0, v0);       /* TL */
+        hjp__vset(&v[1], gx+gw, gy+gh, u1, v1);       /* BR */
+        hjp__vset(&v[2], gx+gw, gy,    u1, v0);       /* TR */
+        hjp__vset(&v[3], gx,    gy,    u0, v0);       /* TL */
+        hjp__vset(&v[4], gx,    gy+gh, u0, v1);       /* BL */
+        hjp__vset(&v[5], gx+gw, gy+gh, u1, v1);       /* BR */
         triCount += 6;
 
         cx += g->advance + s->textLetterSpacing;
@@ -2252,6 +2280,20 @@ Hjpcontext *hjpCreateGL3(int flags) {
     /* Font atlas init */
     hjp__fontAtlasInit(ctx);
 
+    /* macOS Core Profile: sampler2D には常に有効なテクスチャが必要。
+     * image==0 のとき glBindTexture(0) するとバリデーション警告が出るため
+     * 1×1 白 RGBA テクスチャをダミーとして常時バインドする。 */
+    {
+        static const unsigned char white[4] = {255,255,255,255};
+        glGenTextures(1, &ctx->dummyTex);
+        glBindTexture(GL_TEXTURE_2D, ctx->dummyTex);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+
     hjp__setDevicePixelRatio(ctx, 1.0f);
 
     return ctx;
@@ -2263,6 +2305,7 @@ void hjpDeleteGL3(Hjpcontext *ctx) {
     if (ctx->vertBuf) glDeleteBuffers(1, &ctx->vertBuf);
     if (ctx->vertArr) glDeleteVertexArrays(1, &ctx->vertArr);
     if (ctx->fragBuf) glDeleteBuffers(1, &ctx->fragBuf);
+    if (ctx->dummyTex) glDeleteTextures(1, &ctx->dummyTex);
     /* Delete textures */
     for (int i = 0; i < ctx->ntextures; i++)
         if (ctx->textures[i].id && ctx->textures[i].tex)

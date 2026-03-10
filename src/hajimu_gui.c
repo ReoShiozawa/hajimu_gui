@@ -90,7 +90,9 @@
 #define GUI_SLIDER_H         6.0f
 #define GUI_SLIDER_HANDLE   14.0f
 #define GUI_PROGRESS_H      10.0f
-#define GUI_FONT_SIZE       16.0f
+static float g_custom_font_size = 0;
+#define GUI_FONT_SIZE_DEFAULT 16.0f
+#define GUI_FONT_SIZE       (g_custom_font_size > 0 ? g_custom_font_size : GUI_FONT_SIZE_DEFAULT)
 #define GUI_FONT_NAME       "noto-cjk"
 #define GUI_LABEL_W        130.0f    /* ラベル幅 (スライダー等) */
 #define GUI_INPUT_H         32.0f    /* テキスト入力高さ */
@@ -302,6 +304,7 @@ typedef struct {
     GuiPanel panels[GUI_MAX_PANELS];
     int      panel_depth;
     GuiLayout saved_lay[GUI_MAX_PANELS]; /* パネル前のレイアウト保存 */
+    float    h_group_max_bottom;         /* 横並びグループ最大ボトム追跡 */
 
     bool valid;
 } GuiApp;
@@ -399,6 +402,15 @@ static float     g_menu_x      = 0, g_menu_y = 0;
 static bool      g_menubar_active  = false;
 static float     g_menubar_cursor_x = 0;
 
+/* --- ネイティブメニューバー (macOS) --- */
+#ifdef __APPLE__
+static bool      g_use_native_menubar   = false;
+static bool      g_native_menubar_built = false;
+static bool      g_native_build_phase   = false;
+static char      g_native_menu_prefix[128] = "";
+static uint32_t  g_native_clicked_tag   = 0;
+#endif
+
 /* --- Phase 7: 画像・キャンバス --- */
 #define GUI_MAX_IMAGES       64
 
@@ -411,9 +423,9 @@ typedef struct {
 static GuiImage g_images[GUI_MAX_IMAGES];
 static bool     g_canvas_active = false;
 static float    g_canvas_ox = 0, g_canvas_oy = 0;
+static float    g_canvas_w  = 0, g_canvas_h  = 0;
 
-/* --- Phase 8: カスタムフォントサイズ --- */
-static float g_custom_font_size = 0;
+/* --- Phase 8: カスタムフォントサイズ (宣言は上部のGUI_FONT_SIZEマクロ近くに移動) --- */
 
 /* --- Phase 9: ドラッグ&ドロップ・クリップボード --- */
 #define GUI_MAX_DROP_FILES   32
@@ -495,6 +507,7 @@ typedef struct {
     float scroll_y;           /* 現在のスクロール位置 */
     float content_h;          /* コンテンツ全高 */
     float saved_x, saved_y, saved_w;  /* レイアウト復元用 */
+    int   saved_panel_depth;  /* 水平グループかどうか判定用 */
     bool  active;
 } GuiScrollRegion;
 
@@ -703,6 +716,19 @@ static bool gui_find_font(char *out, size_t sz) {
                  home);
         if (access(out, F_OK) == 0) return true;
     }
+#ifdef __APPLE__
+    /* macOS: システムフォントにフォールバック (ヒラギノ角ゴシック) */
+    const char *sys_fonts[] = {
+        "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
+        "/System/Library/Fonts/Hiragino Sans GB W3.otf",
+        "/Library/Fonts/Arial Unicode.ttf",
+        NULL
+    };
+    for (int i = 0; sys_fonts[i]; i++) {
+        snprintf(out, sz, "%s", sys_fonts[i]);
+        if (access(out, F_OK) == 0) return true;
+    }
+#endif
     return false;
 }
 
@@ -873,7 +899,7 @@ static Value fn_app_create(int argc, Value *argv) {
         title,
         HJP_WINDOWPOS_CENTERED, HJP_WINDOWPOS_CENTERED,
         w, h,
-        HJP_WINDOW_OPENGL | HJP_WINDOW_RESIZABLE | HJP_WINDOW_HIGHDPI);
+        HJP_WINDOW_OPENGL | HJP_WINDOW_RESIZABLE | HJP_WINDOW_HIGHDPI | HJP_WINDOW_SHOWN);
     if (!win) {
         fprintf(stderr, "[hajimu_gui] ウィンドウ作成失敗: %s\n", "init failed");
         return hajimu_null();
@@ -2590,6 +2616,7 @@ static Value fn_horizontal_begin(int argc, Value *argv) {
     int d = g_cur->panel_depth;
     g_cur->saved_lay[d] = g_cur->lay;
     g_cur->panel_depth++;
+    g_cur->h_group_max_bottom = g_cur->lay.y;  /* 横並びグループのボトム追跡をリセット */
 
     return hajimu_null();
 }
@@ -2605,7 +2632,7 @@ static Value fn_horizontal_end(int argc, Value *argv) {
     int d = g_cur->panel_depth;
 
     /* 横並びで最も進んだ y を使用 */
-    float max_y = g_cur->lay.y;
+    float max_y = g_cur->h_group_max_bottom;  /* 子ウィンドウが更新した最大ボトム */
     g_cur->lay = g_cur->saved_lay[d];
     if (max_y > g_cur->lay.y) g_cur->lay.y = max_y;
 
@@ -3221,6 +3248,21 @@ static Value fn_tab_content(int argc, Value *argv) {
 static Value fn_menubar_begin(int argc, Value *argv) {
     (void)argc; (void)argv;
     if (!g_cur) return hajimu_null();
+
+#ifdef __APPLE__
+    if (g_use_native_menubar) {
+        /* ネイティブメニューバー: 初回のみ構築 */
+        if (!g_native_menubar_built) {
+            hjp_native_menubar_init();
+            g_native_build_phase = true;
+        }
+        /* 毎フレーム: クリックされた項目のタグを取得 */
+        g_native_clicked_tag = hjp_native_menubar_poll_clicked();
+        g_menubar_active = true;
+        return hajimu_null();
+    }
+#endif
+
     g_menubar_active = true;
     g_menubar_cursor_x = 0;
     Hjpcontext *vg = g_cur->vg;
@@ -3243,6 +3285,19 @@ static Value fn_menubar_begin(int argc, Value *argv) {
 static Value fn_menubar_end(int argc, Value *argv) {
     (void)argc; (void)argv;
     g_menubar_active = false;
+
+#ifdef __APPLE__
+    if (g_use_native_menubar) {
+        if (g_native_build_phase) {
+            hjp_native_menubar_end_menu();
+            g_native_menubar_built = true;
+            g_native_build_phase = false;
+        }
+        /* ネイティブメニュー: レイアウトを進めない (描画なし) */
+        return hajimu_null();
+    }
+#endif
+
     if (g_cur && g_cur->lay.y < GUI_MENUBAR_H + GUI_MARGIN)
         g_cur->lay.y = GUI_MENUBAR_H + GUI_MARGIN;
     return hajimu_null();
@@ -3254,6 +3309,22 @@ static Value fn_menubar_end(int argc, Value *argv) {
 static Value fn_menu(int argc, Value *argv) {
     if (!g_cur || argc < 1 || argv[0].type != VALUE_STRING)
         return hajimu_bool(false);
+
+#ifdef __APPLE__
+    if (g_use_native_menubar) {
+        const char *name = argv[0].string.data;
+        if (g_native_build_phase) {
+            /* 前のメニューがあれば閉じる */
+            if (g_native_menu_prefix[0])
+                hjp_native_menubar_end_menu();
+            hjp_native_menubar_begin_menu(name);
+            snprintf(g_native_menu_prefix, sizeof(g_native_menu_prefix),
+                     "%s", name);
+        }
+        /* ネイティブモード: 常にtrue (項目を処理するため) */
+        return hajimu_bool(true);
+    }
+#endif
 
     Hjpcontext *vg = g_cur->vg;
     const char *name = argv[0].string.data;
@@ -3298,9 +3369,30 @@ static Value fn_menu(int argc, Value *argv) {
  * メニュー項目(名前 [, ショートカット]) → 真偽
  * ---------------------------------------------------------------*/
 static Value fn_menu_item(int argc, Value *argv) {
-    if (!g_cur || argc < 1 || argv[0].type != VALUE_STRING ||
-        g_menu_open == 0)
+    if (!g_cur || argc < 1 || argv[0].type != VALUE_STRING)
         return hajimu_bool(false);
+
+#ifdef __APPLE__
+    if (g_use_native_menubar) {
+        const char *name = argv[0].string.data;
+        const char *shortcut = (argc >= 2 && argv[1].type == VALUE_STRING)
+                              ? argv[1].string.data : NULL;
+        /* タグ = メニュー名 + "." + 項目名 のハッシュ */
+        char tagbuf[256];
+        snprintf(tagbuf, sizeof(tagbuf), "%s.%s", g_native_menu_prefix, name);
+        uint32_t tag = gui_hash(tagbuf);
+
+        if (g_native_build_phase) {
+            hjp_native_menubar_add_item(name, shortcut, tag);
+        }
+        /* クリック検知 */
+        bool clicked = (g_native_clicked_tag == tag);
+        if (clicked) g_native_clicked_tag = 0;
+        return hajimu_bool(clicked);
+    }
+#endif
+
+    if (g_menu_open == 0) return hajimu_bool(false);
 
     Hjpcontext *vg = g_cur->vg;
     const char *name = argv[0].string.data;
@@ -3343,7 +3435,17 @@ static Value fn_menu_item(int argc, Value *argv) {
  * ---------------------------------------------------------------*/
 static Value fn_menu_separator_item(int argc, Value *argv) {
     (void)argc; (void)argv;
-    if (!g_cur || g_menu_open == 0) return hajimu_null();
+    if (!g_cur) return hajimu_null();
+
+#ifdef __APPLE__
+    if (g_use_native_menubar) {
+        if (g_native_build_phase)
+            hjp_native_menubar_add_separator();
+        return hajimu_null();
+    }
+#endif
+
+    if (g_menu_open == 0) return hajimu_null();
     Hjpcontext *vg = g_cur->vg;
     float iy = g_menu_y + GUI_MENU_ITEM_H * g_menu_item_idx;
     hjpBeginPath(vg);
@@ -3415,15 +3517,20 @@ static Value fn_file_dialog(int argc, Value *argv) {
 
     char cmd[512];
 #ifdef __APPLE__
-    if (strstr(mode, "\xe4\xbf\x9d\xe5\xad\x98") != NULL)
+    if (strstr(mode, "\xe4\xbf\x9d\xe5\xad\x98") != NULL)         /* 保存 */
         snprintf(cmd, sizeof(cmd),
             "osascript -e 'POSIX path of (choose file name)' 2>/dev/null");
+    else if (strstr(mode, "\xe3\x83\x95\xe3\x82\xa9\xe3\x83\xab\xe3\x83\x80") != NULL) /* フォルダ */
+        snprintf(cmd, sizeof(cmd),
+            "osascript -e 'POSIX path of (choose folder)' 2>/dev/null");
     else
         snprintf(cmd, sizeof(cmd),
             "osascript -e 'POSIX path of (choose file)' 2>/dev/null");
 #elif defined(__linux__)
     if (strstr(mode, "\xe4\xbf\x9d\xe5\xad\x98") != NULL)
         snprintf(cmd, sizeof(cmd), "zenity --file-selection --save 2>/dev/null");
+    else if (strstr(mode, "\xe3\x83\x95\xe3\x82\xa9\xe3\x83\xab\xe3\x83\x80") != NULL) /* フォルダ */
+        snprintf(cmd, sizeof(cmd), "zenity --file-selection --directory 2>/dev/null");
     else
         snprintf(cmd, sizeof(cmd), "zenity --file-selection 2>/dev/null");
 #else
@@ -3564,6 +3671,8 @@ static Value fn_canvas_begin(int argc, Value *argv) {
     g_canvas_active = true;
     g_canvas_ox = x;
     g_canvas_oy = y;
+    g_canvas_w  = w;
+    g_canvas_h  = h;
     gui_advance(h);
     return hajimu_null();
 }
@@ -3577,7 +3686,120 @@ static Value fn_canvas_end(int argc, Value *argv) {
     return hajimu_null();
 }
 
-/* 線(x1,y1,x2,y2[,色,太さ]) */
+/* ---------------------------------------------------------------
+ * キャンバスクリック() → 真偽  (キャンバス内でクリックされた)
+ * ---------------------------------------------------------------*/
+static Value fn_canvas_click(int argc, Value *argv) {
+    (void)argc; (void)argv;
+    if (!g_cur || !g_canvas_active) return hajimu_bool(false);
+    float mx = g_cur->in.mx - g_canvas_ox;
+    float my = g_cur->in.my - g_canvas_oy;
+    bool inside = (mx >= 0 && my >= 0 && mx < g_canvas_w && my < g_canvas_h);
+    return hajimu_bool(inside && g_cur->in.clicked);
+}
+
+/* キャンバスマウス() → {x, y}  (キャンバス相対マウス位置) */
+static Value fn_canvas_mouse(int argc, Value *argv) {
+    (void)argc; (void)argv;
+    if (!g_cur) return hajimu_null();
+    Value d = make_dict();
+    dict_set(&d, "x", hajimu_number(g_cur->in.mx - g_canvas_ox));
+    dict_set(&d, "y", hajimu_number(g_cur->in.my - g_canvas_oy));
+    return d;
+}
+
+/* キャンバス押下中() → 真偽  (キャンバス内でボタン押しっぱなし) */
+static Value fn_canvas_down(int argc, Value *argv) {
+    (void)argc; (void)argv;
+    if (!g_cur || !g_canvas_active) return hajimu_bool(false);
+    float mx = g_cur->in.mx - g_canvas_ox;
+    float my = g_cur->in.my - g_canvas_oy;
+    bool inside = (mx >= 0 && my >= 0 && mx < g_canvas_w && my < g_canvas_h);
+    return hajimu_bool(inside && g_cur->in.down);
+}
+
+/* キャンバス矩形塗り(x, y, w, h, r, g, b, a) → 無 */
+static Value fn_canvas_fill_rect(int argc, Value *argv) {
+    if (!g_cur || argc < 8) return hajimu_null();
+    Hjpcontext *vg = g_cur->vg;
+    float cx = (float)argv[0].number;
+    float cy = (float)argv[1].number;
+    float cw = (float)argv[2].number;
+    float ch = (float)argv[3].number;
+    float r  = (float)argv[4].number;
+    float g_ = (float)argv[5].number;
+    float b  = (float)argv[6].number;
+    float a  = (float)argv[7].number;
+    hjpBeginPath(vg);
+    hjpRect(vg, cx, cy, cw, ch);
+    hjpFillColor(vg, hjpRGBAf(r, g_, b, a));
+    hjpFill(vg);
+    return hajimu_null();
+}
+
+/* キャンバス矩形線(x, y, w, h, r, g, b, a[, 太さ]) → 無 */
+static Value fn_canvas_stroke_rect(int argc, Value *argv) {
+    if (!g_cur || argc < 8) return hajimu_null();
+    Hjpcontext *vg = g_cur->vg;
+    float cx    = (float)argv[0].number;
+    float cy    = (float)argv[1].number;
+    float cw    = (float)argv[2].number;
+    float ch    = (float)argv[3].number;
+    float r     = (float)argv[4].number;
+    float g_    = (float)argv[5].number;
+    float b     = (float)argv[6].number;
+    float a     = (float)argv[7].number;
+    float thick = (argc >= 9) ? (float)argv[8].number : 1.0f;
+    hjpBeginPath(vg);
+    hjpRect(vg, cx, cy, cw, ch);
+    hjpStrokeColor(vg, hjpRGBAf(r, g_, b, a));
+    hjpStrokeWidth(vg, thick);
+    hjpStroke(vg);
+    return hajimu_null();
+}
+
+/* キャンバス線(x1, y1, x2, y2, r, g, b, a[, 太さ]) → 無 */
+static Value fn_canvas_line(int argc, Value *argv) {
+    if (!g_cur || argc < 8) return hajimu_null();
+    Hjpcontext *vg = g_cur->vg;
+    float x1    = (float)argv[0].number;
+    float y1    = (float)argv[1].number;
+    float x2    = (float)argv[2].number;
+    float y2    = (float)argv[3].number;
+    float r     = (float)argv[4].number;
+    float g_    = (float)argv[5].number;
+    float b     = (float)argv[6].number;
+    float a     = (float)argv[7].number;
+    float thick = (argc >= 9) ? (float)argv[8].number : 1.0f;
+    hjpBeginPath(vg);
+    hjpMoveTo(vg, x1, y1);
+    hjpLineTo(vg, x2, y2);
+    hjpStrokeColor(vg, hjpRGBAf(r, g_, b, a));
+    hjpStrokeWidth(vg, thick);
+    hjpStroke(vg);
+    return hajimu_null();
+}
+
+/* キャンバステキスト(テキスト, x, y, r, g, b, a) → 無 */
+static Value fn_canvas_text(int argc, Value *argv) {
+    if (!g_cur || argc < 7) return hajimu_null();
+    if (argv[0].type != VALUE_STRING) return hajimu_null();
+    Hjpcontext *vg = g_cur->vg;
+    float x  = (float)argv[1].number;
+    float y  = (float)argv[2].number;
+    float r  = (float)argv[3].number;
+    float g_ = (float)argv[4].number;
+    float b  = (float)argv[5].number;
+    float a  = (float)argv[6].number;
+    hjpFontFaceId(vg, g_cur->font_id);
+    hjpFontSize(vg, GUI_FONT_SIZE);
+    hjpTextAlign(vg, HJP_ALIGN_LEFT | HJP_ALIGN_TOP);
+    hjpFillColor(vg, hjpRGBAf(r, g_, b, a));
+    hjpText(vg, x, y, argv[0].string.data, NULL);
+    return hajimu_null();
+}
+
+
 static Value fn_draw_line(int argc, Value *argv) {
     if (!g_cur || argc < 4) return hajimu_null();
     Hjpcontext *vg = g_cur->vg;
@@ -3886,6 +4108,17 @@ static Value fn_theme_font(int argc, Value *argv) {
     if (argc >= 2 && argv[1].type == VALUE_NUMBER)
         g_custom_font_size = (float)argv[1].number;
     (void)argv;
+    return hajimu_null();
+}
+
+/* ネイティブメニューバー() — macOSでネイティブメニューバーを使用 */
+static Value fn_native_menubar(int argc, Value *argv) {
+    (void)argc; (void)argv;
+#ifdef __APPLE__
+    g_use_native_menubar = true;
+    g_native_menubar_built = false;
+    g_native_menu_prefix[0] = '\0';
+#endif
     return hajimu_null();
 }
 
@@ -6359,11 +6592,21 @@ static Value fn_child_begin(int argc, Value *argv) {
     gui_pos(&x, &y, &w);
     if (cw > w) cw = w;
 
+    /* -1 = 残り全幅/全高 (ImGui 慣例) */
+    if (cw <= 0) cw = w;
+    if (ch <= 0) ch = (float)g_cur->win_h - y - GUI_PADDING;
+
+    /* -1 = 残り全幅/全高 (ImGui 慣例) */
+    if (cw <= 0) cw = w;
+    if (ch <= 0) ch = (float)g_cur->win_h - y - GUI_PADDING;
+    if (ch < 1) ch = 1;  /* 最低1pxを保証 */
+
     GuiScrollRegion *sr = &g_scrolls[slot];
     sr->x = x; sr->y = y; sr->w = cw; sr->h = ch;
     sr->saved_x = g_cur->lay.x;
     sr->saved_y = g_cur->lay.y;
     sr->saved_w = g_cur->lay.w;
+    sr->saved_panel_depth = g_cur->panel_depth;
     sr->content_h = 0;
     sr->active = true;
 
@@ -6399,9 +6642,20 @@ static Value fn_child_end(int argc, Value *argv) {
             GuiScrollRegion *sr = &g_scrolls[i];
             sr->content_h = (g_cur->lay.y + sr->scroll_y) - sr->y;
             hjpRestore(g_cur->vg);
-            g_cur->lay.x = sr->saved_x;
-            g_cur->lay.y = sr->saved_y + sr->h + GUI_MARGIN;
-            g_cur->lay.w = sr->saved_w;
+            if (sr->saved_panel_depth > 0) {
+                /* 横並びコンテキスト: X を進め、Y は開始位置を維持して次の兄弟が同じ高さで描画できるようにする */
+                float bottom = sr->saved_y + sr->h + GUI_MARGIN;
+                if (bottom > g_cur->h_group_max_bottom) g_cur->h_group_max_bottom = bottom;
+                g_cur->lay.x = sr->x + sr->w + GUI_MARGIN;
+                g_cur->lay.y = sr->saved_y;  /* 次の兄弟が同じ開始Yになるよう維持 */
+                g_cur->lay.w = sr->saved_w - (sr->x - sr->saved_x) - sr->w - GUI_MARGIN;
+                if (g_cur->lay.w < 1) g_cur->lay.w = 1;
+            } else {
+                /* 縦積みコンテキスト: Y を進め、X は戻す */
+                g_cur->lay.x = sr->saved_x;
+                g_cur->lay.y = sr->saved_y + sr->h + GUI_MARGIN;
+                g_cur->lay.w = sr->saved_w;
+            }
             sr->active = false;
             break;
         }
@@ -8804,8 +9058,8 @@ static Value fn_toggle_button(int argc, Value *argv) {
 
     uint32_t id = gui_hash(label);
     bool hov, pressed;
-    gui_widget_logic(id, x, y, tw, h, &hov, &pressed);
-    if (pressed) state = !state;
+    bool clicked = gui_widget_logic(id, x, y, tw, h, &hov, &pressed);
+    if (clicked) state = !state;
 
     /* 描画 — アクティブ時はアクセントカラー */
     hjpBeginPath(vg);
@@ -21911,6 +22165,13 @@ static HajimuPluginFunc gui_functions[] = {
     /* --- Phase 7: カスタム描画 --- */
     {"キャンバス開始",       fn_canvas_begin,  3, 3},
     {"キャンバス終了",       fn_canvas_end,    0, 0},
+    {"キャンバスクリック",   fn_canvas_click,  0, 0},
+    {"キャンバスマウス",     fn_canvas_mouse,  0, 0},
+    {"キャンバス押下中",     fn_canvas_down,   0, 0},
+    {"キャンバス矩形塗り",   fn_canvas_fill_rect,   8, 8},
+    {"キャンバス矩形線",     fn_canvas_stroke_rect, 8, 9},
+    {"キャンバス線",         fn_canvas_line,        8, 9},
+    {"キャンバステキスト",   fn_canvas_text,        7, 7},
     {"線",                   fn_draw_line,     4, 6},
     {"矩形",                 fn_draw_rect,     4, 5},
     {"矩形枠",               fn_draw_rect_stroke, 4, 6},
@@ -21936,6 +22197,7 @@ static HajimuPluginFunc gui_functions[] = {
     {"テーマ設定",           fn_theme_set,     1, 1},
     {"テーマ色",             fn_theme_color,   2, 2},
     {"テーマフォント",       fn_theme_font,    1, 2},
+    {"ネイティブメニューバー", fn_native_menubar, 0, 0},
     {"スタイル設定",         fn_style_set,     2, 2},
     {"フォント読み込み",     fn_font_load,     2, 2},
     {"フォントサイズ",       fn_font_size_set, 1, 1},

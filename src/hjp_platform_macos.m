@@ -75,6 +75,111 @@ static bool hjp__popEvent(HjpEvent *e) {
 }
 
 /* =====================================================================
+ * ネイティブメニューバー
+ * ===================================================================*/
+@interface HjpMenuTarget : NSObject
+- (void)menuAction:(id)sender;
+@end
+
+static HjpMenuTarget *g_menuTarget = nil;
+static volatile uint32_t g_menuClickedTag = 0;
+static NSMenu *g_buildingSubMenu = nil;
+
+@implementation HjpMenuTarget
+- (void)menuAction:(id)sender {
+    NSMenuItem *item = (NSMenuItem *)sender;
+    g_menuClickedTag = (uint32_t)item.tag;
+}
+@end
+
+void hjp_native_menubar_init(void) {
+    @autoreleasepool {
+        if (!g_menuTarget) g_menuTarget = [[HjpMenuTarget alloc] init];
+        NSMenu *mainMenu = [NSApp mainMenu];
+        /* Keep app menu (index 0), remove rest */
+        while ([mainMenu numberOfItems] > 1) {
+            [mainMenu removeItemAtIndex:1];
+        }
+        g_buildingSubMenu = nil;
+    }
+}
+
+void hjp_native_menubar_begin_menu(const char *title) {
+    @autoreleasepool {
+        NSString *t = [NSString stringWithUTF8String:title];
+        NSMenuItem *menuItem = [[NSMenuItem alloc] initWithTitle:t
+                                                         action:nil
+                                                  keyEquivalent:@""];
+        g_buildingSubMenu = [[NSMenu alloc] initWithTitle:t];
+        [menuItem setSubmenu:g_buildingSubMenu];
+        [[NSApp mainMenu] addItem:menuItem];
+    }
+}
+
+void hjp_native_menubar_add_item(const char *title, const char *shortcut, uint32_t tag) {
+    if (!g_buildingSubMenu) return;
+    @autoreleasepool {
+        NSString *t = [NSString stringWithUTF8String:title];
+        NSString *key = @"";
+        NSUInteger mask = 0;
+
+        if (shortcut && *shortcut) {
+            const char *rest = shortcut;
+            /* Parse modifiers: Ctrl+/Cmd+/Shift+/Alt+ */
+            while (1) {
+                if (strncmp(rest, "Ctrl+", 5) == 0) {
+                    mask |= NSEventModifierFlagCommand; rest += 5;
+                } else if (strncmp(rest, "Cmd+", 4) == 0) {
+                    mask |= NSEventModifierFlagCommand; rest += 4;
+                } else if (strncmp(rest, "Shift+", 6) == 0) {
+                    mask |= NSEventModifierFlagShift; rest += 6;
+                } else if (strncmp(rest, "Alt+", 4) == 0) {
+                    mask |= NSEventModifierFlagOption; rest += 4;
+                } else break;
+            }
+            /* Parse key */
+            if (rest[0] == 'F' && rest[1] >= '1' && rest[1] <= '9') {
+                int fn = atoi(rest + 1);
+                if (fn >= 1 && fn <= 15) {
+                    unichar fkey = NSF1FunctionKey + (fn - 1);
+                    key = [NSString stringWithCharacters:&fkey length:1];
+                    /* Function keys: modifier なし (system items only) */
+                    mask = 0;
+                }
+            } else if (*rest) {
+                char lower = tolower(*rest);
+                key = [NSString stringWithFormat:@"%c", lower];
+            }
+        }
+
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:t
+                                                      action:@selector(menuAction:)
+                                               keyEquivalent:key];
+        [item setKeyEquivalentModifierMask:mask];
+        [item setTarget:g_menuTarget];
+        [item setTag:(NSInteger)tag];
+        [g_buildingSubMenu addItem:item];
+    }
+}
+
+void hjp_native_menubar_add_separator(void) {
+    if (!g_buildingSubMenu) return;
+    @autoreleasepool {
+        [g_buildingSubMenu addItem:[NSMenuItem separatorItem]];
+    }
+}
+
+void hjp_native_menubar_end_menu(void) {
+    g_buildingSubMenu = nil;
+}
+
+uint32_t hjp_native_menubar_poll_clicked(void) {
+    uint32_t tag = g_menuClickedTag;
+    g_menuClickedTag = 0;
+    return tag;
+}
+
+/* =====================================================================
  * キーコード変換
  * ===================================================================*/
 static HjpKeycode hjp__macKeyToHjp(unsigned short keyCode) {
@@ -322,8 +427,8 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
 @implementation HjpAppDelegate
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     (void)notification;
-    [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
-    [NSApp activateIgnoringOtherApps:YES];
+    [[NSRunningApplication currentApplication]
+        activateWithOptions:NSApplicationActivateIgnoringOtherApps];
 }
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
     (void)sender;
@@ -341,6 +446,8 @@ bool hjp_init(void) {
     if (g_hjp.initialized) return true;
     @autoreleasepool {
         [NSApplication sharedApplication];
+        /* activationPolicy は finishLaunching より前に設定する必要がある (macOS 10.14+) */
+        [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
         g_hjp.appDelegate = [[HjpAppDelegate alloc] init];
         [NSApp setDelegate:g_hjp.appDelegate];
         /* メニューバー */
@@ -353,6 +460,15 @@ bool hjp_init(void) {
         [appMenuItem setSubmenu:appMenu];
         /* Finish launching */
         [NSApp finishLaunching];
+        /* macOS 15: finishLaunching 後にrunloopを回して初期化を完了させる */
+        {
+            NSEvent *ev = [NSApp nextEventMatchingMask:NSEventMaskAny
+                                            untilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]
+                                               inMode:NSDefaultRunLoopMode
+                                              dequeue:YES];
+            if (ev) [NSApp sendEvent:ev];
+            [NSApp updateWindows];
+        }
         mach_timebase_info(&g_hjp.timebase);
         g_hjp.startTime = mach_absolute_time();
         g_hjp.initialized = true;
@@ -424,7 +540,22 @@ HjpWindow *hjp_window_create(const char *title, int x, int y, int w, int h, uint
         }
 
         if (flags & HJP_WINDOW_SHOWN) {
+            /* macOS 15 Sequoia: orderFrontRegardless でフォーカス制限を迂回 */
+            [win->nswin setLevel:NSNormalWindowLevel];
             [win->nswin makeKeyAndOrderFront:nil];
+            [win->nswin orderFrontRegardless];
+            [win->nswin display];
+            [[NSRunningApplication currentApplication]
+                activateWithOptions:NSApplicationActivateIgnoringOtherApps];
+            /* runloop を数回ポンプして Cocoa にウィンドウを描画させる */
+            for (int _i = 0; _i < 5; _i++) {
+                NSEvent *_ev = [NSApp nextEventMatchingMask:NSEventMaskAny
+                                                 untilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]
+                                                    inMode:NSDefaultRunLoopMode
+                                                   dequeue:YES];
+                if (_ev) [NSApp sendEvent:_ev];
+                [NSApp updateWindows];
+            }
         }
 
         g_hjp.mainWindow = win;
@@ -769,11 +900,18 @@ int hjp_font_get_glyph(HjpFont font, float size, uint32_t codepoint,
         CGContextSetAllowsAntialiasing(cgctx, true);
         CGContextSetShouldAntialias(cgctx, true);
 
-        /* Draw glyph */
+        /* CTFontDrawGlyphs は macOS 14 で deprecated のため
+         * CTFontCreatePathForGlyph でパスを取得してフィル (CG の Y-up 座標系) */
         CGPoint pos = CGPointMake(-bbox.origin.x + 1, -bbox.origin.y + 1);
-        CTFontDrawGlyphs(ctFont, &glyph, &pos, 1, cgctx);
+        CGContextTranslateCTM(cgctx, pos.x, pos.y);
+        CGPathRef glyphPath = CTFontCreatePathForGlyph(ctFont, glyph, NULL);
+        if (glyphPath) {
+            CGContextAddPath(cgctx, glyphPath);
+            CGContextFillPath(cgctx);
+            CGPathRelease(glyphPath);
+        }
 
-        /* CoreGraphics はY-up → 上下反転 */
+        /* CoreGraphics は Y-up → 上下反転して Y-down ビットマップに */
         unsigned char *flipped = (unsigned char*)malloc(gw * gh);
         for (int row = 0; row < gh; row++)
             memcpy(flipped + row * gw, buf + (gh - 1 - row) * gw, gw);
