@@ -3551,6 +3551,61 @@ static Value fn_file_dialog(int argc, Value *argv) {
 }
 
 /* ---------------------------------------------------------------
+ * ファイルコピー(コピー元, コピー先) → 真偽
+ *
+ * はじむ標準の文字列経由コピーでは NUL を含む画像・音声を保持できないため、
+ * GUI で選択した素材をそのままプロジェクトへ取り込む用途に提供する。
+ * ---------------------------------------------------------------*/
+static Value fn_file_copy(int argc, Value *argv) {
+    if (argc < 2 || argv[0].type != VALUE_STRING ||
+        argv[1].type != VALUE_STRING) {
+        return hajimu_bool(false);
+    }
+
+    const char *src_path = argv[0].string.data;
+    const char *dst_path = argv[1].string.data;
+    if (!src_path || !dst_path || src_path[0] == '\0' || dst_path[0] == '\0') {
+        return hajimu_bool(false);
+    }
+    if (strcmp(src_path, dst_path) == 0) {
+        return hajimu_bool(true);
+    }
+
+    FILE *src = fopen(src_path, "rb");
+    if (!src) {
+        return hajimu_bool(false);
+    }
+    FILE *dst = fopen(dst_path, "wb");
+    if (!dst) {
+        fclose(src);
+        return hajimu_bool(false);
+    }
+
+    unsigned char buffer[64 * 1024];
+    bool ok = true;
+    size_t bytes_read = 0;
+    while ((bytes_read = fread(buffer, 1, sizeof(buffer), src)) > 0) {
+        if (fwrite(buffer, 1, bytes_read, dst) != bytes_read) {
+            ok = false;
+            break;
+        }
+    }
+    if (ferror(src) || fflush(dst) != 0) {
+        ok = false;
+    }
+    if (fclose(src) != 0) {
+        ok = false;
+    }
+    if (fclose(dst) != 0) {
+        ok = false;
+    }
+    if (!ok) {
+        remove(dst_path);
+    }
+    return hajimu_bool(ok);
+}
+
+/* ---------------------------------------------------------------
  * メッセージ(タイトル, 内容, 種類) → 真偽
  * ---------------------------------------------------------------*/
 static Value fn_message(int argc, Value *argv) {
@@ -22160,6 +22215,8 @@ static HajimuPluginFunc gui_functions[] = {
     {"メニューセパレーター", fn_menu_separator_item, 0, 0},
     {"ダイアログ",           fn_dialog,        2, 2},
     {"ファイルダイアログ",   fn_file_dialog,   0, 2},
+    {"ファイルコピー",       fn_file_copy,     2, 2},
+    {"file_copy",             fn_file_copy,     2, 2},
     {"メッセージ",           fn_message,       3, 3},
     {"トースト",             fn_toast,         1, 2},
     /* --- Phase 7: カスタム描画 --- */
@@ -23407,7 +23464,7 @@ static HajimuPluginFunc gui_functions[] = {
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.0.0",
+        .version        = "14.0.1",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,

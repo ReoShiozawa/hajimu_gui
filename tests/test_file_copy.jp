@@ -1,0 +1,14 @@
+// バイナリ中の NUL バイトを保持したままコピーできることは、
+// 呼び出し側の cmp で確認する。入力・出力パスはテスト専用の固定値とする。
+取り込む "hajimu_gui" として GUI
+
+変数 成功 = GUI.ファイルコピー("/tmp/hajimu_gui_copy_input.bin", "/tmp/hajimu_gui_copy_output.bin")
+表明(成功, "ファイルコピーが失敗しました")
+
+変数 英語別名成功 = GUI.file_copy("/tmp/hajimu_gui_copy_input.bin", "/tmp/hajimu_gui_copy_output_en.bin")
+表明(英語別名成功, "file_copy alias failed")
+
+変数 不在 = GUI.ファイルコピー("/tmp/hajimu_gui_missing.bin", "/tmp/hajimu_gui_copy_missing.bin")
+表明(不在 == 偽, "存在しないコピー元を成功扱いにしてはいけません")
+
+表示("file copy tests passed")
