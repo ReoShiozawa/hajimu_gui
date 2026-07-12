@@ -1,0 +1,14 @@
+取り込む "hajimu_gui" として GUI
+
+変数 対象 = "/tmp/hajimu_gui_delete_target.txt"
+書き込む(対象, "delete me")
+表明(GUI.ファイル削除(対象), "ファイル削除が失敗しました")
+表明(ファイル存在(対象) == 偽, "削除後もファイルが残っています")
+
+表明(GUI.file_delete(対象) == 偽, "不在ファイルの削除は失敗を返す必要があります")
+
+変数 ディレクトリ = "/tmp/hajimu_gui_delete_directory"
+ディレクトリ作成(ディレクトリ)
+表明(GUI.ファイル削除(ディレクトリ) == 偽, "ディレクトリを削除してはいけません")
+
+表示("file delete tests passed")

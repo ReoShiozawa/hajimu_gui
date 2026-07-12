@@ -3606,6 +3606,39 @@ static Value fn_file_copy(int argc, Value *argv) {
 }
 
 /* ---------------------------------------------------------------
+ * ファイル削除(パス) → 真偽
+ *
+ * 素材管理などで通常ファイルを明示的に削除するための最小API。
+ * ディレクトリは誤操作の被害が大きいため受け付けない。
+ * ---------------------------------------------------------------*/
+static Value fn_file_delete(int argc, Value *argv) {
+    if (argc < 1 || argv[0].type != VALUE_STRING) {
+        return hajimu_bool(false);
+    }
+
+    const char *path = argv[0].string.data;
+    if (!path || path[0] == '\0') {
+        return hajimu_bool(false);
+    }
+
+    /* 通常ファイルとして開いて1バイト読み、ディレクトリを除外する。 */
+    FILE *probe = fopen(path, "rb");
+    if (!probe) {
+        return hajimu_bool(false);
+    }
+    (void)fgetc(probe);
+    bool is_file = !ferror(probe);
+    if (fclose(probe) != 0) {
+        is_file = false;
+    }
+    if (!is_file) {
+        return hajimu_bool(false);
+    }
+
+    return hajimu_bool(remove(path) == 0);
+}
+
+/* ---------------------------------------------------------------
  * メッセージ(タイトル, 内容, 種類) → 真偽
  * ---------------------------------------------------------------*/
 static Value fn_message(int argc, Value *argv) {
@@ -22217,6 +22250,8 @@ static HajimuPluginFunc gui_functions[] = {
     {"ファイルダイアログ",   fn_file_dialog,   0, 2},
     {"ファイルコピー",       fn_file_copy,     2, 2},
     {"file_copy",             fn_file_copy,     2, 2},
+    {"ファイル削除",         fn_file_delete,   1, 1},
+    {"file_delete",           fn_file_delete,   1, 1},
     {"メッセージ",           fn_message,       3, 3},
     {"トースト",             fn_toast,         1, 2},
     /* --- Phase 7: カスタム描画 --- */
@@ -23464,7 +23499,7 @@ static HajimuPluginFunc gui_functions[] = {
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.0.1",
+        .version        = "14.0.2",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,
