@@ -1,8 +1,8 @@
 # hajimu_gui
 
-**はじむ言語用 GUI パッケージ v14.3.0** — 自作プラットフォーム層 + 即時モード GUI フレームワーク
+**はじむ言語用 GUI パッケージ v14.3.1** — 自作プラットフォーム層 + 即時モード GUI フレームワーク
 
-egui のシンプルさと PyQt の本格ウィジェットを融合した、**1,123関数**搭載の完全日本語 API GUI ライブラリです。
+egui のシンプルさと PyQt の本格ウィジェットを融合した、**1,127登録API**搭載の完全日本語 API GUI ライブラリです。
 
 ---
 
@@ -167,7 +167,7 @@ GUI.アプリ終了(アプリ)
 | `マウス位置` | — | {x, y} | マウスの現在位置 |
 | `マウスクリック` | — | 真偽 | このフレームでクリックされたか |
 
-> 全1,123関数の完全なリファレンスは [docs/REFERENCE.md](docs/REFERENCE.md) を参照してください。
+> 全1,127登録APIの完全なリファレンスは [docs/REFERENCE.md](docs/REFERENCE.md) を参照してください。
 
 ---
 
@@ -191,7 +191,7 @@ GUI.アプリ終了(アプリ)
 | **Phase 111-120** | v11.1.0 – v12.0.0 | PDF / エクスポート / ネットワーク / バリデーション | 994 |
 | **Phase 121-130** | v12.1.0 – v13.0.0 | 適応UI / スクロール物理 / リモートUI / 産業プロトコル | 1,074 |
 | **Phase 131-134** | v14.0.0 | 宣言的UI(VNodeツリー) / フレームスケジューラ / ホットリロード / DevTools | **1,101** |
-| **Maintenance** | v14.3.0 | Hajimu v1.5 ABI同期 / 制作ツール向けレイアウト・CJK描画・外部プロセス安定化 | **1,123** |
+| **Maintenance** | v14.3.1 | Hajimu v1.5 ABI同期 / 制作ツール向けレイアウト・CJK描画・画像寸法・外部プロセス安定化 | **1,127** |
 
 ---
 
@@ -218,7 +218,7 @@ jp-gui/
 ├── THIRD_PARTY_LICENSES.md     サードパーティライセンス
 ├── docs/
 │   ├── ROADMAP.md              開発ロードマップ (Phase 1-130)
-│   ├── REFERENCE.md            API リファレンス (全1,074関数)
+│   ├── REFERENCE.md            API リファレンス (全1,127登録API)
 │   ├── TUTORIAL.md             チュートリアル
 │   └── MISSING_FEATURES_ANALYSIS.md  フレームワーク比較分析
 ├── examples/
@@ -228,7 +228,7 @@ jp-gui/
 ├── fonts/
 │   └── NotoSansCJKjp-Regular.otf  日本語フォント同梱
 ├── src/
-│   ├── hajimu_gui.c            プラグイン本体 (全1,123登録API — 23,000行超)
+│   ├── hajimu_gui.c            プラグイン本体 (全1,127登録API — 23,000行超)
 │   ├── hjp_platform.h          プラットフォーム抽象化ヘッダ
 │   ├── hjp_platform_macos.m    macOS (Cocoa + OpenGL)
 │   ├── hjp_platform_linux.c    Linux (X11 + GLX)

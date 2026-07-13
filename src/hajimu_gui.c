@@ -4385,6 +4385,33 @@ static Value fn_image_load(int argc, Value *argv) {
     return hajimu_number(slot);
 }
 
+/* 画像幅(画像) / 画像高さ(画像) → 数値
+ *
+ * 読み込み時に保持した元画像の寸法を返す。プレビュー側で縦横比を
+ * 推測せず、実行時と同じ比率で描画するための問い合わせAPI。
+ */
+static Value fn_image_width(int argc, Value *argv) {
+    if (argc < 1 || argv[0].type != VALUE_NUMBER)
+        return hajimu_number(0);
+    if (!isfinite(argv[0].number) || argv[0].number < 0 || argv[0].number >= GUI_MAX_IMAGES)
+        return hajimu_number(0);
+    int slot = (int)argv[0].number;
+    if (!g_images[slot].valid)
+        return hajimu_number(0);
+    return hajimu_number(g_images[slot].w);
+}
+
+static Value fn_image_height(int argc, Value *argv) {
+    if (argc < 1 || argv[0].type != VALUE_NUMBER)
+        return hajimu_number(0);
+    if (!isfinite(argv[0].number) || argv[0].number < 0 || argv[0].number >= GUI_MAX_IMAGES)
+        return hajimu_number(0);
+    int slot = (int)argv[0].number;
+    if (!g_images[slot].valid)
+        return hajimu_number(0);
+    return hajimu_number(g_images[slot].h);
+}
+
 /* 画像描画(画像,x,y[,w,h]) */
 static Value fn_image_draw(int argc, Value *argv) {
     if (!g_cur || argc < 3 || argv[0].type != VALUE_NUMBER)
@@ -22720,6 +22747,10 @@ static HajimuPluginFunc gui_functions[] = {
     {"ベジェ",               fn_bezier,        6, 6},
     {"線形グラデーション",   fn_linear_gradient, 6, 6},
     {"画像読み込み",         fn_image_load,    1, 1},
+    {"画像幅",               fn_image_width,   1, 1},
+    {"image_width",          fn_image_width,   1, 1},
+    {"画像高さ",             fn_image_height,  1, 1},
+    {"image_height",         fn_image_height,  1, 1},
     {"画像描画",             fn_image_draw,    3, 5},
     {"描画テキスト",         fn_draw_text_at,  3, 4},
     {"変換保存",             fn_save_transform,  0, 0},
@@ -23947,7 +23978,7 @@ static HajimuPluginFunc gui_functions[] = {
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.3.0",
+        .version        = "14.3.1",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,

@@ -1,0 +1,10 @@
+// 画像寸法APIは無効なハンドルへ安全に0を返す。
+// 有効画像の寸法はKanameの描画結合テストで実画像を使って確認する。
+取り込む "hajimu_gui" として GUI
+
+表明(GUI.画像幅(-1) == 0, "無効な画像ハンドルの幅は0でなければなりません")
+表明(GUI.画像高さ(-1) == 0, "無効な画像ハンドルの高さは0でなければなりません")
+表明(GUI.image_width(99999) == 0, "image_width alias failed")
+表明(GUI.image_height(99999) == 0, "image_height alias failed")
+
+表示("image dimension tests passed")
