@@ -2065,14 +2065,20 @@ float hjpText(Hjpcontext *ctx, float x, float y, const char *str, const char *en
         float v0 = (g->y + g->h) * ih;   /* アトラス下端 → 画面上端 */
         float v1 = g->y * ih;             /* アトラス上端 → 画面下端 */
 
-        /* Two triangles = one quad (NanoVG CCW winding order) */
+        /* Two triangles = one quad (NanoVG CCW winding order)。
+         * キャンバス等の平行移動・拡大縮小を文字にも反映する。 */
+        float tlx, tly, trx, try_, blx, bly, brx, bry;
+        hjpTransformPoint(&tlx, &tly, s->xform, gx, gy);
+        hjpTransformPoint(&trx, &try_, s->xform, gx + gw, gy);
+        hjpTransformPoint(&blx, &bly, s->xform, gx, gy + gh);
+        hjpTransformPoint(&brx, &bry, s->xform, gx + gw, gy + gh);
         Hjpvertex *v = &ctx->glverts[vertOff + triCount];
-        hjp__vset(&v[0], gx,    gy,    u0, v0);       /* TL */
-        hjp__vset(&v[1], gx+gw, gy+gh, u1, v1);       /* BR */
-        hjp__vset(&v[2], gx+gw, gy,    u1, v0);       /* TR */
-        hjp__vset(&v[3], gx,    gy,    u0, v0);       /* TL */
-        hjp__vset(&v[4], gx,    gy+gh, u0, v1);       /* BL */
-        hjp__vset(&v[5], gx+gw, gy+gh, u1, v1);       /* BR */
+        hjp__vset(&v[0], tlx, tly, u0, v0);  /* TL */
+        hjp__vset(&v[1], brx, bry, u1, v1);  /* BR */
+        hjp__vset(&v[2], trx, try_, u1, v0); /* TR */
+        hjp__vset(&v[3], tlx, tly, u0, v0);  /* TL */
+        hjp__vset(&v[4], blx, bly, u0, v1);  /* BL */
+        hjp__vset(&v[5], brx, bry, u1, v1);  /* BR */
         triCount += 6;
 
         cx += g->advance + s->textLetterSpacing;
