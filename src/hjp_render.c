@@ -41,7 +41,9 @@
 #define HJP_MAX_IMAGES          256
 #define HJP_KAPPA90            0.5522847493f
 #define HJP_MAX_FONTIMAGE_SIZE 2048
-#define HJP_INIT_FONTIMAGE_SIZE 512
+/* CJKは同じ画面でも字種が多い。フレーム途中のアトラス再作成で、
+ * 先にキューへ積んだ文字が古いテクスチャを参照しないよう固定確保する。 */
+#define HJP_INIT_FONTIMAGE_SIZE HJP_MAX_FONTIMAGE_SIZE
 
 /* パスコマンド */
 enum {
@@ -1762,7 +1764,9 @@ static void hjp__fontAtlasInit(Hjpcontext *ctx) {
     /* RGBAフォーマット: 4 bytes/pixel */
     ctx->fontAtlasData = (unsigned char*)calloc(4, ctx->fontAtlasW * ctx->fontAtlasH);
     ctx->fontImageIdx = 0;
-    ctx->fontImages[0] = hjp__fontImageCreate(ctx, ctx->fontAtlasW, ctx->fontAtlasH);
+    ctx->fontImages[0] = hjp__renderCreateTexture(
+        ctx, HJP_TEXTURE_RGBA, ctx->fontAtlasW, ctx->fontAtlasH, 0,
+        ctx->fontAtlasData);
     ctx->glyphAtlasX = 1;
     ctx->glyphAtlasY = 1;
     ctx->glyphAtlasRowH = 0;
@@ -1850,14 +1854,17 @@ static HjpGlyph *hjp__renderGlyph(Hjpcontext *ctx, uint32_t cp, int fontId, floa
     if (gh > ctx->glyphAtlasRowH) ctx->glyphAtlasRowH = gh;
     ctx->glyphAtlasX += gw + 1;
 
-    /* Update atlas texture */
+    /* 追加したグリフ矩形だけを更新する。2048pxアトラス全体を文字ごとに
+     * 転送すると初回表示が重くなるため、行長を指定して部分転送する。 */
     HjpTexture *tex = hjp__findTexture(ctx, ctx->fontImages[0]);
     if (tex) {
         glBindTexture(GL_TEXTURE_2D, tex->tex);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, ctx->fontAtlasW, ctx->fontAtlasH,
-                        GL_RGBA, GL_UNSIGNED_BYTE, ctx->fontAtlasData);
-        glBindTexture(GL_TEXTURE_2D, 0);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, ctx->fontAtlasW);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, ax, ay, gw, gh,
+                        GL_RGBA, GL_UNSIGNED_BYTE,
+                        ctx->fontAtlasData + (ay * ctx->fontAtlasW + ax) * 4);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
         glBindTexture(GL_TEXTURE_2D, 0);
     }
 

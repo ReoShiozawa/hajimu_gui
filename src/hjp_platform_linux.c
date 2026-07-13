@@ -727,6 +727,8 @@ HjpCursor hjp_create_system_cursor(int id) {
         case HJP_CURSOR_IBEAM:     shape = XC_xterm; break;
         case HJP_CURSOR_CROSSHAIR: shape = XC_crosshair; break;
         case HJP_CURSOR_SIZEALL:   shape = XC_fleur; break;
+        case HJP_CURSOR_SIZEWE:    shape = XC_sb_h_double_arrow; break;
+        case HJP_CURSOR_SIZENS:    shape = XC_sb_v_double_arrow; break;
         default:                   shape = XC_left_ptr; break;
     }
     Cursor c = XCreateFontCursor(g_hjp.dpy, shape);

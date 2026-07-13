@@ -127,6 +127,8 @@ enum HjpSystemCursor {
     HJP_CURSOR_IBEAM,
     HJP_CURSOR_CROSSHAIR,
     HJP_CURSOR_SIZEALL,
+    HJP_CURSOR_SIZEWE,
+    HJP_CURSOR_SIZENS,
 };
 
 /* =====================================================================

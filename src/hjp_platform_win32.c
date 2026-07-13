@@ -804,6 +804,8 @@ HjpCursor hjp_create_system_cursor(int id) {
         case HJP_CURSOR_IBEAM:     cur = IDC_IBEAM; break;
         case HJP_CURSOR_CROSSHAIR: cur = IDC_CROSS; break;
         case HJP_CURSOR_SIZEALL:   cur = IDC_SIZEALL; break;
+        case HJP_CURSOR_SIZEWE:    cur = IDC_SIZEWE; break;
+        case HJP_CURSOR_SIZENS:    cur = IDC_SIZENS; break;
         default:                   cur = IDC_ARROW; break;
     }
     return (HjpCursor)LoadCursor(NULL, cur);

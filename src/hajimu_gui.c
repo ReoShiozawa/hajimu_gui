@@ -470,8 +470,33 @@ static GuiDragSource g_drag = {0};
 static bool  g_drag_active      = false;
 static char  g_drop_files[GUI_MAX_DROP_FILES][512];
 static int   g_drop_file_count  = 0;
-static int   g_cursor_type      = 0;   /* 0=arrow,1=hand,2=ibeam,3=crosshair,4=resize */
-static HjpCursor *g_cursors[5] = {NULL};
+static int   g_cursor_type      = 0;   /* 0=arrow,1=hand,2=ibeam,3=crosshair,4=all,5=WE,6=NS */
+static bool  g_auto_resize_cursor = false;
+static HjpCursor g_cursors[7] = {NULL};
+
+static void gui_apply_cursor_type(int type) {
+    if (type < 0 || type >= 7 || type == g_cursor_type) return;
+
+    int system_cursor;
+    switch (type) {
+        case 1: system_cursor = HJP_CURSOR_HAND; break;
+        case 2: system_cursor = HJP_CURSOR_IBEAM; break;
+        case 3: system_cursor = HJP_CURSOR_CROSSHAIR; break;
+        case 4: system_cursor = HJP_CURSOR_SIZEALL; break;
+        case 5: system_cursor = HJP_CURSOR_SIZEWE; break;
+        case 6: system_cursor = HJP_CURSOR_SIZENS; break;
+        default: system_cursor = HJP_CURSOR_ARROW; break;
+    }
+
+    HjpCursor cursor = g_cursors[type];
+    if (!cursor) {
+        cursor = hjp_create_system_cursor(system_cursor);
+        if (!cursor) return;
+        g_cursors[type] = cursor;
+    }
+    hjp_set_cursor(cursor);
+    g_cursor_type = type;
+}
 
 /* --- Phase 10: アニメーション --- */
 typedef struct {
@@ -574,6 +599,8 @@ static GuiAlign g_next_align = GUI_ALIGN_LEFT;
 #define GUI_AC_MAX_VISIBLE    6    /* オートコンプリート候補最大表示数 */
 static char g_placeholder[256] = {0};
 static bool g_disabled = false;    /* ウィジェット無効化フラグ */
+static int g_disabled_depth = 0;
+static GuiInput g_disabled_input_backup;
 
 /* --- Phase 14: チャート --- */
 #define GUI_CHART_PAD      30.0f
@@ -684,11 +711,29 @@ static float      g_next_opacity = 1.0f;  /* 次ウィジェットの透明度 *
  * ユーティリティ
  * ===================================================================*/
 
+/* 同じ表示名のウィジェットを別領域で安全に使うためのID範囲。 */
+#define GUI_ID_SCOPE_MAX 16
+static uint32_t g_id_scope_stack[GUI_ID_SCOPE_MAX];
+static int g_id_scope_depth = 0;
+
 /* FNV‑1a ハッシュ */
-static uint32_t gui_hash(const char *s) {
+static uint32_t gui_hash_raw(const char *s) {
     uint32_t h = 2166136261u;
     for (; *s; s++) { h ^= (uint8_t)*s; h *= 16777619u; }
     return h ? h : 1;          /* 0 は "なし" として予約 */
+}
+
+static uint32_t gui_hash(const char *s) {
+    uint32_t h = 2166136261u;
+    for (int i = 0; i < g_id_scope_depth; i++) {
+        uint32_t scope = g_id_scope_stack[i];
+        for (int b = 0; b < 4; b++) {
+            h ^= (uint8_t)((scope >> (b * 8)) & 0xFFu);
+            h *= 16777619u;
+        }
+    }
+    for (; *s; s++) { h ^= (uint8_t)*s; h *= 16777619u; }
+    return h ? h : 1;
 }
 
 /* --- シェル引数エスケープ (コマンドインジェクション対策) --- */
@@ -854,6 +899,14 @@ static inline void gui_pos(float *x, float *y, float *w) {
 static bool gui_widget_logic(uint32_t id,
                               float x, float y, float w, float h,
                               bool *hovered, bool *pressed) {
+    if (g_disabled) {
+        *hovered = false;
+        *pressed = false;
+        if (g_cur->active == id) g_cur->active = 0;
+        g_cur->last = (GuiLastWidget){x, y, w, h, false};
+        return false;
+    }
+
     bool hov = gui_hit((float)g_cur->in.mx, (float)g_cur->in.my, x, y, w, h);
 
     if (hov) g_cur->hot = id;
@@ -1169,11 +1222,18 @@ static Value fn_draw_loop(int argc, Value *argv) {
 
         hjpBeginFrame(app->vg, app->win_w, app->win_h, app->px_ratio);
 
+        /* 即時モードGUIではフレームをまたいだ描画状態を残さない。 */
+        hjpGlobalAlpha(app->vg, 1.0f);
+        g_auto_resize_cursor = false;
+
         /* レイアウト初期化 */
         app->lay = (GuiLayout){0, GUI_PADDING, (float)app->win_w, 0};
         app->panel_depth = 0;
         app->horizontal_depth = 0;
         app->layout_scope_depth = 0;
+        g_id_scope_depth = 0;
+        g_disabled = false;
+        g_disabled_depth = 0;
         app->hot = 0;
         app->tooltip_show = false;
         if (!g_th_init) gui_theme_set_dark();
@@ -1182,6 +1242,11 @@ static Value fn_draw_loop(int argc, Value *argv) {
         g_cur = app;
         g_frame_count++;
         hajimu_call(&callback, 0, NULL);
+
+        /* このフレームで分割バーに触れていなければ、一度だけ通常カーソルへ戻す。 */
+        if (!g_auto_resize_cursor && (g_cursor_type == 5 || g_cursor_type == 6)) {
+            gui_apply_cursor_type(0);
+        }
 
         /* ── タイマー発火 (Phase 10) ── */
         {
@@ -1300,7 +1365,17 @@ static Value fn_app_quit(int argc, Value *argv) {
     /* 全アプリ終了ならプラットフォームも解放 */
     bool any = false;
     for (int i = 0; i < GUI_MAX_APPS; i++) if (g_apps[i].valid) any = true;
-    if (!any) hjp_quit();
+    if (!any) {
+        for (int i = 0; i < 7; i++) {
+            if (g_cursors[i]) {
+                hjp_free_cursor(g_cursors[i]);
+                g_cursors[i] = NULL;
+            }
+        }
+        g_cursor_type = 0;
+        g_auto_resize_cursor = false;
+        hjp_quit();
+    }
 
     return hajimu_null();
 }
@@ -4645,21 +4720,10 @@ static Value fn_cursor_set(int argc, Value *argv) {
     else if (strstr(kind, "\xe3\x83\x86\xe3\x82\xad\xe3\x82\xb9\xe3\x83\x88") != NULL) type = 2;
     else if (strstr(kind, "\xe5\x8d\x81\xe5\xad\x97") != NULL)    type = 3;
     else if (strstr(kind, "\xe3\x83\xaa\xe3\x82\xb5\xe3\x82\xa4\xe3\x82\xba") != NULL) type = 4;
+    else if (strstr(kind, "\xe5\xb7\xa6\xe5\x8f\xb3") != NULL) type = 5;
+    else if (strstr(kind, "\xe4\xb8\x8a\xe4\xb8\x8b") != NULL) type = 6;
 
-    if (type != g_cursor_type) {
-        g_cursor_type = type;
-        int sc;
-        switch (type) {
-            case 1: sc = HJP_CURSOR_HAND; break;
-            case 2: sc = HJP_CURSOR_IBEAM; break;
-            case 3: sc = HJP_CURSOR_CROSSHAIR; break;
-            case 4: sc = HJP_CURSOR_SIZEALL; break;
-            default: sc = HJP_CURSOR_ARROW; break;
-        }
-        if (g_cursors[type]) hjp_free_cursor(g_cursors[type]);
-        g_cursors[type] = hjp_create_system_cursor(sc);
-        hjp_set_cursor(g_cursors[type]);
-    }
+    gui_apply_cursor_type(type);
     return hajimu_null();
 }
 
@@ -5816,6 +5880,114 @@ static Value fn_splitter(int argc, Value *argv) {
 }
 
 /* ---------------------------------------------------------------
+ * ID範囲開始(ID) / ID範囲終了()
+ *   表示名が同じウィジェットを領域ごとに一意に識別する。
+ * ---------------------------------------------------------------*/
+static Value fn_id_scope_begin(int argc, Value *argv) {
+    if (argc < 1 || argv[0].type != VALUE_STRING ||
+        g_id_scope_depth >= GUI_ID_SCOPE_MAX) {
+        return hajimu_bool(false);
+    }
+    g_id_scope_stack[g_id_scope_depth++] = gui_hash_raw(argv[0].string.data);
+    return hajimu_bool(true);
+}
+
+static Value fn_id_scope_end(int argc, Value *argv) {
+    (void)argc; (void)argv;
+    if (g_id_scope_depth <= 0) return hajimu_bool(false);
+    g_id_scope_depth--;
+    return hajimu_bool(true);
+}
+
+/* ---------------------------------------------------------------
+ * 分割バー(ID, 方向, 長さ, 位置, 最小, 最大) → 位置
+ *   横並び・縦並びの間へ置ける、全長を掴めるリサイズバー。
+ * ---------------------------------------------------------------*/
+static Value fn_split_bar(int argc, Value *argv) {
+    if (!g_cur || argc < 6 || argv[0].type != VALUE_STRING ||
+        argv[1].type != VALUE_STRING) {
+        return (argc >= 4 && argv[3].type == VALUE_NUMBER)
+            ? argv[3] : hajimu_number(0);
+    }
+
+    const char *id_text = argv[0].string.data;
+    const char *direction = argv[1].string.data;
+    float length = (float)argv[2].number;
+    float position = (float)argv[3].number;
+    float min_position = (float)argv[4].number;
+    float max_position = (float)argv[5].number;
+    bool vertical = strcmp(direction, "垂直") == 0 ||
+                    strcmp(direction, "vertical") == 0;
+    if (max_position < min_position) max_position = min_position;
+    if (position < min_position) position = min_position;
+    if (position > max_position) position = max_position;
+
+    float x, y, available;
+    gui_pos(&x, &y, &available);
+    Hjpcontext *vg = g_cur->vg;
+    uint32_t id = gui_hash(id_text) ^ (vertical ? 0x51A7u : 0xA715u);
+    const float thickness = 8.0f;
+    bool hovered = false, pressed = false;
+
+    float bar_w = vertical ? thickness : length;
+    float bar_h = vertical ? length : thickness;
+    if (length <= 0.0f) {
+        if (vertical) bar_h = GUI_WIDGET_H * 4.0f;
+        else bar_w = available;
+    }
+    if (!vertical && bar_w > available) bar_w = available;
+    if (bar_w < 1.0f) bar_w = 1.0f;
+    if (bar_h < 1.0f) bar_h = 1.0f;
+
+    gui_widget_logic(id, x, y, bar_w, bar_h, &hovered, &pressed);
+    if (hovered || g_cur->active == id) {
+        gui_apply_cursor_type(vertical ? 5 : 6);
+        g_auto_resize_cursor = true;
+    }
+    if (g_cur->active == id && g_cur->in.down) {
+        float delta = vertical
+            ? (float)(g_cur->in.mx - g_cur->in.pmx)
+            : (float)(g_cur->in.my - g_cur->in.pmy);
+        position += delta;
+        if (position < min_position) position = min_position;
+        if (position > max_position) position = max_position;
+    }
+
+    Hjpcolor line_color = (hovered || g_cur->active == id)
+        ? TH_ACCENT : TH_BORDER;
+    hjpBeginPath(vg);
+    if (vertical) {
+        hjpRoundedRect(vg, x + 3.0f, y, 2.0f, bar_h, 1.0f);
+    } else {
+        hjpRoundedRect(vg, x, y + 3.0f, bar_w, 2.0f, 1.0f);
+    }
+    hjpFillColor(vg, line_color);
+    hjpFill(vg);
+
+    if (vertical) {
+        float cy = y + bar_h * 0.5f;
+        for (int i = -1; i <= 1; i++) {
+            hjpBeginPath(vg);
+            hjpCircle(vg, x + thickness * 0.5f, cy + i * 8.0f, 1.2f);
+            hjpFillColor(vg, TH_TEXT_DIM);
+            hjpFill(vg);
+        }
+    } else {
+        float cx = x + bar_w * 0.5f;
+        for (int i = -1; i <= 1; i++) {
+            hjpBeginPath(vg);
+            hjpCircle(vg, cx + i * 8.0f, y + thickness * 0.5f, 1.2f);
+            hjpFillColor(vg, TH_TEXT_DIM);
+            hjpFill(vg);
+        }
+    }
+
+    g_cur->last = (GuiLastWidget){x, y, bar_w, bar_h, hovered};
+    gui_advance(vertical ? bar_h : thickness);
+    return hajimu_number(position);
+}
+
+/* ---------------------------------------------------------------
  * グループ開始([タイトル])
  * ---------------------------------------------------------------*/
 static Value fn_group_begin(int argc, Value *argv) {
@@ -6380,8 +6552,17 @@ static Value fn_validation(int argc, Value *argv) {
  * ---------------------------------------------------------------*/
 static Value fn_disable_begin(int argc, Value *argv) {
     (void)argc; (void)argv;
+    if (g_disabled_depth == 0 && g_cur) {
+        g_disabled_input_backup = g_cur->in;
+        int mx = g_cur->in.mx, my = g_cur->in.my;
+        int pmx = g_cur->in.pmx, pmy = g_cur->in.pmy;
+        memset(&g_cur->in, 0, sizeof(g_cur->in));
+        g_cur->in.mx = mx; g_cur->in.my = my;
+        g_cur->in.pmx = pmx; g_cur->in.pmy = pmy;
+        hjpGlobalAlpha(g_cur->vg, 0.4f);
+    }
+    g_disabled_depth++;
     g_disabled = true;
-    if (g_cur) hjpGlobalAlpha(g_cur->vg, 0.4f);
     return hajimu_null();
 }
 
@@ -6390,8 +6571,15 @@ static Value fn_disable_begin(int argc, Value *argv) {
  * ---------------------------------------------------------------*/
 static Value fn_disable_end(int argc, Value *argv) {
     (void)argc; (void)argv;
-    g_disabled = false;
-    if (g_cur) hjpGlobalAlpha(g_cur->vg, 1.0f);
+    if (g_disabled_depth <= 0) return hajimu_null();
+    g_disabled_depth--;
+    if (g_disabled_depth == 0) {
+        g_disabled = false;
+        if (g_cur) {
+            g_cur->in = g_disabled_input_backup;
+            hjpGlobalAlpha(g_cur->vg, 1.0f);
+        }
+    }
     return hajimu_null();
 }
 
@@ -22584,6 +22772,12 @@ static HajimuPluginFunc gui_functions[] = {
     {"グリッド終了",         fn_grid_end,      1, 1},
     {"グリッド次列",         fn_grid_next,     1, 1},
     {"スプリッター",         fn_splitter,      2, 2},
+    {"分割バー",             fn_split_bar,     6, 6},
+    {"split_bar",            fn_split_bar,     6, 6},
+    {"ID範囲開始",           fn_id_scope_begin, 1, 1},
+    {"id_scope_begin",       fn_id_scope_begin, 1, 1},
+    {"ID範囲終了",           fn_id_scope_end,   0, 0},
+    {"id_scope_end",         fn_id_scope_end,   0, 0},
     {"グループ開始",         fn_group_begin,   0, 1},
     {"グループ終了",         fn_group_end,     1, 1},
     {"ツールバー開始",       fn_toolbar_begin, 0, 0},
@@ -23753,7 +23947,7 @@ static HajimuPluginFunc gui_functions[] = {
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.2.1",
+        .version        = "14.3.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,

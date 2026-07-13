@@ -729,9 +729,15 @@ HjpCursor hjp_create_system_cursor(int id) {
         case HJP_CURSOR_IBEAM:     c = [NSCursor IBeamCursor]; break;
         case HJP_CURSOR_CROSSHAIR: c = [NSCursor crosshairCursor]; break;
         case HJP_CURSOR_SIZEALL:   c = [NSCursor openHandCursor]; break;
+        case HJP_CURSOR_SIZEWE:    c = [NSCursor resizeLeftRightCursor]; break;
+        case HJP_CURSOR_SIZENS:    c = [NSCursor resizeUpDownCursor]; break;
         default: c = [NSCursor arrowCursor]; break;
         }
+#if __has_feature(objc_arc)
         return (__bridge_retained HjpCursor)c;
+#else
+        return (HjpCursor)[c retain];
+#endif
     }
 }
 
@@ -743,8 +749,12 @@ void hjp_set_cursor(HjpCursor cursor) {
 
 void hjp_free_cursor(HjpCursor cursor) {
     if (!cursor) return;
+#if __has_feature(objc_arc)
     NSCursor *c = (__bridge_transfer NSCursor *)cursor;
-    (void)c; /* ARC releases */
+    (void)c;
+#else
+    [(NSCursor *)cursor release];
+#endif
 }
 
 /* =====================================================================
