@@ -240,6 +240,15 @@ typedef struct {
     float indent;
 } GuiLayout;
 
+/* 横並びは通常ウィジェットと子領域を同じ規則で配置する。
+ * scope_depth により、横並びの子領域内は通常の縦積みに戻せる。 */
+typedef struct {
+    GuiLayout saved_lay;
+    float max_bottom;
+    float max_right;
+    int scope_depth;
+} GuiHorizontalGroup;
+
 /* --- テキスト入力バッファ (Phase 3) --- */
 typedef struct {
     uint32_t id;                /* ウィジェット ID                  */
@@ -304,13 +313,17 @@ typedef struct {
     GuiPanel panels[GUI_MAX_PANELS];
     int      panel_depth;
     GuiLayout saved_lay[GUI_MAX_PANELS]; /* パネル前のレイアウト保存 */
-    float    h_group_max_bottom;         /* 横並びグループ最大ボトム追跡 */
+    int      saved_scope_depth[GUI_MAX_PANELS];
+    GuiHorizontalGroup horizontal_groups[GUI_MAX_PANELS];
+    int      horizontal_depth;
+    int      layout_scope_depth;
 
     bool valid;
 } GuiApp;
 
 static GuiApp  g_apps[GUI_MAX_APPS];
 static GuiApp *g_cur  = NULL;           /* 描画中の現在アプリ        */
+static int     g_frame_count = 0;       /* 全描画ループ共通フレーム数 */
 
 /* =====================================================================
  * Phase 5-8 追加構造体・グローバル
@@ -507,7 +520,7 @@ typedef struct {
     float scroll_y;           /* 現在のスクロール位置 */
     float content_h;          /* コンテンツ全高 */
     float saved_x, saved_y, saved_w;  /* レイアウト復元用 */
-    int   saved_panel_depth;  /* 水平グループかどうか判定用 */
+    int   saved_scope_depth;  /* 子領域内で外側の横並びを停止する */
     bool  active;
 } GuiScrollRegion;
 
@@ -783,8 +796,35 @@ static inline bool gui_hit(float px, float py,
 }
 
 /* --- レイアウト進行 --- */
+static inline GuiHorizontalGroup *gui_current_horizontal(void) {
+    if (!g_cur || g_cur->horizontal_depth <= 0) return NULL;
+    GuiHorizontalGroup *group = &g_cur->horizontal_groups[g_cur->horizontal_depth - 1];
+    if (group->scope_depth != g_cur->layout_scope_depth) return NULL;
+    return group;
+}
+
 static inline void gui_advance(float h) {
-    if (g_cur) g_cur->lay.y += h + GUI_MARGIN;
+    if (!g_cur) return;
+
+    GuiHorizontalGroup *group = gui_current_horizontal();
+    if (!group) {
+        g_cur->lay.y += h + GUI_MARGIN;
+        return;
+    }
+
+    float bottom = g_cur->last.y + h + GUI_MARGIN;
+    float right = g_cur->last.x + g_cur->last.w;
+    if (bottom > group->max_bottom) group->max_bottom = bottom;
+    if (right > group->max_right) group->max_right = right;
+
+    /* gui_pos() が加えるインデントと余白を差し引き、次の要素の左端を
+     * 直前要素の右側へ揃える。Yは行の先頭へ固定する。 */
+    float next_x = right + GUI_MARGIN;
+    g_cur->lay.x = next_x - g_cur->lay.indent - GUI_PADDING;
+    float content_right = group->saved_lay.x + group->saved_lay.w - GUI_PADDING;
+    g_cur->lay.w = content_right - next_x + g_cur->lay.indent + GUI_PADDING * 2.0f;
+    if (g_cur->lay.w < 1.0f) g_cur->lay.w = 1.0f;
+    g_cur->lay.y = group->saved_lay.y;
 }
 static inline void gui_pos(float *x, float *y, float *w) {
     *x = g_cur->lay.x + g_cur->lay.indent + GUI_PADDING;
@@ -1113,12 +1153,16 @@ static Value fn_draw_loop(int argc, Value *argv) {
 
         /* レイアウト初期化 */
         app->lay = (GuiLayout){0, GUI_PADDING, (float)app->win_w, 0};
+        app->panel_depth = 0;
+        app->horizontal_depth = 0;
+        app->layout_scope_depth = 0;
         app->hot = 0;
         app->tooltip_show = false;
         if (!g_th_init) gui_theme_set_dark();
 
         /* ── ユーザーコールバック実行 ── */
         g_cur = app;
+        g_frame_count++;
         hajimu_call(&callback, 0, NULL);
 
         /* ── タイマー発火 (Phase 10) ── */
@@ -1768,6 +1812,7 @@ static Value fn_separator(int argc, Value *argv) {
     hjpStrokeWidth(vg, 1.0f);
     hjpStroke(vg);
 
+    g_cur->last = (GuiLastWidget){x, y, w, 8.0f, false};
     gui_advance(8.0f);
     return hajimu_null();
 }
@@ -1779,7 +1824,14 @@ static Value fn_spacer(int argc, Value *argv) {
     if (!g_cur) return hajimu_null();
     float h = 16.0f;
     if (argc >= 1 && argv[0].type == VALUE_NUMBER) h = (float)argv[0].number;
-    g_cur->lay.y += h;
+    GuiHorizontalGroup *group = gui_current_horizontal();
+    if (group) {
+        g_cur->lay.x += h;
+        g_cur->lay.w -= h;
+        if (g_cur->lay.w < 1.0f) g_cur->lay.w = 1.0f;
+    } else {
+        g_cur->lay.y += h;
+    }
     return hajimu_null();
 }
 
@@ -2538,6 +2590,7 @@ static Value fn_panel_begin(int argc, Value *argv) {
     /* 現在のレイアウトを保存 */
     int d = g_cur->panel_depth;
     g_cur->saved_lay[d] = g_cur->lay;
+    g_cur->saved_scope_depth[d] = g_cur->layout_scope_depth;
 
     GuiPanel *p = &g_cur->panels[d];
     p->x = x - GUI_PADDING;
@@ -2570,6 +2623,7 @@ static Value fn_panel_begin(int argc, Value *argv) {
     g_cur->lay.w = p->w - 8.0f;
     g_cur->lay.indent = 0;
 
+    g_cur->layout_scope_depth++;
     g_cur->panel_depth++;
     return hajimu_null();
 }
@@ -2596,9 +2650,11 @@ static Value fn_panel_end(int argc, Value *argv) {
     hjpStrokeWidth(vg, 1.0f);
     hjpStroke(vg);
 
-    /* レイアウトを復帰 */
+    /* レイアウトを復帰し、パネル全体を親レイアウトの1要素として進める。 */
+    g_cur->layout_scope_depth = g_cur->saved_scope_depth[d];
     g_cur->lay = g_cur->saved_lay[d];
-    g_cur->lay.y = panel_bottom + GUI_MARGIN;
+    g_cur->last = (GuiLastWidget){p->x, p->y, p->w, p->h, false};
+    gui_advance(p->h);
 
     return hajimu_null();
 }
@@ -2610,13 +2666,15 @@ static Value fn_horizontal_begin(int argc, Value *argv) {
     (void)argc; (void)argv;
     if (!g_cur) return hajimu_null();
 
-    /* 横並びのためにインデントを保存して使う */
-    if (g_cur->panel_depth >= GUI_MAX_PANELS) return hajimu_null();
+    if (g_cur->horizontal_depth >= GUI_MAX_PANELS) return hajimu_null();
 
-    int d = g_cur->panel_depth;
-    g_cur->saved_lay[d] = g_cur->lay;
-    g_cur->panel_depth++;
-    g_cur->h_group_max_bottom = g_cur->lay.y;  /* 横並びグループのボトム追跡をリセット */
+    int d = g_cur->horizontal_depth;
+    GuiHorizontalGroup *group = &g_cur->horizontal_groups[d];
+    group->saved_lay = g_cur->lay;
+    group->max_bottom = g_cur->lay.y;
+    group->max_right = g_cur->lay.x + g_cur->lay.indent + GUI_PADDING;
+    group->scope_depth = g_cur->layout_scope_depth;
+    g_cur->horizontal_depth++;
 
     return hajimu_null();
 }
@@ -2626,15 +2684,20 @@ static Value fn_horizontal_begin(int argc, Value *argv) {
  * ---------------------------------------------------------------*/
 static Value fn_horizontal_end(int argc, Value *argv) {
     (void)argc; (void)argv;
-    if (!g_cur || g_cur->panel_depth <= 0) return hajimu_null();
+    if (!g_cur || g_cur->horizontal_depth <= 0) return hajimu_null();
 
-    g_cur->panel_depth--;
-    int d = g_cur->panel_depth;
+    g_cur->horizontal_depth--;
+    int d = g_cur->horizontal_depth;
+    GuiHorizontalGroup *group = &g_cur->horizontal_groups[d];
+    float start_x = group->saved_lay.x + group->saved_lay.indent + GUI_PADDING;
+    float group_w = group->max_right - start_x;
+    float group_h = group->max_bottom - group->saved_lay.y - GUI_MARGIN;
+    if (group_w < 0.0f) group_w = 0.0f;
+    if (group_h < 0.0f) group_h = 0.0f;
 
-    /* 横並びで最も進んだ y を使用 */
-    float max_y = g_cur->h_group_max_bottom;  /* 子ウィンドウが更新した最大ボトム */
-    g_cur->lay = g_cur->saved_lay[d];
-    if (max_y > g_cur->lay.y) g_cur->lay.y = max_y;
+    g_cur->lay = group->saved_lay;
+    g_cur->last = (GuiLastWidget){start_x, group->saved_lay.y, group_w, group_h, false};
+    gui_advance(group_h);
 
     return hajimu_null();
 }
@@ -5336,6 +5399,7 @@ static Value fn_scroll_begin(int argc, Value *argv) {
     sr->saved_x = g_cur->lay.x;
     sr->saved_y = g_cur->lay.y;
     sr->saved_w = g_cur->lay.w;
+    sr->saved_scope_depth = g_cur->layout_scope_depth;
     sr->content_h = 0;
     sr->active = true;
 
@@ -5348,6 +5412,7 @@ static Value fn_scroll_begin(int argc, Value *argv) {
     g_cur->lay.x = x + 2;
     g_cur->lay.y = y - sr->scroll_y;
     g_cur->lay.w = sw - GUI_SCROLLBAR_W - 4;
+    g_cur->layout_scope_depth++;
 
     return hajimu_number(slot);
 }
@@ -5410,10 +5475,13 @@ static Value fn_scroll_end(int argc, Value *argv) {
     hjpStroke(vg);
 
     /* レイアウト復元 */
+    g_cur->layout_scope_depth = sr->saved_scope_depth;
     g_cur->lay.x = sr->saved_x;
-    g_cur->lay.y = sr->saved_y + sr->h + GUI_MARGIN;
+    g_cur->lay.y = sr->saved_y;
     g_cur->lay.w = sr->saved_w;
+    g_cur->last = (GuiLastWidget){sr->x, sr->y, sr->w, sr->h, false};
     sr->active = false;
+    gui_advance(sr->h);
 
     return hajimu_null();
 }
@@ -6694,7 +6762,7 @@ static Value fn_child_begin(int argc, Value *argv) {
     sr->saved_x = g_cur->lay.x;
     sr->saved_y = g_cur->lay.y;
     sr->saved_w = g_cur->lay.w;
-    sr->saved_panel_depth = g_cur->panel_depth;
+    sr->saved_scope_depth = g_cur->layout_scope_depth;
     sr->content_h = 0;
     sr->active = true;
 
@@ -6713,6 +6781,7 @@ static Value fn_child_begin(int argc, Value *argv) {
     g_cur->lay.x = x + 4;
     g_cur->lay.y = y + 4 - sr->scroll_y;
     g_cur->lay.w = cw - 8;
+    g_cur->layout_scope_depth++;
 
     return hajimu_bool(true);
 }
@@ -6730,21 +6799,13 @@ static Value fn_child_end(int argc, Value *argv) {
             GuiScrollRegion *sr = &g_scrolls[i];
             sr->content_h = (g_cur->lay.y + sr->scroll_y) - sr->y;
             hjpRestore(g_cur->vg);
-            if (sr->saved_panel_depth > 0) {
-                /* 横並びコンテキスト: X を進め、Y は開始位置を維持して次の兄弟が同じ高さで描画できるようにする */
-                float bottom = sr->saved_y + sr->h + GUI_MARGIN;
-                if (bottom > g_cur->h_group_max_bottom) g_cur->h_group_max_bottom = bottom;
-                g_cur->lay.x = sr->x + sr->w + GUI_MARGIN;
-                g_cur->lay.y = sr->saved_y;  /* 次の兄弟が同じ開始Yになるよう維持 */
-                g_cur->lay.w = sr->saved_w - (sr->x - sr->saved_x) - sr->w - GUI_MARGIN;
-                if (g_cur->lay.w < 1) g_cur->lay.w = 1;
-            } else {
-                /* 縦積みコンテキスト: Y を進め、X は戻す */
-                g_cur->lay.x = sr->saved_x;
-                g_cur->lay.y = sr->saved_y + sr->h + GUI_MARGIN;
-                g_cur->lay.w = sr->saved_w;
-            }
+            g_cur->layout_scope_depth = sr->saved_scope_depth;
+            g_cur->lay.x = sr->saved_x;
+            g_cur->lay.y = sr->saved_y;
+            g_cur->lay.w = sr->saved_w;
+            g_cur->last = (GuiLastWidget){sr->x, sr->y, sr->w, sr->h, false};
             sr->active = false;
+            gui_advance(sr->h);
             break;
         }
     }
@@ -7050,6 +7111,9 @@ static Value fn_text_colored(int argc, Value *argv) {
     hjpTextAlign(vg, HJP_ALIGN_LEFT | HJP_ALIGN_TOP);
     hjpText(vg, x, y, text, NULL);
 
+    float tw = hjpTextBounds(vg, 0, 0, text, NULL, NULL);
+    if (tw > w) tw = w;
+    g_cur->last = (GuiLastWidget){x, y, tw, GUI_FONT_SIZE + 4, false};
     gui_advance(GUI_FONT_SIZE + 4);
     return hajimu_null();
 }
@@ -7078,6 +7142,7 @@ static Value fn_text_wrapped(int argc, Value *argv) {
 
     float h = bounds[3] - bounds[1];
     if (h < GUI_FONT_SIZE) h = GUI_FONT_SIZE;
+    g_cur->last = (GuiLastWidget){x, y, w, h + 4, false};
     gui_advance(h + 4);
     return hajimu_null();
 }
@@ -7099,6 +7164,9 @@ static Value fn_text_disabled(int argc, Value *argv) {
     hjpTextAlign(vg, HJP_ALIGN_LEFT | HJP_ALIGN_TOP);
     hjpText(vg, x, y, argv[0].string.data, NULL);
 
+    float tw = hjpTextBounds(vg, 0, 0, argv[0].string.data, NULL, NULL);
+    if (tw > w) tw = w;
+    g_cur->last = (GuiLastWidget){x, y, tw, GUI_FONT_SIZE + 4, false};
     gui_advance(GUI_FONT_SIZE + 4);
     return hajimu_null();
 }
@@ -12450,7 +12518,6 @@ static struct {
     float x, y, w, h;
     bool  hovered, active, focused, clicked;
 } g_last_widget;
-static int g_frame_count = 0;
 
 static Value gui_dict4(const char *k1, Value v1,
                        const char *k2, Value v2,
@@ -12486,6 +12553,12 @@ static Value fn_widget_state(int argc, Value *argv) {
 /* ウィジェット矩形() → 辞書 {x, y, 幅, 高さ} */
 static Value fn_widget_rect(int argc, Value *argv) {
     (void)argc; (void)argv;
+    if (g_cur) {
+        return gui_dict4("x",  hajimu_number(g_cur->last.x),
+                         "y",  hajimu_number(g_cur->last.y),
+                         "幅", hajimu_number(g_cur->last.w),
+                         "高さ", hajimu_number(g_cur->last.h));
+    }
     return gui_dict4("x",  hajimu_number(g_last_widget.x),
                      "y",  hajimu_number(g_last_widget.y),
                      "幅", hajimu_number(g_last_widget.w),
@@ -23499,7 +23572,7 @@ static HajimuPluginFunc gui_functions[] = {
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.0.2",
+        .version        = "14.0.3",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,
