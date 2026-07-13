@@ -53,6 +53,8 @@
   #include <libgen.h>
   #include <unistd.h>
   #include <sys/wait.h>
+  #include <fcntl.h>
+  #include <errno.h>
 #elif defined(__linux__)
   #define GL_GLEXT_PROTOTYPES
   #include <GL/gl.h>
@@ -61,6 +63,8 @@
   #include <libgen.h>
   #include <unistd.h>
   #include <sys/wait.h>
+  #include <fcntl.h>
+  #include <errno.h>
 #else
   #include <GL/gl.h>
   #include <windows.h>
@@ -3799,21 +3803,43 @@ static Value fn_process_launch(int argc, Value *argv) {
         launched = true;
     }
 #else
-    /* 二重forkで子プロセスを親GUIから切り離し、ゾンビ化を防ぐ。 */
+    /* close-on-execパイプで、別プロセス化後のexec失敗も親へ返す。 */
+    int error_pipe[2] = {-1, -1};
+    if (pipe(error_pipe) != 0) {
+        gui_process_args_free(process_args, argument_count + 1);
+        return hajimu_bool(false);
+    }
+    (void)fcntl(error_pipe[1], F_SETFD, FD_CLOEXEC);
+
     pid_t child = fork();
     if (child == 0) {
+        close(error_pipe[0]);
         pid_t detached = fork();
-        if (detached < 0) _exit(127);
+        if (detached < 0) {
+            int child_error = errno;
+            (void)write(error_pipe[1], &child_error, sizeof(child_error));
+            _exit(127);
+        }
         if (detached > 0) _exit(0);
         (void)setsid();
         execvp(executable, process_args);
+        int child_error = errno;
+        (void)write(error_pipe[1], &child_error, sizeof(child_error));
         _exit(127);
     } else if (child > 0) {
+        close(error_pipe[1]);
         int status = 0;
+        int child_error = 0;
+        ssize_t error_size = -1;
         if (waitpid(child, &status, 0) == child &&
             WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-            launched = true;
+            error_size = read(error_pipe[0], &child_error, sizeof(child_error));
+            launched = error_size == 0;
         }
+        close(error_pipe[0]);
+    } else {
+        close(error_pipe[0]);
+        close(error_pipe[1]);
     }
 #endif
 
@@ -23701,7 +23727,7 @@ static HajimuPluginFunc gui_functions[] = {
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.1.0",
+        .version        = "14.1.1",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,

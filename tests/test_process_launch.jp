@@ -14,6 +14,7 @@ GUI.ファイル削除(出力先)
 表明(ファイル存在(出力先), "起動したプロセスが引数を受け取っていません")
 
 表明(GUI.process_launch("/usr/bin/false", []) == 真, "英語別名で起動できません")
+表明(GUI.外部プロセス起動("/definitely/missing/hajimu", []) == 偽, "存在しない実行ファイルを成功扱いにしてはいけません")
 表明(GUI.外部プロセス起動("/usr/bin/touch", [1]) == 偽, "文字列以外の引数を受け付けてはいけません")
 
 表示("process launch tests passed")
