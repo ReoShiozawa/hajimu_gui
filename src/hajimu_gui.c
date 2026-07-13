@@ -55,6 +55,7 @@
   #include <sys/wait.h>
   #include <fcntl.h>
   #include <errno.h>
+  #include <mach-o/dyld.h>
 #elif defined(__linux__)
   #define GL_GLEXT_PROTOTYPES
   #include <GL/gl.h>
@@ -3845,6 +3846,29 @@ static Value fn_process_launch(int argc, Value *argv) {
 
     gui_process_args_free(process_args, argument_count + 1);
     return hajimu_bool(launched);
+}
+
+/* 現在プラグインを読み込んでいるHajimu実行ファイルの絶対パスを返す。 */
+static Value fn_executable_path(int argc, Value *argv) {
+    (void)argc;
+    (void)argv;
+    char path[4096] = {0};
+#ifdef __APPLE__
+    uint32_t path_size = (uint32_t)sizeof(path);
+    if (_NSGetExecutablePath(path, &path_size) != 0) return hajimu_null();
+    char resolved[4096] = {0};
+    if (realpath(path, resolved)) return hajimu_string(resolved);
+    return hajimu_string(path);
+#elif defined(__linux__)
+    ssize_t length = readlink("/proc/self/exe", path, sizeof(path) - 1);
+    if (length <= 0) return hajimu_null();
+    path[length] = '\0';
+    return hajimu_string(path);
+#else
+    DWORD length = GetModuleFileNameA(NULL, path, (DWORD)sizeof(path));
+    if (length == 0 || length >= sizeof(path)) return hajimu_null();
+    return hajimu_string(path);
+#endif
 }
 
 /* ---------------------------------------------------------------
@@ -22480,6 +22504,8 @@ static HajimuPluginFunc gui_functions[] = {
     {"file_delete",           fn_file_delete,   1, 1},
     {"外部プロセス起動",     fn_process_launch, 2, 2},
     {"process_launch",        fn_process_launch, 2, 2},
+    {"実行ファイルパス",     fn_executable_path, 0, 0},
+    {"executable_path",       fn_executable_path, 0, 0},
     {"メッセージ",           fn_message,       3, 3},
     {"トースト",             fn_toast,         1, 2},
     /* --- Phase 7: カスタム描画 --- */
@@ -23727,7 +23753,7 @@ static HajimuPluginFunc gui_functions[] = {
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.1.1",
+        .version        = "14.2.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,
