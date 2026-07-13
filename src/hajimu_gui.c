@@ -52,6 +52,7 @@
   #include <dlfcn.h>
   #include <libgen.h>
   #include <unistd.h>
+  #include <sys/wait.h>
 #elif defined(__linux__)
   #define GL_GLEXT_PROTOTYPES
   #include <GL/gl.h>
@@ -59,11 +60,13 @@
   #include <dlfcn.h>
   #include <libgen.h>
   #include <unistd.h>
+  #include <sys/wait.h>
 #else
   #include <GL/gl.h>
   #include <windows.h>
   #include <shellapi.h>
   #include <io.h>
+  #include <process.h>
   #define access _access
   #define F_OK   0
   /* OpenGL 3.0+ 関数ポインタを hjp_platform_win32.c の実装から参照 */
@@ -3732,6 +3735,90 @@ static Value fn_file_delete(int argc, Value *argv) {
     }
 
     return hajimu_bool(remove(path) == 0);
+}
+
+/* ---------------------------------------------------------------
+ * 外部プロセス起動(実行ファイル, 引数配列) → 真偽
+ *
+ * シェルを介さず引数を個別にOSへ渡す。テストプレイなど、GUIを
+ * 維持したまま別プログラムを起動する用途を想定する。
+ * ---------------------------------------------------------------*/
+static char *gui_process_arg_dup(const char *source) {
+    size_t size = strlen(source) + 1;
+    char *copy = (char *)malloc(size);
+    if (copy) memcpy(copy, source, size);
+    return copy;
+}
+
+static void gui_process_args_free(char **args, int count) {
+    if (!args) return;
+    for (int i = 0; i < count; ++i) free(args[i]);
+    free(args);
+}
+
+static Value fn_process_launch(int argc, Value *argv) {
+    if (argc < 2 || argv[0].type != VALUE_STRING ||
+        argv[1].type != VALUE_ARRAY) {
+        return hajimu_bool(false);
+    }
+
+    const char *executable = argv[0].string.data;
+    int argument_count = argv[1].array.length;
+    if (!executable || executable[0] == '\0' || argument_count > 64) {
+        return hajimu_bool(false);
+    }
+
+    char **process_args = (char **)calloc((size_t)argument_count + 2,
+                                           sizeof(char *));
+    if (!process_args) return hajimu_bool(false);
+    process_args[0] = gui_process_arg_dup(executable);
+    if (!process_args[0]) {
+        gui_process_args_free(process_args, 1);
+        return hajimu_bool(false);
+    }
+    for (int i = 0; i < argument_count; ++i) {
+        Value value = argv[1].array.elements[i];
+        if (value.type != VALUE_STRING) {
+            gui_process_args_free(process_args, i + 1);
+            return hajimu_bool(false);
+        }
+        process_args[i + 1] = gui_process_arg_dup(value.string.data);
+        if (!process_args[i + 1]) {
+            gui_process_args_free(process_args, i + 1);
+            return hajimu_bool(false);
+        }
+    }
+    process_args[argument_count + 1] = NULL;
+
+    bool launched = false;
+#ifdef _WIN32
+    intptr_t process = _spawnvp(_P_NOWAIT, executable,
+                                (const char * const *)process_args);
+    if (process != -1) {
+        CloseHandle((HANDLE)process);
+        launched = true;
+    }
+#else
+    /* 二重forkで子プロセスを親GUIから切り離し、ゾンビ化を防ぐ。 */
+    pid_t child = fork();
+    if (child == 0) {
+        pid_t detached = fork();
+        if (detached < 0) _exit(127);
+        if (detached > 0) _exit(0);
+        (void)setsid();
+        execvp(executable, process_args);
+        _exit(127);
+    } else if (child > 0) {
+        int status = 0;
+        if (waitpid(child, &status, 0) == child &&
+            WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+            launched = true;
+        }
+    }
+#endif
+
+    gui_process_args_free(process_args, argument_count + 1);
+    return hajimu_bool(launched);
 }
 
 /* ---------------------------------------------------------------
@@ -22365,6 +22452,8 @@ static HajimuPluginFunc gui_functions[] = {
     {"file_copy",             fn_file_copy,     2, 2},
     {"ファイル削除",         fn_file_delete,   1, 1},
     {"file_delete",           fn_file_delete,   1, 1},
+    {"外部プロセス起動",     fn_process_launch, 2, 2},
+    {"process_launch",        fn_process_launch, 2, 2},
     {"メッセージ",           fn_message,       3, 3},
     {"トースト",             fn_toast,         1, 2},
     /* --- Phase 7: カスタム描画 --- */
@@ -23612,7 +23701,7 @@ static HajimuPluginFunc gui_functions[] = {
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.0.4",
+        .version        = "14.1.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,
