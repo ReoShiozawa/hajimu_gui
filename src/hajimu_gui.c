@@ -304,6 +304,10 @@ typedef struct {
     bool  tooltip_show;
     float tooltip_x, tooltip_y;
 
+    /* スクリーンショットは描画コールバック後、フレーム確定時に取得する。 */
+    bool screenshot_pending;
+    char screenshot_path[1024];
+
     /* テキスト入力バッファプール (Phase 3) */
     GuiTextBuf text_bufs[GUI_MAX_TEXT_SLOTS];
     int  text_buf_count;
@@ -324,6 +328,8 @@ typedef struct {
 static GuiApp  g_apps[GUI_MAX_APPS];
 static GuiApp *g_cur  = NULL;           /* 描画中の現在アプリ        */
 static int     g_frame_count = 0;       /* 全描画ループ共通フレーム数 */
+
+static bool gui_write_screenshot(GuiApp *app, const char *path);
 
 /* =====================================================================
  * Phase 5-8 追加構造体・グローバル
@@ -830,6 +836,10 @@ static inline void gui_pos(float *x, float *y, float *w) {
     *x = g_cur->lay.x + g_cur->lay.indent + GUI_PADDING;
     *y = g_cur->lay.y;
     *w = g_cur->lay.w - g_cur->lay.indent - GUI_PADDING * 2.0f;
+    if (g_next_widget_w > 0.0f) {
+        if (g_next_widget_w < *w) *w = g_next_widget_w;
+        g_next_widget_w = 0.0f;
+    }
 }
 
 /* --- ウィジェットのホバー・アクティブ判定 --- */
@@ -1241,6 +1251,12 @@ static Value fn_draw_loop(int argc, Value *argv) {
 
         /* ── フレーム終了 ── */
         hjpEndFrame(app->vg);
+        if (app->screenshot_pending) {
+            glReadBuffer(GL_BACK);
+            gui_write_screenshot(app, app->screenshot_path);
+            app->screenshot_pending = false;
+            app->screenshot_path[0] = '\0';
+        }
         hjp_gl_swap_window(app->window);
 
         /* アクティブ解除 */
@@ -3234,18 +3250,31 @@ static Value fn_tree_draw(int argc, Value *argv) {
 static int g_menu_item_idx = 0;   /* メニュー項目インデックス */
 
 /* ---------------------------------------------------------------
- * タブバー(ID, タブ配列, 選択) → 選択インデックス
+ * タブバー(ID, タブ配列, 選択) → 選択
+ *   選択が数値ならインデックス、文字列なら選択ラベルを返す。
  * ---------------------------------------------------------------*/
 static Value fn_tab_bar(int argc, Value *argv) {
     if (!g_cur || argc < 3 || argv[0].type != VALUE_STRING ||
-        argv[1].type != VALUE_ARRAY || argv[2].type != VALUE_NUMBER)
+        argv[1].type != VALUE_ARRAY ||
+        (argv[2].type != VALUE_NUMBER && argv[2].type != VALUE_STRING))
         return hajimu_number(0);
 
     Hjpcontext *vg = g_cur->vg;
     Value tabs = argv[1];
-    int selected = (int)argv[2].number;
     int n = tabs.array.length;
     if (n <= 0) return hajimu_number(0);
+    bool string_mode = argv[2].type == VALUE_STRING;
+    int selected = string_mode ? 0 : (int)argv[2].number;
+    if (string_mode) {
+        for (int i = 0; i < n; i++) {
+            char nb[32];
+            const char *text = gui_value_to_str(tabs.array.elements[i], nb, sizeof(nb));
+            if (strcmp(text, argv[2].string.data) == 0) {
+                selected = i;
+                break;
+            }
+        }
+    }
     if (selected < 0 || selected >= n) selected = 0;
 
     float x, y, avail_w;
@@ -3292,6 +3321,10 @@ static Value fn_tab_bar(int argc, Value *argv) {
     hjpStroke(vg);
 
     gui_advance(GUI_TAB_H);
+    if (string_mode) {
+        char nb[32];
+        return hajimu_string(gui_value_to_str(tabs.array.elements[selected], nb, sizeof(nb)));
+    }
     return hajimu_number(selected);
 }
 
@@ -5392,7 +5425,11 @@ static Value fn_scroll_begin(int argc, Value *argv) {
 
     float x, y, w;
     gui_pos(&x, &y, &w);
+    /* 子ウィンドウと同じく、0以下は現在位置からの残り領域として扱う。 */
+    if (sw <= 0) sw = w;
+    if (sh <= 0) sh = (float)g_cur->win_h - y - GUI_PADDING;
     if (sw > w) sw = w;
+    if (sh < 1) sh = 1;
 
     GuiScrollRegion *sr = &g_scrolls[slot];
     sr->x = x; sr->y = y; sr->w = sw; sr->h = sh;
@@ -6747,10 +6784,6 @@ static Value fn_child_begin(int argc, Value *argv) {
     float x, y, w;
     gui_pos(&x, &y, &w);
     if (cw > w) cw = w;
-
-    /* -1 = 残り全幅/全高 (ImGui 慣例) */
-    if (cw <= 0) cw = w;
-    if (ch <= 0) ch = (float)g_cur->win_h - y - GUI_PADDING;
 
     /* -1 = 残り全幅/全高 (ImGui 慣例) */
     if (cw <= 0) cw = w;
@@ -9084,19 +9117,15 @@ static Value fn_window_opacity(int argc, Value *argv) {
     return hajimu_null();
 }
 
-/* スクリーンショット(パス) → 真偽 */
-static Value fn_screenshot(int argc, Value *argv) {
-    (void)argc;
-    const char *path = argv[0].string.data;
-    if (!g_cur) return hajimu_bool(false);
-
-    int w = g_cur->fb_w, h = g_cur->fb_h;
-    if (w <= 0 || h <= 0) return hajimu_bool(false);
+static bool gui_write_screenshot(GuiApp *app, const char *path) {
+    if (!app || !path || path[0] == '\0') return false;
+    int w = app->fb_w, h = app->fb_h;
+    if (w <= 0 || h <= 0) return false;
     /* 整数オーバーフロー防止: size_t でサイズ計算 */
     size_t pixel_sz = (size_t)w * (size_t)h * 4;
-    if (pixel_sz / 4 / (size_t)w != (size_t)h) return hajimu_bool(false);
+    if (pixel_sz / 4 / (size_t)w != (size_t)h) return false;
     unsigned char *pixels = (unsigned char *)malloc(pixel_sz);
-    if (!pixels) return hajimu_bool(false);
+    if (!pixels) return false;
 
     glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
 
@@ -9114,13 +9143,24 @@ static Value fn_screenshot(int argc, Value *argv) {
 
     /* PPM形式で保存（画像書き出しライブラリが無いため簡易） */
     FILE *f = fopen(path, "wb");
-    if (!f) { free(pixels); return hajimu_bool(false); }
+    if (!f) { free(pixels); return false; }
     fprintf(f, "P6\n%d %d\n255\n", w, h);
     for (int i = 0; i < w * h; i++) {
         fwrite(pixels + i * 4, 1, 3, f); /* RGBのみ */
     }
     fclose(f);
     free(pixels);
+    return true;
+}
+
+/* スクリーンショット(パス) → 真偽
+ * 描画途中の空バッファを読まないよう、フレーム終了時の取得を予約する。 */
+static Value fn_screenshot(int argc, Value *argv) {
+    (void)argc;
+    if (!g_cur || argv[0].type != VALUE_STRING || argv[0].string.data[0] == '\0')
+        return hajimu_bool(false);
+    snprintf(g_cur->screenshot_path, sizeof(g_cur->screenshot_path), "%s", argv[0].string.data);
+    g_cur->screenshot_pending = true;
     return hajimu_bool(true);
 }
 
@@ -23572,7 +23612,7 @@ static HajimuPluginFunc gui_functions[] = {
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.0.3",
+        .version        = "14.0.4",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,
