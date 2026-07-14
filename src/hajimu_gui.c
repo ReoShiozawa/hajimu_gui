@@ -539,6 +539,8 @@ typedef struct {
 
 static GuiCardState g_cards[GUI_MAX_CARD_DEPTH];
 static int          g_card_depth = 0;
+static float        g_toolbar_start_y = 0.0f;
+static float        g_toolbar_height = 0.0f;
 
 /* --- Phase 28: レイアウト拡張 III --- */
 static float g_next_widget_w = 0;    /* 次ウィジェットの幅指定 (0=auto) */
@@ -1058,7 +1060,7 @@ static Value fn_app_create(int argc, Value *argv) {
     app->win_h      = h;
     app->running    = true;
     app->target_fps = 60;
-    app->bg         = (GuiRGBA){30/255.0f, 30/255.0f, 30/255.0f, 1.0f};
+    app->bg         = (GuiRGBA){g_th.bg.r, g_th.bg.g, g_th.bg.b, g_th.bg.a};
     app->valid      = true;
 
     return hajimu_number((double)idx);
@@ -1614,18 +1616,29 @@ static Value fn_button(int argc, Value *argv) {
     bool clicked = gui_widget_logic(id, x, y, btn_w, btn_h, &hov, &pressed);
 
     /* 描画 */
-    Hjpcolor bg;
-    if (pressed)    bg = TH_WIDGET_ACTIVE;
-    else if (hov)   bg = TH_ACCENT_HOVER;
-    else            bg = accent;
+    Hjpcolor bg = accent;
+    if (pressed) {
+        bg.r *= 0.82f;
+        bg.g *= 0.82f;
+        bg.b *= 0.82f;
+    } else if (hov) {
+        /* カスタム色でも同系色のまま反応させる。 */
+        bg.r += (1.0f - bg.r) * 0.14f;
+        bg.g += (1.0f - bg.g) * 0.14f;
+        bg.b += (1.0f - bg.b) * 0.14f;
+    }
 
     hjpBeginPath(vg);
     hjpRoundedRect(vg, x, y, btn_w, btn_h, GUI_BTN_RADIUS);
     hjpFillColor(vg, bg);
     hjpFill(vg);
 
-    /* ラベル */
-    hjpFillColor(vg, TH_TEXT);
+    /* ラベル: 明るいテーマでもアクセント面上のコントラストを保つ。 */
+    float luminance = 0.2126f * bg.r + 0.7152f * bg.g + 0.0722f * bg.b;
+    Hjpcolor button_text = luminance < 0.58f
+        ? hjpRGBA(255, 255, 255, 255)
+        : hjpRGBA(24, 32, 40, 255);
+    hjpFillColor(vg, button_text);
     hjpTextAlign(vg, HJP_ALIGN_CENTER | HJP_ALIGN_MIDDLE);
     hjpText(vg, x + btn_w * 0.5f, y + btn_h * 0.5f, label, NULL);
 
@@ -2878,7 +2891,9 @@ static Value fn_list(int argc, Value *argv) {
     int n = items.array.length;
     int visible = n < 10 ? n : 10;
     if (visible < 1) visible = 1;
-    float list_h = GUI_LIST_ITEM_H * visible;
+    float item_h = GUI_LIST_ITEM_H;
+    if (item_h < GUI_FONT_SIZE + 12.0f) item_h = GUI_FONT_SIZE + 12.0f;
+    float list_h = item_h * visible;
     float x, y, avail_w;
     gui_pos(&x, &y, &avail_w);
 
@@ -2902,8 +2917,8 @@ static Value fn_list(int argc, Value *argv) {
     bool list_hov = gui_hit((float)g_cur->in.mx, (float)g_cur->in.my,
                              x, y, avail_w, list_h);
     if (list_hov && g_cur->in.scroll_y != 0) {
-        s_list_scroll[slot] -= g_cur->in.scroll_y * GUI_LIST_ITEM_H;
-        float max_s = (n - visible) * GUI_LIST_ITEM_H;
+        s_list_scroll[slot] -= g_cur->in.scroll_y * item_h;
+        float max_s = (n - visible) * item_h;
         if (max_s < 0) max_s = 0;
         if (s_list_scroll[slot] < 0) s_list_scroll[slot] = 0;
         if (s_list_scroll[slot] > max_s) s_list_scroll[slot] = max_s;
@@ -2913,19 +2928,19 @@ static Value fn_list(int argc, Value *argv) {
     hjpSave(vg);
     hjpScissor(vg, x, y, avail_w, list_h);
     for (int i = 0; i < n; i++) {
-        float iy = y + GUI_LIST_ITEM_H * i - scroll;
-        if (iy + GUI_LIST_ITEM_H < y || iy > y + list_h) continue;
+        float iy = y + item_h * i - scroll;
+        if (iy + item_h < y || iy > y + list_h) continue;
         bool is_sel = (i == selected);
         bool hov = gui_hit((float)g_cur->in.mx, (float)g_cur->in.my,
-                            x, iy, avail_w, GUI_LIST_ITEM_H);
+                            x, iy, avail_w, item_h);
         if (is_sel) {
             hjpBeginPath(vg);
-            hjpRect(vg, x + 1, iy, avail_w - 2, GUI_LIST_ITEM_H);
+            hjpRect(vg, x + 1, iy, avail_w - 2, item_h);
             hjpFillColor(vg, TH_ACCENT);
             hjpFill(vg);
         } else if (hov) {
             hjpBeginPath(vg);
-            hjpRect(vg, x + 1, iy, avail_w - 2, GUI_LIST_ITEM_H);
+            hjpRect(vg, x + 1, iy, avail_w - 2, item_h);
             hjpFillColor(vg, TH_WIDGET_HOVER);
             hjpFill(vg);
         }
@@ -2936,7 +2951,7 @@ static Value fn_list(int argc, Value *argv) {
         hjpFontSize(vg, GUI_FONT_SIZE);
         hjpFillColor(vg, is_sel ? TH_CHECK : TH_TEXT);
         hjpTextAlign(vg, HJP_ALIGN_LEFT | HJP_ALIGN_MIDDLE);
-        hjpText(vg, x + 8.0f, iy + GUI_LIST_ITEM_H * 0.5f, text, NULL);
+        hjpText(vg, x + 10.0f, iy + item_h * 0.5f, text, NULL);
     }
     hjpRestore(vg);
 
@@ -4505,8 +4520,11 @@ static Value fn_theme_set(int argc, Value *argv) {
         gui_theme_set_high_contrast();
     else
         gui_theme_set_dark();
-    if (g_cur)
-        g_cur->bg = (GuiRGBA){g_th.bg.r, g_th.bg.g, g_th.bg.b, g_th.bg.a};
+    // テーマ設定は描画ループ外から呼ばれることが多いため、作成済みの全アプリへ反映する。
+    for (int i = 0; i < GUI_MAX_APPS; i++) {
+        if (g_apps[i].valid)
+            g_apps[i].bg = (GuiRGBA){g_th.bg.r, g_th.bg.g, g_th.bg.b, g_th.bg.a};
+    }
     return hajimu_null();
 }
 
@@ -4515,11 +4533,31 @@ static Value fn_theme_color(int argc, Value *argv) {
     if (argc < 2 || argv[0].type != VALUE_STRING) return hajimu_null();
     const char *key = argv[0].string.data;
     Hjpcolor col = gui_arg_color(argv[1]);
-    if (strstr(key, "\xe8\x83\x8c\xe6\x99\xaf") != NULL) g_th.bg = col;
+    if (strstr(key, "\xe8\x83\x8c\xe6\x99\xaf") != NULL) {
+        g_th.bg = col;
+        for (int i = 0; i < GUI_MAX_APPS; i++) {
+            if (g_apps[i].valid)
+                g_apps[i].bg = (GuiRGBA){col.r, col.g, col.b, col.a};
+        }
+    }
+    else if (strstr(key, "\xe8\xa3\x9c\xe5\x8a\xa9\xe3\x83\x86\xe3\x82\xad\xe3\x82\xb9\xe3\x83\x88") != NULL)
+        g_th.text_dim = col;
+    else if (strstr(key, "\xe3\x83\x9b\xe3\x83\x90\xe3\x83\xbc") != NULL)
+        g_th.widget_hover = col;
+    else if (strstr(key, "\xe9\x81\xb8\xe6\x8a\x9e\xe8\x83\x8c\xe6\x99\xaf") != NULL)
+        g_th.widget_active = col;
+    else if (strstr(key, "\xe5\x8c\xba\xe5\x88\x87\xe3\x82\x8a") != NULL)
+        g_th.sep = col;
     else if (strstr(key, "\xe3\x82\xa6\xe3\x82\xa3\xe3\x82\xb8\xe3\x82\xa7\xe3\x83\x83\xe3\x83\x88") != NULL)
         g_th.widget_bg = col;
-    else if (strstr(key, "\xe3\x82\xa2\xe3\x82\xaf\xe3\x82\xbb\xe3\x83\xb3\xe3\x83\x88") != NULL)
+    else if (strstr(key, "\xe3\x82\xa2\xe3\x82\xaf\xe3\x82\xbb\xe3\x83\xb3\xe3\x83\x88") != NULL) {
         g_th.accent = col;
+        g_th.accent_hover = hjpRGBAf(
+            col.r + (1.0f - col.r) * 0.14f,
+            col.g + (1.0f - col.g) * 0.14f,
+            col.b + (1.0f - col.b) * 0.14f,
+            col.a);
+    }
     else if (strstr(key, "\xe3\x83\x86\xe3\x82\xad\xe3\x82\xb9\xe3\x83\x88") != NULL)
         g_th.text = col;
     else if (strstr(key, "\xe6\x9e\xa0") != NULL) g_th.border = col;
@@ -5539,7 +5577,7 @@ static Value fn_separator_text(int argc, Value *argv) {
 
 /* ---------------------------------------------------------------
  * 小ボタン(ラベル) → 真偽
- *   パディングなしのコンパクトなテキストボタン。
+ *   制作ツールで操作箇所を見失わない、コンパクトなアウトラインボタン。
  * ---------------------------------------------------------------*/
 static Value fn_small_button(int argc, Value *argv) {
     if (!g_cur || argc < 1 || argv[0].type != VALUE_STRING)
@@ -5555,22 +5593,24 @@ static Value fn_small_button(int argc, Value *argv) {
     hjpFontFaceId(vg, g_cur->font_id);
     hjpFontSize(vg, GUI_FONT_SIZE);
     float tw = hjpTextBounds(vg, 0, 0, label, NULL, NULL);
-    float btn_w = tw + 12.0f;
-    float btn_h = GUI_FONT_SIZE + 6.0f;
+    float btn_w = tw + 18.0f;
+    float btn_h = GUI_FONT_SIZE + 10.0f;
+    if (btn_h < 30.0f) btn_h = 30.0f;
 
     bool hov = false, pressed = false;
     bool clicked = gui_widget_logic(id, x, y, btn_w, btn_h, &hov, &pressed);
 
-    /* 背景: ホバー時のみ薄く表示 */
-    if (hov || pressed) {
-        hjpBeginPath(vg);
-        hjpRoundedRect(vg, x, y, btn_w, btn_h, 3.0f);
-        hjpFillColor(vg, pressed ? TH_WIDGET_ACTIVE : TH_WIDGET_HOVER);
-        hjpFill(vg);
-    }
+    /* 通常時にも境界を残し、文字列と操作部品を明確に区別する。 */
+    hjpBeginPath(vg);
+    hjpRoundedRect(vg, x, y, btn_w, btn_h, 4.0f);
+    hjpFillColor(vg, pressed ? TH_WIDGET_ACTIVE : (hov ? TH_WIDGET_HOVER : TH_WIDGET_BG));
+    hjpFill(vg);
+    hjpStrokeColor(vg, hov ? TH_ACCENT : TH_BORDER);
+    hjpStrokeWidth(vg, 1.0f);
+    hjpStroke(vg);
 
     /* テキスト */
-    hjpFillColor(vg, TH_ACCENT);
+    hjpFillColor(vg, hov ? TH_ACCENT : TH_TEXT);
     hjpTextAlign(vg, HJP_ALIGN_CENTER | HJP_ALIGN_MIDDLE);
     hjpText(vg, x + btn_w * 0.5f, y + btn_h * 0.5f, label, NULL);
 
@@ -6100,24 +6140,28 @@ static Value fn_group_end(int argc, Value *argv) {
 }
 
 /* ---------------------------------------------------------------
- * ツールバー開始()
+ * ツールバー開始([高さ])
  * ---------------------------------------------------------------*/
 static Value fn_toolbar_begin(int argc, Value *argv) {
-    (void)argc; (void)argv;
     if (!g_cur) return hajimu_null();
 
     Hjpcontext *vg = g_cur->vg;
     float x = g_cur->lay.x, w = g_cur->lay.w;
     float y = g_cur->lay.y;
+    float toolbar_h = GUI_TOOLBAR_H;
+    if (argc >= 1 && argv[0].type == VALUE_NUMBER && argv[0].number >= GUI_TOOLBAR_H)
+        toolbar_h = (float)argv[0].number;
+    g_toolbar_start_y = y;
+    g_toolbar_height = toolbar_h;
 
     /* ツールバー背景 */
     hjpBeginPath(vg);
-    hjpRect(vg, x, y, w, GUI_TOOLBAR_H);
+    hjpRect(vg, x, y, w, toolbar_h);
     hjpFillColor(vg, TH_WIDGET_BG);
     hjpFill(vg);
     hjpBeginPath(vg);
-    hjpMoveTo(vg, x, y + GUI_TOOLBAR_H);
-    hjpLineTo(vg, x + w, y + GUI_TOOLBAR_H);
+    hjpMoveTo(vg, x, y + toolbar_h);
+    hjpLineTo(vg, x + w, y + toolbar_h);
     hjpStrokeColor(vg, TH_BORDER);
     hjpStrokeWidth(vg, 1.0f);
     hjpStroke(vg);
@@ -6136,7 +6180,9 @@ static Value fn_toolbar_end(int argc, Value *argv) {
     (void)argc; (void)argv;
     if (!g_cur) return hajimu_null();
 
-    g_cur->lay.y += GUI_TOOLBAR_H - 4.0f + GUI_MARGIN;
+    float content_bottom = g_cur->lay.y;
+    float toolbar_bottom = g_toolbar_start_y + g_toolbar_height;
+    g_cur->lay.y = (content_bottom > toolbar_bottom ? content_bottom : toolbar_bottom) + GUI_MARGIN;
 
     return hajimu_null();
 }
@@ -7156,6 +7202,10 @@ static Value fn_child_begin(int argc, Value *argv) {
     hjpScissor(vg, x, y, cw, ch);
 
     if (border) {
+        hjpBeginPath(vg);
+        hjpRoundedRect(vg, x, y, cw, ch, 2.0f);
+        hjpFillColor(vg, TH_WIDGET_BG);
+        hjpFill(vg);
         hjpBeginPath(vg);
         hjpRoundedRect(vg, x, y, cw, ch, 2.0f);
         hjpStrokeColor(vg, TH_BORDER);
@@ -9689,6 +9739,7 @@ static Value fn_segment_control(int argc, Value *argv) {
     hjpStrokeWidth(vg, 1.0f);
     hjpStroke(vg);
 
+    g_cur->last = (GuiLastWidget){x, y, w, h, false};
     gui_advance(h);
     return hajimu_number(sel);
 }
@@ -22811,7 +22862,7 @@ static HajimuPluginFunc gui_functions[] = {
     {"id_scope_end",         fn_id_scope_end,   0, 0},
     {"グループ開始",         fn_group_begin,   0, 1},
     {"グループ終了",         fn_group_end,     1, 1},
-    {"ツールバー開始",       fn_toolbar_begin, 0, 0},
+    {"ツールバー開始",       fn_toolbar_begin, 0, 1},
     {"ツールバー終了",       fn_toolbar_end,   0, 0},
     {"ステータスバー開始",   fn_statusbar_begin, 0, 0},
     {"ステータスバー終了",   fn_statusbar_end, 0, 0},
@@ -23978,7 +24029,7 @@ static HajimuPluginFunc gui_functions[] = {
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.3.1",
+        .version        = "14.4.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,

@@ -733,6 +733,8 @@ void hjpRoundedRectVarying(Hjpcontext *ctx, float x, float y, float w, float h,
     hjpLineTo(ctx, x+rxTL, y);
     hjpBezierTo(ctx, x+rxTL*(1-HJP_KAPPA90), y, x, y+ryTL*(1-HJP_KAPPA90), x, y+ryTL);
     hjpClosePath(ctx);
+    /* 上から下へ進む画面座標では、この頂点列は時計回りになる。 */
+    hjpPathWinding(ctx, HJP_CW);
 }
 
 void hjpEllipse(Hjpcontext *ctx, float cx, float cy, float rx, float ry) {
@@ -742,6 +744,7 @@ void hjpEllipse(Hjpcontext *ctx, float cx, float cy, float rx, float ry) {
     hjpBezierTo(ctx, cx+rx, cy-ry*HJP_KAPPA90, cx+rx*HJP_KAPPA90, cy-ry, cx, cy-ry);
     hjpBezierTo(ctx, cx-rx*HJP_KAPPA90, cy-ry, cx-rx, cy-ry*HJP_KAPPA90, cx-rx, cy);
     hjpClosePath(ctx);
+    hjpPathWinding(ctx, HJP_CW);
 }
 
 void hjpCircle(Hjpcontext *ctx, float cx, float cy, float r) {
@@ -1543,9 +1546,13 @@ static void hjp__renderFlush(Hjpcontext *ctx) {
     glBindVertexArray(ctx->vertArr);
     glEnable(GL_BLEND);
     glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-    glEnable(GL_CULL_FACE);
-    glCullFace(GL_BACK);
-    glFrontFace(GL_CCW);
+    /*
+     * GUI のパスは画面座標系 (Y 軸が下向き) で組み立てるため、OpenGL の
+     * 表向き判定とは頂点の向きが反転する。面カリングを有効にすると、
+     * 同じ矩形でも生成経路によって塗り面だけが消えるため、2D 描画では
+     * 常に両面を描く。
+     */
+    glDisable(GL_CULL_FACE);
     glDisable(GL_DEPTH_TEST);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glStencilMask(0xffffffff);
@@ -1580,14 +1587,12 @@ static void hjp__renderFlush(Hjpcontext *ctx) {
             hjp__setUniforms(ctx, call->uniformOffset + 1, 0);
             glStencilOpSeparate(GL_FRONT, GL_KEEP, GL_KEEP, GL_INCR_WRAP);
             glStencilOpSeparate(GL_BACK, GL_KEEP, GL_KEEP, GL_DECR_WRAP);
-            glDisable(GL_CULL_FACE);
             for (int j = 0; j < call->pathCount; j++) {
                 HjpGLPath *gp = &ctx->glpaths[call->pathOffset + j];
                 glDrawArrays(GL_TRIANGLE_FAN, gp->fillOffset, gp->fillCount);
             }
-            glEnable(GL_CULL_FACE);
 
-            /* Cover */
+            /* 複数パスは従来どおりステンシルで輪郭を描く。 */
             glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
             hjp__setUniforms(ctx, call->uniformOffset, call->image);
             glStencilFunc(GL_NOTEQUAL, 0, 0xff);
@@ -1637,6 +1642,8 @@ void hjpFill(Hjpcontext *ctx) {
     HjpCall *call = hjp__allocCall(ctx);
     if (!call) return;
 
+    int convex = ctx->npaths == 1 && ctx->paths[0].convex;
+
     int maxverts = 0;
     for (int i = 0; i < ctx->npaths; i++)
         maxverts += ctx->paths[i].nfill + ctx->paths[i].nstroke;
@@ -1651,8 +1658,6 @@ void hjpFill(Hjpcontext *ctx) {
     call->image = fillPaint.image;
     call->uniformOffset = uniformOffset;
 
-    /* Determine convex vs complex fill */
-    int convex = (ctx->npaths == 1 && ctx->paths[0].convex);
     call->type = convex ? HJP_GL_CONVEXFILL : HJP_GL_FILL;
 
     /* Blend */
