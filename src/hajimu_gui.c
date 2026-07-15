@@ -3860,6 +3860,88 @@ static Value fn_file_delete(int argc, Value *argv) {
 }
 
 /* ---------------------------------------------------------------
+ * ファイル置換(一時ファイル, 保存先) → 真偽
+ *
+ * 同じファイルシステム上で一時ファイルを保存先へ原子的に置換する。
+ * 保存中の異常で既存ファイルを失わないよう、先に保存先を削除しない。
+ * 成功時は一時ファイルがなくなり、失敗時は保存先を変更しない。
+ * ---------------------------------------------------------------*/
+#ifdef _WIN32
+static wchar_t *gui_file_path_to_wide(const char *path) {
+    if (!path || path[0] == '\0') return NULL;
+    int length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
+    if (length <= 0) return NULL;
+    wchar_t *wide = (wchar_t *)malloc((size_t)length * sizeof(wchar_t));
+    if (!wide) return NULL;
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, length) <= 0) {
+        free(wide);
+        return NULL;
+    }
+    return wide;
+}
+#endif
+
+static Value fn_file_replace(int argc, Value *argv) {
+    if (argc < 2 || argv[0].type != VALUE_STRING ||
+        argv[1].type != VALUE_STRING) {
+        return hajimu_bool(false);
+    }
+
+    const char *temporary_path = argv[0].string.data;
+    const char *target_path = argv[1].string.data;
+    if (!temporary_path || !target_path || temporary_path[0] == '\0' ||
+        target_path[0] == '\0' || strcmp(temporary_path, target_path) == 0) {
+        return hajimu_bool(false);
+    }
+
+#ifdef _WIN32
+    wchar_t *temporary_wide = gui_file_path_to_wide(temporary_path);
+    wchar_t *target_wide = gui_file_path_to_wide(target_path);
+    if (!temporary_wide || !target_wide) {
+        free(temporary_wide);
+        free(target_wide);
+        return hajimu_bool(false);
+    }
+    /* Windowsでも日本語の作品パスを損なわないようUnicode APIで検査する。 */
+    FILE *probe = _wfopen(temporary_wide, L"rb");
+#else
+    FILE *probe = fopen(temporary_path, "rb");
+#endif
+    if (!probe) {
+#ifdef _WIN32
+        free(temporary_wide);
+        free(target_wide);
+#endif
+        return hajimu_bool(false);
+    }
+    (void)fgetc(probe);
+    bool is_file = !ferror(probe);
+    if (fclose(probe) != 0) {
+        is_file = false;
+    }
+    if (!is_file) {
+#ifdef _WIN32
+        free(temporary_wide);
+        free(target_wide);
+#endif
+        return hajimu_bool(false);
+    }
+
+#ifdef _WIN32
+    bool replaced = MoveFileExW(
+        temporary_wide,
+        target_wide,
+        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
+    ) != 0;
+    free(temporary_wide);
+    free(target_wide);
+    return hajimu_bool(replaced);
+#else
+    return hajimu_bool(rename(temporary_path, target_path) == 0);
+#endif
+}
+
+/* ---------------------------------------------------------------
  * 外部プロセス起動(実行ファイル, 引数配列) → 真偽
  *
  * シェルを介さず引数を個別にOSへ渡す。テストプレイなど、GUIを
@@ -22798,6 +22880,8 @@ static HajimuPluginFunc gui_functions[] = {
     {"file_copy",             fn_file_copy,     2, 2},
     {"ファイル削除",         fn_file_delete,   1, 1},
     {"file_delete",           fn_file_delete,   1, 1},
+    {"ファイル置換",         fn_file_replace,  2, 2},
+    {"file_replace",          fn_file_replace,  2, 2},
     {"外部プロセス起動",     fn_process_launch, 2, 2},
     {"process_launch",        fn_process_launch, 2, 2},
     {"実行ファイルパス",     fn_executable_path, 0, 0},
@@ -24059,7 +24143,7 @@ static HajimuPluginFunc gui_functions[] = {
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.4.0",
+        .version        = "14.5.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,
