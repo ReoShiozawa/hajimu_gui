@@ -1186,7 +1186,9 @@ static Value fn_draw_loop(int argc, Value *argv) {
                 else if (k == HJPK_RIGHT)     app->in.key_right = true;
                 else if (k == HJPK_HOME)      app->in.key_home  = true;
                 else if (k == HJPK_END)       app->in.key_end   = true;
-                else if (k == HJPK_ESCAPE)    app->running = false;
+                /* Escape はダイアログや選択解除に使う通常の入力として扱う。
+                 * ここでアプリを終了すると、入力欄を閉じる操作まで突然終了に見えてしまう。 */
+                else if (k == HJPK_ESCAPE)    { /* last_key で公開する */ }
                 else if (ctrl && k == HJPK_a) app->in.key_a = true;
                 else if (ctrl && k == HJPK_c) app->in.key_c = true;
                 else if (ctrl && k == HJPK_v) app->in.key_v = true;
@@ -1215,6 +1217,13 @@ static Value fn_draw_loop(int argc, Value *argv) {
         /* ── フレーム開始 ── */
         hjp_gl_get_drawable_size(app->window, &app->fb_w, &app->fb_h);
         hjp_window_get_size(app->window, &app->win_w, &app->win_h);
+        /* 最小化・リサイズの途中では Cocoa/Win32 が一時的に 0px を返す。
+         * 0 除算や無効なフレームをレンダラーへ渡さず、復元まで待機する。 */
+        if (app->win_w <= 0 || app->win_h <= 0 ||
+            app->fb_w <= 0 || app->fb_h <= 0) {
+            hjp_delay(16);
+            continue;
+        }
         app->px_ratio = (float)app->fb_w / (float)app->win_w;
 
         glViewport(0, 0, app->fb_w, app->fb_h);
@@ -1245,6 +1254,14 @@ static Value fn_draw_loop(int argc, Value *argv) {
         g_frame_count++;
         hajimu_call(&callback, 0, NULL);
 
+        /* コールバック内の終了要求ではリソースを即時解放しない。
+         * 開始済みフレームだけを閉じ、呼び出し元へ安全に制御を戻す。 */
+        if (!app->running) {
+            g_cur = NULL;
+            hjpEndFrame(app->vg);
+            break;
+        }
+
         /* このフレームで分割バーに触れていなければ、一度だけ通常カーソルへ戻す。 */
         if (!g_auto_resize_cursor && (g_cursor_type == 5 || g_cursor_type == 6)) {
             gui_apply_cursor_type(0);
@@ -1262,6 +1279,12 @@ static Value fn_draw_loop(int argc, Value *argv) {
                     hajimu_call(&tcb, 0, NULL);
                 }
             }
+        }
+
+        if (!app->running) {
+            g_cur = NULL;
+            hjpEndFrame(app->vg);
+            break;
         }
 
         /* ── ツールチップ描画 ── */
@@ -1358,6 +1381,10 @@ static Value fn_app_quit(int argc, Value *argv) {
 
     GuiApp *app = &g_apps[idx];
     app->running = false;
+
+    /* 描画コールバック中は fn_draw_loop が現在のフレームを閉じる。
+     * ここで vg/window を破棄すると、コールバック復帰後に解放済み領域へ触れてしまう。 */
+    if (g_cur == app) return hajimu_null();
 
     if (app->vg) { hjpDeleteGL3(app->vg); app->vg = NULL; }
     if (app->gl) { hjp_gl_delete_context(app->gl); app->gl = NULL; }
@@ -4823,6 +4850,9 @@ static Value fn_key_pressed(int argc, Value *argv) {
         return hajimu_bool(g_cur->in.key_return);
     if (strcmp(key, "\xe3\x82\xbf\xe3\x83\x96") == 0)
         return hajimu_bool(g_cur->in.key_tab);
+    if (strcmp(key, "\xe3\x82\xa8\xe3\x82\xb9\xe3\x82\xb1\xe3\x83\xbc\xe3\x83\x97") == 0 ||
+        strcmp(key, "Escape") == 0 || strcmp(key, "escape") == 0)
+        return hajimu_bool(g_cur->in.last_key == HJPK_ESCAPE);
     if (strlen(key) == 1) {
         char c = key[0];
         if (c >= 'A' && c <= 'Z') c += 32;
