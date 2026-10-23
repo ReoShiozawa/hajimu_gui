@@ -24140,6 +24140,8 @@ static HajimuPluginFunc gui_functions[] = {
 };
 
 /* プラグイン初期化 */
+HAJIMU_PLUGIN_ABI_EXPORT()
+
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
