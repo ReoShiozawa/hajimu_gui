@@ -5,6 +5,16 @@ int main(void) {
     Hjpcontext *ctx = calloc(1, sizeof(*ctx));
     assert(ctx != NULL);
     ctx->flags = HJP_ANTIALIAS;
+    /* 同じ物理サイズでも、論理サイズ・DPIの違うキャッシュは共有しない。 */
+    ctx->nglyphs = 2;
+    ctx->glyphCache[0] = (HjpGlyph){.codepoint = 'A', .fontId = 0, .size = 18, .raster_ratio = 2};
+    ctx->glyphCache[1] = (HjpGlyph){.codepoint = 'A', .fontId = 0, .size = 36, .raster_ratio = 1};
+    ctx->devicePxRatio = 2;
+    assert(hjp__findGlyph(ctx, 'A', 0, 18) == &ctx->glyphCache[0]);
+    assert(hjp__findGlyph(ctx, 'A', 0, 36) == NULL);
+    ctx->devicePxRatio = 1;
+    assert(hjp__findGlyph(ctx, 'A', 0, 36) == &ctx->glyphCache[1]);
+    ctx->nglyphs = 0;
     int capacity = 0;
     for (int frame = 0; frame < 10000; frame++) {
         hjpBeginFrame(ctx, 640, 480, 1);

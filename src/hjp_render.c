@@ -185,8 +185,9 @@ typedef struct {
     uint32_t codepoint;
     int fontId;
     float size;
+    float raster_ratio;
     int x, y, w, h;
-    int xoff, yoff;
+    float xoff, yoff;
     float advance;
 } HjpGlyph;
 
@@ -1825,13 +1826,19 @@ static uint32_t hjp__decodeUTF8(const char **s) {
 static HjpGlyph *hjp__findGlyph(Hjpcontext *ctx, uint32_t cp, int fontId, float size) {
     for (int i = 0; i < ctx->nglyphs; i++) {
         HjpGlyph *g = &ctx->glyphCache[i];
-        if (g->codepoint == cp && g->fontId == fontId && hjp__absf(g->size - size) < 0.5f)
+        float ratio = fmaxf(1.0f, fminf(3.0f, ctx->devicePxRatio));
+        if (g->codepoint == cp && g->fontId == fontId &&
+            hjp__absf(g->size - size) < 0.5f &&
+            hjp__absf(g->raster_ratio - ratio) < 0.01f)
             return g;
     }
     return NULL;
 }
 
 static HjpGlyph *hjp__renderGlyph(Hjpcontext *ctx, uint32_t cp, int fontId, float size) {
+    /* キャッシュは物理解像度で区別し、計測・配置は論理座標のまま保つ。 */
+    float ratio = fmaxf(1.0f, fminf(3.0f, ctx->devicePxRatio));
+    float raster_size = size * ratio;
     HjpGlyph *existing = hjp__findGlyph(ctx, cp, fontId, size);
     if (existing) return existing;
     if (fontId < 0 || fontId >= ctx->nfonts || !ctx->fonts[fontId].handle) return NULL;
@@ -1839,7 +1846,7 @@ static HjpGlyph *hjp__renderGlyph(Hjpcontext *ctx, uint32_t cp, int fontId, floa
     unsigned char *bitmap = NULL;
     int gw, gh, gxoff, gyoff;
     float advance;
-    int ok = hjp_font_get_glyph(ctx->fonts[fontId].handle, size, cp,
+    int ok = hjp_font_get_glyph(ctx->fonts[fontId].handle, raster_size, cp,
                                  &bitmap, &gw, &gh, &gxoff, &gyoff, &advance);
     if (!ok || !bitmap) { if (bitmap) free(bitmap); return NULL; }
 
@@ -1915,9 +1922,10 @@ static HjpGlyph *hjp__renderGlyph(Hjpcontext *ctx, uint32_t cp, int fontId, floa
         g = &ctx->glyphCache[ctx->nglyphs - 1]; /* Overwrite last */
     }
     g->codepoint = cp; g->fontId = fontId; g->size = size;
+    g->raster_ratio = ratio;
     g->x = ax; g->y = ay; g->w = gw; g->h = gh;
-    g->xoff = gxoff; g->yoff = gyoff;
-    g->advance = advance;
+    g->xoff = gxoff / ratio; g->yoff = gyoff / ratio;
+    g->advance = advance / ratio;
     return g;
 }
 
@@ -2103,8 +2111,9 @@ float hjpText(Hjpcontext *ctx, float x, float y, const char *str, const char *en
 
         float gx = cx + g->xoff;
         float gy = baselineY + g->yoff;
-        float gw = (float)g->w;
-        float gh = (float)g->h;
+        float ratio = g->raster_ratio;
+        float gw = (float)g->w / ratio;
+        float gh = (float)g->h / ratio;
         float u0 = g->x * iw;
         float u1 = (g->x + g->w) * iw;
         /* CoreGraphics ビットマップは行0=下 (Y-up) なので V 座標を反転 */

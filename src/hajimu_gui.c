@@ -2194,9 +2194,18 @@ static Value fn_text_input(int argc, Value *argv) {
     hjpTextAlign(vg, HJP_ALIGN_LEFT | HJP_ALIGN_MIDDLE);
     hjpText(vg, x, y + row_h * 0.5f, label, NULL);
 
+    /* 大きな文字や長いラベルでも入力欄へ重ならないよう実幅を使う。 */
+    float label_w = fmaxf(GUI_LABEL_W,
+        hjpTextBounds(vg, 0, 0, label, NULL, NULL) + 12.0f);
+    if (label_w > avail_w - 80.0f) {
+        float label_h = GUI_FONT_SIZE + 12.0f;
+        y += label_h;
+        row_h += label_h;
+        label_w = 0.0f;
+    }
     /* 入力フィールド */
-    float fx = x + GUI_LABEL_W;
-    float fw = avail_w - GUI_LABEL_W;
+    float fx = x + label_w;
+    float fw = avail_w - label_w;
     if (fw < 80.0f) fw = 80.0f;
 
     bool focused = (g_cur->focused == id);
@@ -4747,7 +4756,10 @@ static Value fn_theme_color(int argc, Value *argv) {
     if (argc < 2 || argv[0].type != VALUE_STRING) return hajimu_null();
     const char *key = argv[0].string.data;
     Hjpcolor col = gui_arg_color(argv[1]);
-    if (strstr(key, "\xe8\x83\x8c\xe6\x99\xaf") != NULL) {
+    /* 複合名を先に判定する。「選択背景」を全体の「背景」と誤認しない。 */
+    if (strcmp(key, "選択背景") == 0)
+        g_th.widget_active = col;
+    else if (strstr(key, "\xe8\x83\x8c\xe6\x99\xaf") != NULL) {
         g_th.bg = col;
         for (int i = 0; i < GUI_MAX_APPS; i++) {
             if (g_apps[i].valid)
@@ -24262,7 +24274,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.6.1",
+        .version        = "14.6.2",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,
