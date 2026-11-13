@@ -47,7 +47,7 @@ ifeq ($(OS),Windows_NT)
     LDFLAGS = -lopengl32 -lgdi32 -luser32 -lshell32 -lkernel32 -lpthread -static-libgcc
 else ifeq ($(DETECTED_OS),Darwin)
     SRC_PLATFORM = src/hjp_platform_macos.m
-    CFLAGS  = -Wall -Wextra -O2 -I$(HAJIMU_INCLUDE) -Isrc -fPIC -DGL_SILENCE_DEPRECATION
+    CFLAGS  = -Wall -Wextra -O2 -I$(HAJIMU_INCLUDE) -Isrc -fPIC -DGL_SILENCE_DEPRECATION -fobjc-arc
     CFLAGS += -shared -dynamiclib
     LDFLAGS = -framework OpenGL -framework Cocoa -framework CoreText -framework CoreGraphics -framework ImageIO -lpthread
 else
@@ -66,7 +66,7 @@ FONT_FILE = NotoSansCJKjp-Regular.otf
 all: $(OUT)
 	@echo "  ビルド完了: $(OUT)"
 
-$(OUT): $(SRC_C) $(SRC_PLATFORM)
+$(OUT): $(SRC_C) $(SRC_PLATFORM) Makefile $(HAJIMU_INCLUDE)/hajimu_plugin.h $(HAJIMU_INCLUDE)/hajimu_abi.h
 	$(CC) $(CFLAGS) -o $@ $(SRC_C) $(SRC_PLATFORM) $(LDFLAGS)
 
 clean:
@@ -127,7 +127,7 @@ build-all: build-macos build-linux build-windows
 
 build-macos:
 	@mkdir -p $(DIST)
-	gcc -shared -dynamiclib -fPIC -O2 -DGL_SILENCE_DEPRECATION \
+	gcc -shared -dynamiclib -fPIC -O2 -DGL_SILENCE_DEPRECATION -fobjc-arc \
 	  -I$(HAJIMU_INC) -Isrc \
 	  $(SRC_ALL) src/hjp_platform_macos.m \
 	  -framework OpenGL -framework Cocoa -framework CoreText \

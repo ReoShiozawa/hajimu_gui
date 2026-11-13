@@ -2152,9 +2152,17 @@ static void gui_text_buf_process(GuiTextBuf *tb) {
  *   オプション: {幅: 数値, プレースホルダー: 文字列}
  *   フォーカス中はキーボード入力を受け付ける。
  * ---------------------------------------------------------------*/
+// 選択値や入力値を引数の寿命から独立させる。対応型は文字列・スカラーのみ。
+static Value gui_owned_control_value(Value value) {
+    if (value.type == VALUE_STRING) return hajimu_string(value.string.data);
+    if (value.type == VALUE_NUMBER || value.type == VALUE_BOOL || value.type == VALUE_NULL)
+        return value;
+    return hajimu_null();
+}
+
 static Value fn_text_input(int argc, Value *argv) {
     if (!g_cur || argc < 2 || argv[0].type != VALUE_STRING)
-        return (argc >= 2) ? argv[1] : hajimu_string("");
+        return (argc >= 2) ? gui_owned_control_value(argv[1]) : hajimu_string("");
 
     Hjpcontext *vg = g_cur->vg;
     const char *label = argv[0].string.data;
@@ -2605,7 +2613,7 @@ static Value fn_combobox(int argc, Value *argv) {
     if (!g_cur || argc < 3 ||
         argv[0].type != VALUE_STRING ||
         argv[1].type != VALUE_ARRAY)
-        return (argc >= 3) ? argv[2] : hajimu_null();
+        return (argc >= 3) ? gui_owned_control_value(argv[2]) : hajimu_null();
 
     Hjpcontext *vg = g_cur->vg;
     const char *label = argv[0].string.data;
@@ -2724,7 +2732,7 @@ static Value fn_combobox(int argc, Value *argv) {
 
     g_cur->last = (GuiLastWidget){fx, y, fw, GUI_INPUT_H, hov};
     gui_advance(row_h + dropdown_h);
-    return result;
+    return gui_owned_control_value(result);
 }
 
 /* =====================================================================
@@ -22915,6 +22923,13 @@ HAJIMU_PLUGIN_EXPORT void hajimu_plugin_set_runtime(HajimuRuntime *rt) {
     __hajimu_runtime = rt;
 }
 
+// 引数をその場で読むだけのAPIを明示する。タイマー・モデル・コールバック保持は含めない。
+HAJIMU_PLUGIN_EXPORT bool hajimu_plugin_borrows_arguments(Value (*fn)(int, Value *)) {
+    return fn == fn_text || fn == fn_heading || fn == fn_button ||
+        fn == fn_progress || fn == fn_text_input || fn == fn_combobox ||
+        fn == fn_list || fn == fn_tab_bar || fn == fn_segment_control;
+}
+
 /* 関数テーブル */
 static HajimuPluginFunc gui_functions[] = {
     /* --- Phase 1: コア --- */
@@ -24247,7 +24262,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.6.0",
+        .version        = "14.6.1",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,

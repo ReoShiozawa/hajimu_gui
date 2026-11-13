@@ -28,6 +28,7 @@
 #include <string.h>
 #include <math.h>
 #include <float.h>
+#include <limits.h>
 
 /* =====================================================================
  * 内部定数
@@ -1077,13 +1078,22 @@ static void hjp__flattenPaths(Hjpcontext *ctx) {
 }
 
 /* 頂点バッファ確保 */
-static Hjpvertex *hjp__allocVerts(Hjpcontext *ctx, int n) {
-    if (ctx->nverts + n > ctx->cverts) {
-        int cv = hjp__maxi(ctx->nverts + n, ctx->cverts + ctx->cverts/2);
+static int hjp__reserveVerts(Hjpcontext *ctx, int n) {
+    if (n < 0) return 0;
+    if (n > ctx->cverts) {
+        int grown = ctx->cverts > INT_MAX - ctx->cverts / 2
+            ? INT_MAX : ctx->cverts + ctx->cverts / 2;
+        int cv = hjp__maxi(n, grown);
         Hjpvertex *v = (Hjpvertex*)realloc(ctx->verts, sizeof(Hjpvertex)*cv);
-        if (!v) return NULL;
+        if (!v) return 0;
         ctx->verts = v; ctx->cverts = cv;
     }
+    return 1;
+}
+
+static Hjpvertex *hjp__allocVerts(Hjpcontext *ctx, int n) {
+    if (n < 0 || ctx->nverts > INT_MAX - n ||
+        !hjp__reserveVerts(ctx, ctx->nverts + n)) return NULL;
     Hjpvertex *ret = ctx->verts + ctx->nverts;
     ctx->nverts += n;
     return ret;
@@ -1098,11 +1108,24 @@ static void hjp__expandFill(Hjpcontext *ctx, float w, int lineJoin, float miterL
     (void)lineJoin; (void)miterLimit;
     int aa = (ctx->flags & HJP_ANTIALIAS) ? 1 : 0;
     float fringe = ctx->fringeWidth;
+    // GL側へ頂点はコピー済みなので作業領域を再利用する。全パス分を先に確保し、
+    // 展開途中のreallocで先行パスのfill/strokeポインタが無効になることも防ぐ。
+    ctx->nverts = 0;
+    size_t required = 0;
+    for (int i = 0; i < ctx->npaths; i++) {
+        HjpPath *path = &ctx->paths[i];
+        path->fill = path->stroke = NULL;
+        path->nfill = path->nstroke = 0;
+        if (path->count > 0)
+            required += (size_t)path->count + (aa ? ((size_t)path->count + 1) * 2 : 0);
+    }
+    if (required > INT_MAX || !hjp__reserveVerts(ctx, (int)required)) return;
     /* Calculate: 凸性判定 */
     for (int i = 0; i < ctx->npaths; i++) {
         HjpPath *path = &ctx->paths[i];
         HjpPoint *pts = ctx->points + path->first;
         int npts = path->count;
+        if (npts < 1) continue;
         /* Convex check */
         float area = 0;
         for (int j = 0; j < npts; j++) {
@@ -1148,6 +1171,17 @@ static void hjp__expandStroke(Hjpcontext *ctx, float w, float fringe, int lineCa
     int aa = (ctx->flags & HJP_ANTIALIAS) ? 1 : 0;
     float lw = w * 0.5f;
     if (aa) lw += fringe * 0.5f;
+
+    ctx->nverts = 0;
+    size_t required = 0;
+    for (int i = 0; i < ctx->npaths; i++) {
+        HjpPath *path = &ctx->paths[i];
+        path->fill = path->stroke = NULL;
+        path->nfill = path->nstroke = 0;
+        if (path->count >= 2)
+            required += (size_t)path->count * 2 + (path->closed ? 2 : 0);
+    }
+    if (required > INT_MAX || !hjp__reserveVerts(ctx, (int)required)) return;
 
     for (int i = 0; i < ctx->npaths; i++) {
         HjpPath *path = &ctx->paths[i];
@@ -2232,6 +2266,7 @@ void hjpBeginFrame(Hjpcontext *ctx, float windowWidth, float windowHeight, float
     ctx->view[0] = windowWidth;
     ctx->view[1] = windowHeight;
     /* Reset render buffers */
+    ctx->nverts = 0;
     ctx->ncalls = 0;
     ctx->nglpaths = 0;
     ctx->nglverts = 0;
@@ -2239,6 +2274,7 @@ void hjpBeginFrame(Hjpcontext *ctx, float windowWidth, float windowHeight, float
 }
 
 void hjpCancelFrame(Hjpcontext *ctx) {
+    ctx->nverts = 0;
     ctx->ncalls = 0;
     ctx->nglpaths = 0;
     ctx->nglverts = 0;

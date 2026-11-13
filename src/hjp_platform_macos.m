@@ -14,6 +14,11 @@
 #import <OpenGL/gl3.h>
 #import <mach/mach_time.h>
 
+// CocoaオブジェクトはARCで管理する。MRCビルドでの描画ごとのリークを防ぐ。
+#if !__has_feature(objc_arc)
+#error "hjp_platform_macos.m requires -fobjc-arc"
+#endif
+
 #include "hjp_platform.h"
 #include <stdlib.h>
 #include <string.h>
@@ -26,6 +31,7 @@
 @class HjpNSWindow;
 @class HjpOpenGLView;
 @class HjpAppDelegate;
+@class HjpWindowDelegate;
 
 #define HJP_MAX_EVENTS 256
 #define HJP_MAX_KEYS   512
@@ -34,6 +40,7 @@ struct HjpWindow {
     HjpNSWindow  *nswin;
     HjpOpenGLView *glview;
     NSOpenGLContext *glctx;
+    HjpWindowDelegate *delegate;
     int windowId;
     bool closed;
 };
@@ -509,8 +516,9 @@ HjpWindow *hjp_window_create(const char *title, int x, int y, int w, int h, uint
             defer:NO];
         if (!win->nswin) { free(win); return NULL; }
 
-        HjpWindowDelegate *wd = [[HjpWindowDelegate alloc] init];
-        [win->nswin setDelegate:wd];
+        win->delegate = [[HjpWindowDelegate alloc] init];
+        [win->nswin setDelegate:win->delegate];
+        [win->nswin setReleasedWhenClosed:NO];
         [win->nswin setTitle:[NSString stringWithUTF8String:title ? title : ""]];
         [win->nswin setAcceptsMouseMovedEvents:YES];
 
@@ -566,7 +574,16 @@ HjpWindow *hjp_window_create(const char *title, int x, int y, int w, int h, uint
 void hjp_window_destroy(HjpWindow *win) {
     if (!win) return;
     @autoreleasepool {
+        [win->nswin setDelegate:nil];
+        if ([NSOpenGLContext currentContext] == win->glctx)
+            [NSOpenGLContext clearCurrentContext];
+        [win->glctx clearDrawable];
         [win->nswin close];
+        // calloc/freeで管理する構造体のstrongフィールドは明示的に解放する。
+        win->glctx = nil;
+        win->glview = nil;
+        win->nswin = nil;
+        win->delegate = nil;
     }
     if (g_hjp.mainWindow == win) g_hjp.mainWindow = NULL;
     free(win);
@@ -974,7 +991,7 @@ float hjp_font_text_width(HjpFont font, float size, const char *str, const char 
         NSString *nsstr = [[NSString alloc] initWithBytes:str length:len encoding:NSUTF8StringEncoding];
         if (!nsstr) { CFRelease(ctFont); return 0; }
 
-        NSDictionary *attrs = @{(id)kCTFontAttributeName: (__bridge id)ctFont};
+        NSDictionary *attrs = @{(__bridge id)kCTFontAttributeName: (__bridge id)ctFont};
         NSAttributedString *attrStr = [[NSAttributedString alloc] initWithString:nsstr attributes:attrs];
         CTLineRef line = CTLineCreateWithAttributedString((__bridge CFAttributedStringRef)attrStr);
         double width = CTLineGetTypographicBounds(line, NULL, NULL, NULL);

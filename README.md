@@ -1,6 +1,6 @@
 # hajimu_gui
 
-**はじむ言語用 GUI パッケージ v14.6.0** — 自作プラットフォーム層 + 即時モード GUI フレームワーク
+**はじむ言語用 GUI パッケージ v14.6.1** — 自作プラットフォーム層 + 即時モード GUI フレームワーク
 
 v14.6では保存と終了の安全性を支援するAPIを追加しています。
 
@@ -68,6 +68,16 @@ cd hajimu_gui
 make
 make install
 ```
+
+macOSのObjective-C実装にはARCが必要です。付属Makefileは `-fobjc-arc` を有効にします。独自のビルド手順でも同じ指定を維持してください。
+
+メモリと寿命の回帰検査は、macOSで次を実行します。20ウィンドウのdelegate保持・破棄、文字幅10,000回、128パスを含む10,000フレームのASan検査を含みます。
+
+```sh
+sh tests/check-macos-lifetime.sh
+```
+
+基本ウィジェットの一時引数解放は、`hajimu_plugin_borrows_arguments` に対応したHajimuランタイムで有効になります。タイマー・モデルなど引数を保持するAPIは対象外です。公開ABIの構造体は変更していません。
 
 ---
 
