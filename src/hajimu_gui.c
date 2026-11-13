@@ -42,6 +42,10 @@
 #include <math.h>
 #include <ctype.h>
 #include <time.h>
+#include <sys/stat.h>
+#ifndef _WIN32
+#include <sys/file.h>
+#endif
 
 /* --- OpenGL ヘッダー --- */
 #ifdef __APPLE__
@@ -331,10 +335,19 @@ typedef struct {
     int      layout_scope_depth;
 
     bool valid;
+    Value close_guard;
 } GuiApp;
 
 static GuiApp  g_apps[GUI_MAX_APPS];
 static GuiApp *g_cur  = NULL;           /* 描画中の現在アプリ        */
+static bool gui_request_close(GuiApp *app) {
+    if (app->close_guard.type == VALUE_FUNCTION) {
+        Value allowed = hajimu_call(&app->close_guard, 0, NULL);
+        if (allowed.type != VALUE_BOOL || !allowed.boolean) return false;
+    }
+    app->running = false;
+    return true;
+}
 static int     g_frame_count = 0;       /* 全描画ループ共通フレーム数 */
 
 static bool gui_write_screenshot(GuiApp *app, const char *path);
@@ -1124,7 +1137,7 @@ static Value fn_draw_loop(int argc, Value *argv) {
         while (hjp_poll_event(&ev)) {
             switch (ev.type) {
             case HJP_EVENT_QUIT:
-                app->running = false;
+                gui_request_close(app);
                 break;
             case HJP_EVENT_MOUSEMOTION:
                 app->in.mx = ev.motion.x;
@@ -1374,6 +1387,22 @@ static Value fn_draw_loop(int argc, Value *argv) {
 /* ---------------------------------------------------------------
  * アプリ終了(アプリ)
  * ---------------------------------------------------------------*/
+static Value fn_close_guard(int argc, Value *argv) {
+    if (argc != 2 || argv[0].type != VALUE_NUMBER || argv[1].type != VALUE_FUNCTION)
+        return hajimu_bool(false);
+    int idx = (int)argv[0].number;
+    if (idx < 0 || idx >= GUI_MAX_APPS || !g_apps[idx].valid) return hajimu_bool(false);
+    g_apps[idx].close_guard = argv[1];
+    return hajimu_bool(true);
+}
+
+static Value fn_request_close(int argc, Value *argv) {
+    if (argc != 1 || argv[0].type != VALUE_NUMBER) return hajimu_bool(false);
+    int idx = (int)argv[0].number;
+    if (idx < 0 || idx >= GUI_MAX_APPS || !g_apps[idx].valid) return hajimu_bool(false);
+    return hajimu_bool(gui_request_close(&g_apps[idx]));
+}
+
 static Value fn_app_quit(int argc, Value *argv) {
     if (argc < 1 || argv[0].type != VALUE_NUMBER) return hajimu_null();
     int idx = (int)argv[0].number;
@@ -3947,6 +3976,74 @@ static Value fn_file_replace(int argc, Value *argv) {
  * シェルを介さず引数を個別にOSへ渡す。テストプレイなど、GUIを
  * 維持したまま別プログラムを起動する用途を想定する。
  * ---------------------------------------------------------------*/
+/* ロックファイルは削除しない。別inodeのロックを同時取得する競合を防ぐ。
+ * OSが終了時に解放するので、クラッシュ後の強制解除は不要。 */
+#ifdef _WIN32
+static HANDLE gui_file_locks[32];
+#else
+static int gui_file_locks[32];
+#endif
+static bool gui_lock_used[32];
+static Value fn_file_lock(int argc, Value *argv) {
+    if (argc != 1 || argv[0].type != VALUE_STRING) return hajimu_number(-1);
+    int slot = 0;
+    while (slot < 32 && gui_lock_used[slot]) slot++;
+    if (slot == 32) return hajimu_number(-1);
+#ifdef _WIN32
+    wchar_t *path = gui_file_path_to_wide(argv[0].string.data);
+    if (!path) return hajimu_number(-1);
+    HANDLE fd = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, 0, NULL,
+                            OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    free(path);
+    if (fd == INVALID_HANDLE_VALUE) return hajimu_number(-1);
+#else
+    int fd = open(argv[0].string.data, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0) return hajimu_number(-1);
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        close(fd);
+        return hajimu_number(-1);
+    }
+#endif
+    gui_file_locks[slot] = fd;
+    gui_lock_used[slot] = true;
+    return hajimu_number(slot);
+}
+static Value fn_file_unlock(int argc, Value *argv) {
+    if (argc != 1 || argv[0].type != VALUE_NUMBER) return hajimu_bool(false);
+    int slot = (int)argv[0].number;
+    if (slot < 0 || slot >= 32 || !gui_lock_used[slot]) return hajimu_bool(false);
+#ifdef _WIN32
+    CloseHandle(gui_file_locks[slot]);
+#else
+    close(gui_file_locks[slot]);
+#endif
+    gui_lock_used[slot] = false;
+    return hajimu_bool(true);
+}
+static Value fn_directory_move(int argc, Value *argv) {
+    if (argc != 2 || argv[0].type != VALUE_STRING || argv[1].type != VALUE_STRING)
+        return hajimu_bool(false);
+#ifdef _WIN32
+    wchar_t *src = gui_file_path_to_wide(argv[0].string.data);
+    wchar_t *dst = gui_file_path_to_wide(argv[1].string.data);
+    bool ok = false;
+    if (src && dst) {
+        DWORD attr = GetFileAttributesW(src);
+        if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) &&
+            !(attr & FILE_ATTRIBUTE_REPARSE_POINT) && GetFileAttributesW(dst) == INVALID_FILE_ATTRIBUTES)
+            ok = MoveFileExW(src, dst, MOVEFILE_WRITE_THROUGH) != 0;
+    }
+    free(src); free(dst);
+#else
+    struct stat src, dst;
+    bool ok = lstat(argv[0].string.data, &src) == 0 && S_ISDIR(src.st_mode) &&
+        lstat(argv[1].string.data, &dst) != 0 && errno == ENOENT &&
+        rename(argv[0].string.data, argv[1].string.data) == 0;
+#endif
+    return hajimu_bool(ok);
+}
+
 static char *gui_process_arg_dup(const char *source) {
     size_t size = strlen(source) + 1;
     char *copy = (char *)malloc(size);
@@ -22824,6 +22921,8 @@ static HajimuPluginFunc gui_functions[] = {
     {"アプリ作成",           fn_app_create,    3, 3},
     {"描画ループ",           fn_draw_loop,     2, 2},
     {"アプリ終了",           fn_app_quit,      1, 1},
+    {"終了確認設定",         fn_close_guard,   2, 2},
+    {"アプリ終了要求",       fn_request_close, 1, 1},
     {"ウィンドウサイズ",     fn_window_size,   1, 1},
     {"ウィンドウタイトル",   fn_window_title,  2, 2},
     {"ウィンドウリサイズ",   fn_window_resize, 3, 3},
@@ -22881,6 +22980,9 @@ static HajimuPluginFunc gui_functions[] = {
     {"ファイル削除",         fn_file_delete,   1, 1},
     {"file_delete",           fn_file_delete,   1, 1},
     {"ファイル置換",         fn_file_replace,  2, 2},
+    {"ファイルロック取得",   fn_file_lock,     1, 1},
+    {"ファイルロック解放",   fn_file_unlock,   1, 1},
+    {"ディレクトリ移動",     fn_directory_move,2, 2},
     {"file_replace",          fn_file_replace,  2, 2},
     {"外部プロセス起動",     fn_process_launch, 2, 2},
     {"process_launch",        fn_process_launch, 2, 2},
@@ -24145,7 +24247,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.5.0",
+        .version        = "14.6.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,
