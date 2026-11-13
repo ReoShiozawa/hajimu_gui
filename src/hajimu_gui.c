@@ -1535,6 +1535,46 @@ static Value fn_color_hex(int argc, Value *argv) {
  * テキスト(内容 [, オプション])
  *   オプション: {サイズ: 数値, 色: パック色}
  * ---------------------------------------------------------------*/
+static Value fn_available_width(int argc, Value *argv) {
+    (void)argc; (void)argv;
+    if (!g_cur) return hajimu_number(0);
+    float x, y, w;
+    gui_pos(&x, &y, &w);
+    return hajimu_number(fmaxf(0, w));
+}
+
+/* 省略しても元の文字列は保持する。全文は通常のツールチップで提示できる。 */
+static Value fn_ellipsis_text(int argc, Value *argv) {
+    if (!g_cur || argc < 1 || argv[0].type != VALUE_STRING) return hajimu_null();
+    float x, y, w;
+    gui_pos(&x, &y, &w);
+    if (argc > 1 && argv[1].type == VALUE_NUMBER)
+        w = fminf(w, fmaxf(0, (float)argv[1].number));
+    Hjpcontext *vg = g_cur->vg;
+    const char *s = argv[0].string.data;
+    size_t n = strlen(s), end = n;
+    hjpFontFaceId(vg, g_cur->font_id);
+    hjpFontSize(vg, GUI_FONT_SIZE);
+    hjpTextAlign(vg, HJP_ALIGN_LEFT | HJP_ALIGN_TOP);
+    hjpFillColor(vg, TH_TEXT);
+    float suffix = hjpTextBounds(vg, 0, 0, "…", NULL, NULL);
+    if (hjpTextBounds(vg, 0, 0, s, NULL, NULL) > w) {
+        while (end > 0 && hjpTextBounds(vg, 0, 0, s, s + end, NULL) + suffix > w) {
+            end--;
+            while (end > 0 && ((unsigned char)s[end] & 0xc0) == 0x80) end--;
+        }
+    }
+    hjpSave(vg);
+    hjpIntersectScissor(vg, x, y, w, GUI_FONT_SIZE * 1.4f);
+    hjpText(vg, x, y, s, s + end);
+    if (end < n) hjpText(vg, x + hjpTextBounds(vg, 0, 0, s, s + end, NULL), y, "…", NULL);
+    hjpRestore(vg);
+    g_cur->last = (GuiLastWidget){x, y, w, GUI_FONT_SIZE * 1.4f,
+        gui_hit((float)g_cur->in.mx, (float)g_cur->in.my, x, y, w, GUI_FONT_SIZE * 1.4f)};
+    gui_advance(GUI_FONT_SIZE * 1.4f + 4);
+    return hajimu_null();
+}
+
 static Value fn_text(int argc, Value *argv) {
     if (!g_cur || argc < 1 || argv[0].type != VALUE_STRING)
         return hajimu_null();
@@ -22944,6 +22984,8 @@ HAJIMU_PLUGIN_EXPORT bool hajimu_plugin_borrows_arguments(Value (*fn)(int, Value
 
 /* 関数テーブル */
 static HajimuPluginFunc gui_functions[] = {
+    {"利用可能幅", fn_available_width, 0, 0},
+    {"省略テキスト", fn_ellipsis_text, 1, 2},
     /* --- Phase 1: コア --- */
     {"アプリ作成",           fn_app_create,    3, 3},
     {"描画ループ",           fn_draw_loop,     2, 2},
@@ -24274,7 +24316,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.6.2",
+        .version        = "14.7.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,
