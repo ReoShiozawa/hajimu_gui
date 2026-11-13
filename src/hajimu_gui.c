@@ -1550,6 +1550,11 @@ static Value fn_ellipsis_text(int argc, Value *argv) {
     gui_pos(&x, &y, &w);
     if (argc > 1 && argv[1].type == VALUE_NUMBER)
         w = fminf(w, fmaxf(0, (float)argv[1].number));
+    if (w <= 0) {
+        g_cur->last = (GuiLastWidget){x, y, 0, GUI_FONT_SIZE * 1.4f, false};
+        gui_advance(GUI_FONT_SIZE * 1.4f + 4);
+        return hajimu_null();
+    }
     Hjpcontext *vg = g_cur->vg;
     const char *s = argv[0].string.data;
     size_t n = strlen(s), end = n;
@@ -1697,6 +1702,7 @@ static Value fn_button(int argc, Value *argv) {
 
     /* オプション: 幅 */
     Hjpcolor accent = TH_ACCENT;
+    bool secondary = false;
     if (argc >= 2 && argv[1].type == VALUE_DICT) {
         for (int i = 0; i < argv[1].dict.length; i++) {
             const char *k = argv[1].dict.keys[i];
@@ -1705,14 +1711,20 @@ static Value fn_button(int argc, Value *argv) {
                 btn_w = (float)v.number;
             if (strcmp(k, "色") == 0 && v.type == VALUE_NUMBER)
                 accent = gui_unpack(v.number);
+            if (strcmp(k, "高さ") == 0 && v.type == VALUE_NUMBER && isfinite(v.number))
+                btn_h = fmaxf(GUI_WIDGET_H, (float)v.number);
+            if (strcmp(k, "補助") == 0 && v.type == VALUE_BOOL)
+                secondary = v.boolean;
         }
     }
 
+    /* 親領域から描画とクリック領域がはみ出さないようにする。 */
+    btn_w = fmaxf(0, fminf(btn_w, avail_w));
     bool hov = false, pressed = false;
     bool clicked = gui_widget_logic(id, x, y, btn_w, btn_h, &hov, &pressed);
 
     /* 描画 */
-    Hjpcolor bg = accent;
+    Hjpcolor bg = secondary ? TH_BG : accent;
     if (pressed) {
         bg.r *= 0.82f;
         bg.g *= 0.82f;
@@ -1729,14 +1741,24 @@ static Value fn_button(int argc, Value *argv) {
     hjpFillColor(vg, bg);
     hjpFill(vg);
 
+    if (secondary) {
+        hjpStrokeColor(vg, TH_BORDER);
+        hjpStrokeWidth(vg, 1);
+        hjpStroke(vg);
+    }
+
     /* ラベル: 明るいテーマでもアクセント面上のコントラストを保つ。 */
     float luminance = 0.2126f * bg.r + 0.7152f * bg.g + 0.0722f * bg.b;
     Hjpcolor button_text = luminance < 0.58f
         ? hjpRGBA(255, 255, 255, 255)
         : hjpRGBA(24, 32, 40, 255);
+    if (secondary) button_text = TH_TEXT;
     hjpFillColor(vg, button_text);
+    hjpSave(vg);
+    hjpIntersectScissor(vg, x + 4, y, fmaxf(0, btn_w - 8), btn_h);
     hjpTextAlign(vg, HJP_ALIGN_CENTER | HJP_ALIGN_MIDDLE);
     hjpText(vg, x + btn_w * 0.5f, y + btn_h * 0.5f, label, NULL);
+    hjpRestore(vg);
 
     gui_advance(btn_h);
     return hajimu_bool(clicked);
@@ -24316,7 +24338,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.7.0",
+        .version        = "14.7.1",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,
