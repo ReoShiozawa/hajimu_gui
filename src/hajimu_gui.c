@@ -99,6 +99,7 @@
  * ===================================================================*/
 
 #define GUI_MAX_APPS         8
+#define GUI_MAX_MODALS       16
 #define GUI_PADDING         14.0f
 #define GUI_MARGIN           8.0f
 #define GUI_WIDGET_H        34.0f
@@ -332,8 +333,15 @@ typedef struct {
     bool nav_enabled;
     char modal_title[256];
     bool modal_entered, modal_input_saved;
+    bool modal_input_delivered;
     GuiInput modal_input;
-    uint32_t modal_restore_focus;
+    struct {
+        char title[256];
+        uint32_t restore_nav, restore_text;
+        bool drawn;
+    } modals[GUI_MAX_MODALS];
+    int modal_count;
+    bool modal_focus_pending, modal_focus_validate;
     char composition[128];
     uint32_t text_drag;
     bool text_context_published;
@@ -890,6 +898,34 @@ static float      g_next_opacity = 1.0f;  /* 次ウィジェットの透明度 *
 static uint32_t g_id_scope_stack[GUI_ID_SCOPE_MAX];
 static int g_id_scope_depth = 0;
 
+typedef struct {
+    GuiLayout lay, saved_lay[GUI_MAX_PANELS];
+    GuiLastWidget last;
+    GuiPanel panels[GUI_MAX_PANELS];
+    GuiHorizontalGroup horizontal[GUI_MAX_PANELS];
+    int saved_scope_depth[GUI_MAX_PANELS];
+    int panel_depth, horizontal_depth, layout_depth, render_depth, modal_index;
+    GuiScrollRegion scrolls[GUI_MAX_SCROLL];
+    GuiGrid grids[GUI_MAX_GRID];
+    GuiGroup groups[GUI_MAX_GROUP];
+    GuiCardState cards[GUI_MAX_CARD_DEPTH];
+    int card_depth, disabled_depth, id_depth;
+    uint32_t id_stack[GUI_ID_SCOPE_MAX];
+    bool disabled, entered;
+    float next_width;
+    char modal_title[256];
+    char dialog_title[256];
+    float content_x, content_y, content_w, content_h;
+} GuiDialogScope;
+static GuiDialogScope g_dialog_scopes[GUI_MAX_APPS][GUI_MAX_MODALS];
+static int g_dialog_depth[GUI_MAX_APPS];
+static GuiScrollRegion g_dialog_scrolls[GUI_MAX_APPS][GUI_MAX_MODALS][GUI_MAX_SCROLL];
+static bool gui_dialog_scope_end(void);
+
+static void gui_modal_mask_input(GuiInput *input) {
+    *input = (GuiInput){0}; input->mx = input->my = -100000;
+}
+
 /* FNV‑1a ハッシュ */
 static uint32_t gui_hash_raw(const char *s) {
     uint32_t h = 2166136261u;
@@ -1037,6 +1073,13 @@ static bool gui_visible_rect(float *x, float *y, float *w, float *h) {
         right = fminf(right, g_scrolls[i].x + g_scrolls[i].w);
         bottom = fminf(bottom, g_scrolls[i].y + g_scrolls[i].h);
     }
+    int dialog_depth = g_dialog_depth[g_cur - g_apps];
+    if (dialog_depth > 0) {
+        GuiDialogScope *scope = &g_dialog_scopes[g_cur - g_apps][dialog_depth - 1];
+        *x = fmaxf(*x, scope->content_x); *y = fmaxf(*y, scope->content_y);
+        right = fminf(right, scope->content_x + scope->content_w);
+        bottom = fminf(bottom, scope->content_y + scope->content_h);
+    }
     *w = fmaxf(0, right - *x); *h = fmaxf(0, bottom - *y);
     return *w > 0 && *h > 0;
 }
@@ -1104,6 +1147,9 @@ static void gui_nav_begin(void) {
     g_cur->action_count = 0;
     g_cur->modal_entered = false;
     g_cur->modal_input_saved = false;
+    g_cur->modal_input_delivered = false;
+    g_cur->modal_focus_validate = g_cur->modal_focus_pending;
+    for (int i = 0; i < g_cur->modal_count; i++) g_cur->modals[i].drawn = false;
     g_cur->nav_current_count = 0;
     if (g_cur->nav_enabled && !g_cur->composition[0] && g_cur->in.key_tab &&
         (!g_cur->focused || g_cur->focused == g_cur->nav_focus)) {
@@ -1113,13 +1159,15 @@ static void gui_nav_begin(void) {
 }
 
 static void gui_nav_end(void) {
+    /* 旧来のフレーム末尾まで続く描画とも共存し、閉じ忘れは持ち越さない。 */
+    while (g_dialog_depth[g_cur - g_apps] > 0) gui_dialog_scope_end();
 #ifdef __APPLE__
     hjp_accessibility_end(g_cur->window);
 #endif
     bool found = false;
     for (int i = 0; i < g_cur->nav_current_count; i++)
         if (g_cur->nav_current[i] == g_cur->nav_focus) found = true;
-    if (!found) {
+    if (!found && !(g_cur->modal_focus_pending && !g_cur->modal_focus_validate)) {
         if (g_cur->focused && g_cur->focused == g_cur->nav_focus) {
             g_cur->focused = 0;
             hjp_stop_text_input();
@@ -1129,6 +1177,11 @@ static void gui_nav_end(void) {
     g_cur->nav_previous_count = g_cur->nav_current_count;
     memcpy(g_cur->nav_previous, g_cur->nav_current,
            (size_t)g_cur->nav_current_count * sizeof(uint32_t));
+    if (g_cur->modal_focus_pending && g_cur->modal_focus_validate) {
+        g_cur->focused = 0;
+        g_cur->modal_focus_pending = false;
+        hjp_stop_text_input();
+    }
 }
 
 static bool gui_nav_register(uint32_t id, float x, float y, float w, float h) {
@@ -1152,6 +1205,10 @@ static bool gui_nav_register(uint32_t id, float x, float y, float w, float h) {
 }
 
 static void gui_nav_text(uint32_t id, float x, float y, float w, float h) {
+    float vx = x, vy = y, vw = w, vh = h;
+    if (g_cur->focused == id && !g_disabled &&
+        (!g_cur->modal_title[0] || g_cur->modal_entered) && gui_visible_rect(&vx, &vy, &vw, &vh))
+        g_cur->modal_focus_pending = false;
     if (gui_nav_register(id, x, y, w, h) && g_cur->focused != id) {
         g_cur->focused = id;
         hjp_start_text_input();
@@ -1182,7 +1239,8 @@ static bool gui_nav_control(uint32_t id, float x, float y, float w, float h) {
 static bool gui_widget_logic(uint32_t id,
                               float x, float y, float w, float h,
                               bool *hovered, bool *pressed) {
-    if (g_cur->closing || g_disabled || w <= 0 || h <= 0) {
+    if (g_cur->closing || g_disabled || w <= 0 || h <= 0 ||
+        (g_cur->modal_title[0] && !g_cur->modal_entered)) {
         *hovered = false;
         *pressed = false;
         if (g_cur->active == id) g_cur->active = 0;
@@ -1340,6 +1398,8 @@ static Value fn_app_create(int argc, Value *argv) {
     /* アプリ構造体を初期化 */
     GuiApp *app = &g_apps[idx];
     memset(app, 0, sizeof(*app));
+    g_dialog_depth[idx] = 0;
+    memset(g_dialog_scrolls[idx], 0, sizeof(g_dialog_scrolls[idx]));
     app->window     = win;
     app->gl         = gl;
     app->vg         = vg;
@@ -4616,32 +4676,65 @@ static Value fn_menu_separator_item(int argc, Value *argv) {
  * ---------------------------------------------------------------*/
 /* 描画より先に予約し、背後の独自入力処理にも空のフレーム入力を渡す。 */
 static Value fn_modal_reserve(int argc, Value *argv) {
-    if (!g_cur || argc < 1 || argv[0].type != VALUE_STRING ||
-        strlen(argv[0].string.data) >= sizeof(g_cur->modal_title)) return hajimu_bool(false);
-    const char *title = argv[0].string.data;
-    bool changed = strcmp(title, g_cur->modal_title) != 0;
-    if (changed) {
-        if (!g_cur->modal_title[0] && title[0]) g_cur->modal_restore_focus = g_cur->nav_focus;
-        g_cur->nav_focus = title[0] ? 0 : g_cur->modal_restore_focus;
-        g_cur->nav_previous_count = g_cur->nav_current_count = 0;
-        g_cur->focused = g_cur->active = 0;
-        g_cur->text_drag = 0;
-        hjp_stop_text_input();
-        snprintf(g_cur->modal_title, sizeof(g_cur->modal_title), "%s", title);
+    if (!g_cur || argc != 1) return hajimu_bool(false);
+    const char *titles[GUI_MAX_MODALS]; int count = 0;
+    if (argv[0].type == VALUE_STRING) {
+        if (argv[0].string.data[0]) titles[count++] = argv[0].string.data;
+    } else if (argv[0].type == VALUE_ARRAY && argv[0].array.length >= 0 && argv[0].array.length <= GUI_MAX_MODALS) {
+        count = argv[0].array.length;
+        for (int i = 0; i < count; i++) {
+            if (argv[0].array.elements[i].type != VALUE_STRING) return hajimu_bool(false);
+            titles[i] = argv[0].array.elements[i].string.data;
+        }
+    } else return hajimu_bool(false);
+    for (int i = 0; i < count; i++) {
+        if (!titles[i][0] || strlen(titles[i]) >= sizeof(g_cur->modal_title)) return hajimu_bool(false);
+        for (int j = 0; j < i; j++) if (!strcmp(titles[i], titles[j])) return hajimu_bool(false);
     }
-    if (!title[0]) return hajimu_bool(true);
+    int common = 0;
+    while (common < count && common < g_cur->modal_count && !strcmp(titles[common], g_cur->modals[common].title)) common++;
+    bool changed = common != count || common != g_cur->modal_count;
+    if (changed) {
+        while (g_cur->modal_count > common) {
+            int old = --g_cur->modal_count;
+            g_cur->nav_focus = g_cur->modals[old].restore_nav;
+            g_cur->focused = g_cur->modals[old].restore_text;
+            memset(&g_cur->modals[old], 0, sizeof(g_cur->modals[old]));
+        }
+        while (g_cur->modal_count < count) {
+            int next = g_cur->modal_count++;
+            g_cur->modals[next].restore_nav = g_cur->nav_focus;
+            g_cur->modals[next].restore_text = g_cur->focused;
+            snprintf(g_cur->modals[next].title, sizeof(g_cur->modals[next].title), "%s", titles[next]);
+            memset(g_dialog_scrolls[g_cur - g_apps][next], 0, sizeof(g_dialog_scrolls[0][0]));
+            g_cur->nav_focus = g_cur->focused = 0;
+        }
+        g_cur->modal_focus_pending = g_cur->focused != 0;
+        g_cur->modal_focus_validate = false;
+        g_cur->nav_previous_count = g_cur->nav_current_count = 0;
+        g_cur->active = g_cur->text_drag = g_cur->pending_accessibility_press = 0;
+        for (int i = 0; i < g_cur->text_buf_count; i++) g_cur->text_bufs[i].ax_visible = false;
+#ifdef __APPLE__
+        hjp_accessibility_begin(g_cur->window);
+#endif
+        hjp_stop_text_input();
+        hjp_reset_input(g_cur->window);
+        gui_ime_update(g_cur, "");
+        if (g_cur->focused) hjp_start_text_input();
+        snprintf(g_cur->modal_title, sizeof(g_cur->modal_title), "%s", count ? titles[count - 1] : "");
+        g_cur->modal_input_delivered = false;
+        g_cur->modal_input_saved = true;
+        g_cur->modal_input = (GuiInput){.mx = g_cur->in.mx, .my = g_cur->in.my};
+        gui_modal_mask_input(&g_cur->in);
+        if (g_disabled_depth) gui_modal_mask_input(&g_disabled_input_backup);
+        g_cur->modal_entered = false;
+    }
+    if (!count) return hajimu_bool(true);
     if (!g_cur->modal_input_saved) {
         g_cur->modal_input = g_cur->in;
         g_cur->modal_input_saved = true;
     }
-    if (changed) {
-        /* 開いた操作の押下/キーをダイアログ内へ二重配送しない。 */
-        memset(&g_cur->modal_input, 0, sizeof(GuiInput));
-        g_cur->modal_input.mx = g_cur->in.mx;
-        g_cur->modal_input.my = g_cur->in.my;
-    }
-    memset(&g_cur->in, 0, sizeof(GuiInput));
-    g_cur->in.mx = g_cur->in.my = -100000;
+    gui_modal_mask_input(&g_cur->in);
     g_cur->modal_entered = false;
     return hajimu_bool(true);
 }
@@ -4656,9 +4749,15 @@ static Value fn_dialog(int argc, Value *argv) {
     if (!is_open) return hajimu_bool(false);
 
     if (g_cur->modal_title[0]) {
-        if (strcmp(g_cur->modal_title, argv[0].string.data) != 0) return hajimu_bool(false);
-        if (!g_cur->modal_entered && g_cur->modal_input_saved) g_cur->in = g_cur->modal_input;
-        g_cur->modal_entered = true;
+        int index = -1;
+        for (int i = 0; i < g_cur->modal_count; i++)
+            if (!strcmp(g_cur->modals[i].title, argv[0].string.data)) index = i;
+        if (index < 0) return hajimu_bool(false);
+        g_cur->modal_entered = index == g_cur->modal_count - 1;
+        if (g_cur->modal_entered && !g_cur->modal_input_delivered && g_cur->modal_input_saved) {
+            g_cur->in = g_cur->modal_input;
+            g_cur->modal_input_delivered = true;
+        } else if (!g_cur->modal_entered) gui_modal_mask_input(&g_cur->in);
     }
 
     Hjpcontext *vg = g_cur->vg;
@@ -4698,6 +4797,93 @@ static Value fn_dialog(int argc, Value *argv) {
     g_cur->lay.w = dw;
     g_cur->lay.indent = 0;
     return hajimu_bool(true);
+}
+
+/* 新しい範囲付きダイアログは独立したレイアウト/ID/クリップ領域を持つ。
+ * 旧ダイアログの呼出規約は変えず、明示的な開始/終了を追加する。 */
+static Value fn_dialog_begin(int argc, Value *argv) {
+    if (!g_cur || g_cur->closing || argc != 2 || argv[0].type != VALUE_STRING ||
+        !((argv[1].type == VALUE_BOOL && argv[1].boolean) ||
+          (argv[1].type == VALUE_NUMBER && argv[1].number != 0))) return hajimu_bool(false);
+    int owner = (int)(g_cur - g_apps), index = -1;
+    for (int i = 0; i < g_cur->modal_count; i++) if (!strcmp(g_cur->modals[i].title, argv[0].string.data)) index = i;
+    if (index < 0 || g_cur->modals[index].drawn || g_dialog_depth[owner] >= GUI_MAX_MODALS) return hajimu_bool(false);
+    GuiDialogScope *scope = &g_dialog_scopes[owner][g_dialog_depth[owner]];
+    scope->render_depth = hjpStateDepth(g_cur->vg);
+    hjpSave(g_cur->vg);
+    if (hjpStateDepth(g_cur->vg) != scope->render_depth + 1) return hajimu_bool(false);
+    scope->modal_index = index;
+    scope->lay = g_cur->lay; scope->last = g_cur->last;
+    scope->panel_depth = g_cur->panel_depth; scope->horizontal_depth = g_cur->horizontal_depth;
+    scope->layout_depth = g_cur->layout_scope_depth;
+    memcpy(scope->panels, g_cur->panels, sizeof(scope->panels));
+    memcpy(scope->saved_lay, g_cur->saved_lay, sizeof(scope->saved_lay));
+    memcpy(scope->saved_scope_depth, g_cur->saved_scope_depth, sizeof(scope->saved_scope_depth));
+    memcpy(scope->horizontal, g_cur->horizontal_groups, sizeof(scope->horizontal));
+    memcpy(scope->scrolls, g_scrolls, sizeof(scope->scrolls));
+    memcpy(scope->grids, g_grids, sizeof(scope->grids)); memcpy(scope->groups, g_groups, sizeof(scope->groups));
+    memcpy(scope->cards, g_cards, sizeof(scope->cards)); scope->card_depth = g_card_depth;
+    scope->disabled = g_disabled; scope->disabled_depth = g_disabled_depth;
+    scope->next_width = g_next_widget_w;
+    scope->id_depth = g_id_scope_depth; memcpy(scope->id_stack, g_id_scope_stack, sizeof(scope->id_stack));
+    scope->entered = g_cur->modal_entered;
+    snprintf(scope->modal_title, sizeof(scope->modal_title), "%s", g_cur->modal_title);
+    snprintf(scope->dialog_title, sizeof(scope->dialog_title), "%s", argv[0].string.data);
+    g_dialog_depth[owner]++;
+    g_cur->modals[index].drawn = true;
+    g_cur->panel_depth = g_cur->horizontal_depth = g_cur->layout_scope_depth = 0;
+    memcpy(g_scrolls, g_dialog_scrolls[owner][index], sizeof(g_scrolls));
+    for (int i = 0; i < GUI_MAX_SCROLL; i++) g_scrolls[i].active = false;
+    memset(g_grids, 0, sizeof(g_grids)); memset(g_groups, 0, sizeof(g_groups)); g_card_depth = 0;
+    g_disabled = false; g_disabled_depth = 0; g_next_widget_w = 0;
+    g_id_scope_depth = 2; g_id_scope_stack[0] = gui_hash_raw("hajimu_gui.dialog");
+    g_id_scope_stack[1] = gui_hash_raw(argv[0].string.data);
+    hjpResetTransform(g_cur->vg); hjpResetScissor(g_cur->vg); hjpGlobalAlpha(g_cur->vg, 1);
+    Value result = fn_dialog(argc, argv);
+    scope->content_x = g_cur->lay.x; scope->content_y = g_cur->lay.y;
+    scope->content_w = g_cur->lay.w; scope->content_h = fmaxf(200, g_cur->win_h * 0.5f) - 40;
+    hjpIntersectScissor(g_cur->vg, scope->content_x, scope->content_y, scope->content_w, scope->content_h);
+    return result;
+}
+
+static bool gui_dialog_scope_end(void) {
+    if (!g_cur) return false;
+    int owner = (int)(g_cur - g_apps);
+    if (!g_dialog_depth[owner]) return false;
+    GuiDialogScope *scope = &g_dialog_scopes[owner][--g_dialog_depth[owner]];
+    bool balanced = g_cur->panel_depth == 0 && g_cur->horizontal_depth == 0 && g_cur->layout_scope_depth == 0 && g_card_depth == 0 &&
+        g_disabled_depth == 0 && g_id_scope_depth == 2 && hjpStateDepth(g_cur->vg) == scope->render_depth + 1;
+    for (int i = 0; i < GUI_MAX_SCROLL; i++) if (g_scrolls[i].active) balanced = false;
+    for (int i = 0; i < GUI_MAX_GRID; i++) if (g_grids[i].active) balanced = false;
+    for (int i = 0; i < GUI_MAX_GROUP; i++) if (g_groups[i].active) balanced = false;
+    if (scope->modal_index < g_cur->modal_count && !strcmp(g_cur->modals[scope->modal_index].title, scope->dialog_title)) {
+        memcpy(g_dialog_scrolls[owner][scope->modal_index], g_scrolls, sizeof(g_scrolls));
+        for (int i = 0; i < GUI_MAX_SCROLL; i++) g_dialog_scrolls[owner][scope->modal_index][i].active = false;
+    }
+    bool restored = hjpRestoreStateDepth(g_cur->vg, scope->render_depth);
+    g_cur->lay = scope->lay; g_cur->last = scope->last;
+    g_cur->panel_depth = scope->panel_depth; g_cur->horizontal_depth = scope->horizontal_depth;
+    g_cur->layout_scope_depth = scope->layout_depth;
+    memcpy(g_cur->panels, scope->panels, sizeof(scope->panels));
+    memcpy(g_cur->saved_lay, scope->saved_lay, sizeof(scope->saved_lay));
+    memcpy(g_cur->saved_scope_depth, scope->saved_scope_depth, sizeof(scope->saved_scope_depth));
+    memcpy(g_cur->horizontal_groups, scope->horizontal, sizeof(scope->horizontal));
+    memcpy(g_scrolls, scope->scrolls, sizeof(scope->scrolls));
+    memcpy(g_grids, scope->grids, sizeof(scope->grids)); memcpy(g_groups, scope->groups, sizeof(scope->groups));
+    memcpy(g_cards, scope->cards, sizeof(scope->cards)); g_card_depth = scope->card_depth;
+    g_disabled = scope->disabled; g_disabled_depth = scope->disabled_depth;
+    gui_modal_mask_input(&g_disabled_input_backup);
+    g_next_widget_w = scope->next_width;
+    g_id_scope_depth = scope->id_depth; memcpy(g_id_scope_stack, scope->id_stack, sizeof(scope->id_stack));
+    g_cur->modal_entered = scope->entered && !strcmp(g_cur->modal_title, scope->modal_title);
+    /* 閉じたクリック/キーを親や背後へ再配送しない。 */
+    gui_modal_mask_input(&g_cur->in);
+    return balanced && restored;
+}
+
+static Value fn_dialog_end(int argc, Value *argv) {
+    (void)argc; (void)argv;
+    return hajimu_bool(gui_dialog_scope_end());
 }
 
 /* ---------------------------------------------------------------
@@ -7810,6 +7996,7 @@ static Value fn_disable_end(int argc, Value *argv) {
         g_disabled = false;
         if (g_cur) {
             g_cur->in = g_disabled_input_backup;
+            if (g_cur->modal_title[0] && !g_cur->modal_entered) gui_modal_mask_input(&g_cur->in);
             hjpGlobalAlpha(g_cur->vg, 1.0f);
         }
     }
@@ -16472,8 +16659,10 @@ static Value fn_modal_stack(int argc, Value *argv) {
     (void)argc; (void)argv;
     Value arr; memset(&arr, 0, sizeof(arr));
     arr.type = VALUE_ARRAY;
-    arr.array.length = 0;
-    arr.array.elements = (Value *)calloc(1, sizeof(Value));
+    arr.array.length = g_cur ? g_cur->modal_count : 0;
+    arr.array.capacity = arr.array.length ? arr.array.length : 1;
+    arr.array.elements = calloc(arr.array.capacity, sizeof(Value));
+    for (int i = 0; i < arr.array.length; i++) arr.array.elements[i] = hajimu_string(g_cur->modals[i].title);
     return arr;
 }
 
@@ -24136,6 +24325,8 @@ static HajimuPluginFunc gui_functions[] = {
     {"メニュー項目",         fn_menu_item,     1, 2},
     {"メニューセパレーター", fn_menu_separator_item, 0, 0},
     {"ダイアログ",           fn_dialog,        2, 2},
+    {"ダイアログ開始",       fn_dialog_begin,  2, 2},
+    {"ダイアログ終了",       fn_dialog_end,    0, 0},
     {"モーダル予約",         fn_modal_reserve, 1, 1},
     {"アクション登録",       fn_action_register, 2, 3},
     {"アクションボタン",     fn_action_button, 1, 1},
@@ -25438,7 +25629,9 @@ static Value fn_api_status(int argc, Value *argv) {
                 reason = "静的監査で固定返却だけの実装を検出。意図した定数関数か未実装かは個別確認が必要";
                 break;
             }
-        if (found->fn == fn_text_input || found->fn == fn_password_input || found->fn == fn_textarea) {
+        if (found->fn == fn_modal_reserve || found->fn == fn_modal_stack || found->fn == fn_dialog_begin || found->fn == fn_dialog_end || found->fn == fn_dialog) {
+            state = "部分対応"; reason = "予約スタック・範囲付き描画・フォーカス復帰。旧ダイアログ/全特殊部品の入力統一と全OS実操作は未完了";
+        } else if (found->fn == fn_text_input || found->fn == fn_password_input || found->fn == fn_textarea) {
             state = "部分対応"; reason = "Unicode書記素単位の移動/削除/クリック/折返し。字形合成・実IMEと全OS実操作・全入力部品への統一は未完了";
         } else if (found->fn == fn_input_state) {
             state = "部分対応"; reason = "世代付き配送・共通/アプリ別キューの超過リセットと破棄数。全OS実操作・全画面同時描画・入力消費の全体統一は未完了";
@@ -25483,7 +25676,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.26.0",
+        .version        = "14.27.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,

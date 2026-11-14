@@ -7,7 +7,11 @@ if [ "$(uname -s)" != Darwin ]; then
 fi
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
-cc -O1 -g -fobjc-arc -DGL_SILENCE_DEPRECATION -DHJP_TEST_NATIVE_QUEUE -I"$ROOT/src" -I"$ROOT/../../jp/include" \
+set --
+if [ "${CONTROL_SANITIZE:-0}" = 1 ]; then
+  set -- -fsanitize=address,undefined -fno-omit-frame-pointer
+fi
+cc "$@" -O1 -g -fobjc-arc -DGL_SILENCE_DEPRECATION -DHJP_TEST_NATIVE_QUEUE -I"$ROOT/src" -I"$ROOT/../../jp/include" \
   "$ROOT/tests/test_application_controls.c" "$ROOT/src/hjp_render.c" \
   "$ROOT/src/hjp_vnode.c" "$ROOT/src/hjp_frame.c" "$ROOT/src/hjp_hotreload.c" \
   "$ROOT/src/hjp_devtools.c" "$ROOT/src/hjp_unicode.c" "$ROOT/src/hjp_platform_macos.m" \

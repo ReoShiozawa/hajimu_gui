@@ -644,6 +644,131 @@ static void check_window_routing(void) {
     hjp_gl_make_current(original->window, original->gl);
 }
 
+static Value modal_list(const char *first, const char *second) {
+    Value array = hajimu_array();
+    if (first) hajimu_array_push(&array, hajimu_string(first));
+    if (second) hajimu_array_push(&array, hajimu_string(second));
+    return array;
+}
+static void check_modal_stack(void) {
+    frame(false, false, 500); gui_nav_begin();
+    Value none = modal_list(NULL, NULL), parent = modal_list("parent", NULL), both = modal_list("parent", "child");
+    Value bad = modal_list("parent", "parent");
+    Value limit = hajimu_array();
+    for (int i = 0; i < GUI_MAX_MODALS; i++) {
+        char title[32]; snprintf(title, sizeof(title), "modal-%d", i);
+        hajimu_array_push(&limit, hajimu_string(title));
+    }
+    assert(fn_modal_reserve(1, &limit).boolean && g_cur->modal_count == GUI_MAX_MODALS);
+    hajimu_array_push(&limit, hajimu_string("overflow"));
+    assert(!fn_modal_reserve(1, &limit).boolean && g_cur->modal_count == GUI_MAX_MODALS);
+    Value empty_name = modal_list("", NULL), wrong_type = hajimu_number(5);
+    assert(!fn_modal_reserve(1, &empty_name).boolean && !fn_modal_reserve(1, &wrong_type).boolean);
+    char long_name[257]; memset(long_name, 'a', 256); long_name[256] = '\0';
+    Value too_long = hajimu_string(long_name);
+    assert(!fn_modal_reserve(1, &too_long).boolean);
+    fn_modal_reserve(1, &none);
+    g_cur->nav_focus = 801; g_cur->focused = 802;
+    assert(fn_modal_reserve(1, &parent).boolean && !g_cur->focused && !g_cur->nav_focus);
+    g_cur->nav_focus = 901; g_cur->focused = 902;
+    assert(fn_modal_reserve(1, &both).boolean && !g_cur->focused);
+    assert(!fn_modal_reserve(1, &bad).boolean && g_cur->modal_count == 2);
+    Value snapshot = fn_modal_stack(0, NULL);
+    assert(snapshot.array.length == 2 && !strcmp(snapshot.array.elements[0].string.data, "parent"));
+    assert(!strcmp(snapshot.array.elements[1].string.data, "child"));
+    hajimu_array_push(&snapshot, hajimu_string("independent"));
+    assert(g_cur->modal_count == 2 && snapshot.array.length == 3);
+    assert(fn_modal_reserve(1, &parent).boolean && g_cur->nav_focus == 901 && g_cur->focused == 902);
+    assert(fn_modal_reserve(1, &none).boolean && g_cur->nav_focus == 801 && g_cur->focused == 802);
+    gui_nav_end();
+    assert(g_cur->focused == 802); /* 復帰したフレームでは早過ぎる非表示判定をしない。 */
+    frame(false, false, 500); gui_nav_begin(); gui_nav_end();
+    assert(!g_cur->focused); /* 次フレームにも存在しなければ解除する。 */
+
+    Value origin_args[] = {hajimu_string("modal-origin"), hajimu_string("a日本")};
+    GuiTextBuf *origin = gui_get_text_buf(gui_hash("modal-origin"), "a日本");
+    gui_text_collapse(origin, 1); g_cur->focused = origin->id;
+    origin->ax_visible = true;
+    fn_modal_reserve(1, &parent); assert(!origin->ax_visible);
+    fn_modal_reserve(1, &none);
+    frame(false, false, 500); gui_nav_begin(); fn_text_input(2, origin_args); gui_nav_end();
+    assert(g_cur->focused == origin->id && origin->cursor == 1);
+    g_cur->focused = 0;
+
+    frame(false, false, 500); gui_nav_begin();
+    assert(fn_modal_reserve(1, &both).boolean);
+    gui_nav_end();
+    frame(false, false, 500); gui_nav_begin();
+    g_cur->in.key_return = true;
+    fn_modal_reserve(1, &both);
+    Value outer[] = {hajimu_string("outer-modal-clip"), hajimu_number(100), hajimu_number(80), hajimu_bool(true)};
+    assert(fn_child_begin(4, outer).boolean);
+    GuiLayout original = g_cur->lay;
+    int render_depth = hjpStateDepth(g_cur->vg);
+    Value parent_args[] = {hajimu_string("parent"), hajimu_bool(true)};
+    Value child_args[] = {hajimu_string("child"), hajimu_bool(true)};
+    assert(fn_dialog_begin(2, parent_args).boolean && !g_cur->modal_entered);
+    GuiLayout parent_layout = g_cur->lay;
+    g_cur->in.clicked = true; g_cur->in.mx = 400; g_cur->in.my = 200;
+    bool hovered, pressed;
+    assert(!gui_widget_logic(gui_hash("blocked"), 380, 180, 60, 40, &hovered, &pressed));
+    assert(!hovered && !pressed);
+    assert(fn_dialog_begin(2, child_args).boolean && g_cur->modal_entered && g_cur->in.key_return);
+    uint32_t child_id = gui_hash("ok");
+    g_cur->in.accessibility_press = child_id;
+    assert(gui_widget_logic(child_id, 380, 180, 60, 40, &hovered, &pressed));
+    assert(!gui_widget_logic(child_id, 380, 180, 60, 40, &hovered, &pressed));
+    g_cur->in.accessibility_press = gui_hash("outside");
+    assert(!gui_widget_logic(gui_hash("outside"), 20, 20, 30, 30, &hovered, &pressed));
+    assert(fn_dialog_end(0, NULL).boolean && !g_cur->modal_entered && !g_cur->in.key_return);
+    assert(!memcmp(&g_cur->lay, &parent_layout, sizeof(parent_layout)));
+    assert(!fn_dialog_begin(2, child_args).boolean); /* 同フレームの入力再配送を拒否する。 */
+    assert(fn_dialog_end(0, NULL).boolean && hjpStateDepth(g_cur->vg) == render_depth);
+    assert(!memcmp(&g_cur->lay, &original, sizeof(original)) && g_scrolls[0].active);
+    assert(!fn_dialog_end(0, NULL).boolean);
+    fn_child_end(0, NULL);
+    fn_modal_reserve(1, &none); gui_nav_end();
+
+    frame(false, false, 500); gui_nav_begin();
+    fn_modal_reserve(1, &parent);
+    render_depth = hjpStateDepth(g_cur->vg);
+    assert(fn_dialog_begin(2, parent_args).boolean);
+    assert(fn_child_begin(4, outer).boolean);
+    assert(!fn_dialog_end(0, NULL).boolean && hjpStateDepth(g_cur->vg) == render_depth);
+    assert(!g_scrolls[0].active && !g_dialog_depth[g_cur - g_apps]);
+    fn_modal_reserve(1, &none); gui_nav_end();
+
+    frame(false, false, 500); gui_nav_begin(); fn_modal_reserve(1, &parent);
+    render_depth = hjpStateDepth(g_cur->vg);
+    while (hjpStateDepth(g_cur->vg) < 64) hjpSave(g_cur->vg);
+    assert(!fn_dialog_begin(2, parent_args).boolean && !g_cur->modals[0].drawn);
+    assert(hjpRestoreStateDepth(g_cur->vg, render_depth));
+    assert(fn_dialog_begin(2, parent_args).boolean);
+    gui_nav_end(); /* 終了呼出の省略も次フレームへ状態を残さない。 */
+    assert(!g_dialog_depth[g_cur - g_apps] && hjpStateDepth(g_cur->vg) == render_depth);
+    fn_modal_reserve(1, &none);
+    g_cur->nav_focus = g_cur->focused = 0;
+    frame(false, false, 500); gui_nav_begin(); fn_modal_reserve(1, &parent);
+    assert(fn_dialog_begin(2, parent_args).boolean);
+    g_scrolls[0].scroll_y = 55;
+    Value changed = modal_list("changed", NULL);
+    fn_modal_reserve(1, &changed);
+    assert(fn_dialog_end(0, NULL).boolean);
+    assert(g_dialog_scrolls[g_cur - g_apps][0][0].scroll_y == 0);
+    fn_modal_reserve(1, &none); gui_nav_end();
+    frame(false, false, 500); gui_nav_begin();
+    g_cur->in.key_return = true;
+    fn_disable_begin(0, NULL);
+    fn_modal_reserve(1, &parent);
+    assert(fn_dialog_begin(2, parent_args).boolean && !g_disabled);
+    assert(fn_dialog_end(0, NULL).boolean && g_disabled);
+    fn_modal_reserve(1, &none);
+    fn_disable_end(0, NULL);
+    assert(!g_cur->in.key_return && !g_disabled);
+    gui_nav_end();
+    hjpCancelFrame(g_cur->vg);
+}
+
 static int event_callback_tag, event_guard_tag, event_callbacks, event_guards;
 static bool event_model_committed, event_overflow;
 static Value window_event_observe(Value *callback, int argc, Value *argv) {
@@ -737,6 +862,7 @@ int main(void) {
     check_closing_loop();
     check_window_routing();
     check_window_close_input();
+    check_modal_stack();
     char oversized[GUI_MAX_TEXT_BUF + 8];
     memset(oversized, 'a', GUI_MAX_TEXT_BUF - 2);
     memcpy(oversized + GUI_MAX_TEXT_BUF - 2, "日本", 7);

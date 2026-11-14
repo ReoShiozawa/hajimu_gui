@@ -431,6 +431,12 @@ void hjpRestore(Hjpcontext *ctx) {
     if (ctx->nstates <= 1) return;
     ctx->nstates--;
 }
+int hjpStateDepth(Hjpcontext *ctx) { return ctx ? ctx->nstates : 0; }
+bool hjpRestoreStateDepth(Hjpcontext *ctx, int depth) {
+    if (!ctx || depth < 1 || depth > ctx->nstates) return false;
+    ctx->nstates = depth;
+    return true;
+}
 void hjpReset(Hjpcontext *ctx) {
     HjpState *s = hjp__getState(ctx);
     memset(s, 0, sizeof(*s));

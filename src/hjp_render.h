@@ -10,6 +10,7 @@
  ***********************************************************************/
 #ifndef HJP_RENDER_H
 #define HJP_RENDER_H
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -251,6 +252,8 @@ Hjpcolor hjpHSLA(float h, float s, float l, unsigned char a);
 
 void hjpSave(Hjpcontext *ctx);
 void hjpRestore(Hjpcontext *ctx);
+int hjpStateDepth(Hjpcontext *ctx);
+bool hjpRestoreStateDepth(Hjpcontext *ctx, int depth);
 void hjpReset(Hjpcontext *ctx);
 
 /* =====================================================================
