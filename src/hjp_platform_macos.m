@@ -250,6 +250,7 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
 /* =====================================================================
  * NSOpenGLView サブクラス
  * ===================================================================*/
+@class HjpAccessibilityElement;
 @interface HjpOpenGLView : NSOpenGLView <NSTextInputClient>
 {
     NSTrackingArea *trackingArea;
@@ -257,9 +258,47 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
 @property(nonatomic, copy) NSString *composition;
 @property(nonatomic) NSRange compositionSelection;
 @property(nonatomic) NSRect inputRect;
+@property(nonatomic, assign) HjpWindow *ownerWindow;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, HjpAccessibilityElement *> *accessibleCache;
+@property(nonatomic, strong) NSMutableArray<HjpAccessibilityElement *> *accessibleFrame;
+@property(nonatomic, copy) NSArray<HjpAccessibilityElement *> *accessiblePublished;
+@end
+
+@interface HjpAccessibilityElement : NSAccessibilityElement
+@property(nonatomic, weak) HjpOpenGLView *ownerView;
+@property(nonatomic) uint32_t widgetID;
+@property(nonatomic) BOOL live;
+@end
+@implementation HjpAccessibilityElement
+- (id)accessibilityParent { return self.ownerView; }
+- (NSRect)accessibilityFrame {
+    HjpOpenGLView *view = self.ownerView;
+    if (!view.window) return NSZeroRect;
+    return [view.window convertRectToScreen:[view convertRect:self.accessibilityFrameInParentSpace toView:nil]];
+}
+- (BOOL)accessibilityPerformPress {
+    HjpOpenGLView *view = self.ownerView;
+    if (!self.live || !self.accessibilityEnabled || !view.ownerWindow) return NO;
+    HjpEvent e = {0};
+    e.type = HJP_EVENT_ACCESSIBILITY_PRESS;
+    e.accessibility.window = view.ownerWindow;
+    e.accessibility.id = self.widgetID;
+    e.accessibility.generation = view.ownerWindow->windowId;
+    hjp__pushEvent(&e);
+    return YES;
+}
 @end
 
 @implementation HjpOpenGLView
+
+- (BOOL)isAccessibilityElement { return YES; }
+- (NSString *)accessibilityRole { return NSAccessibilityGroupRole; }
+- (NSArray *)accessibilityChildren { return self.accessiblePublished ?: @[]; }
+- (id)accessibilityHitTest:(NSPoint)point {
+    for (HjpAccessibilityElement *element in [self.accessiblePublished reverseObjectEnumerator])
+        if (element.live && NSPointInRect(point, element.accessibilityFrame)) return element;
+    return self;
+}
 
 - (BOOL)acceptsFirstResponder { return YES; }
 - (BOOL)canBecomeKeyView { return YES; }
@@ -615,6 +654,7 @@ HjpWindow *hjp_window_create(const char *title, int x, int y, int w, int h, uint
         }
 
         g_hjp.mainWindow = win;
+        win->glview.ownerWindow = win;
         return win;
     }
 }
@@ -622,6 +662,8 @@ HjpWindow *hjp_window_create(const char *title, int x, int y, int w, int h, uint
 void hjp_window_destroy(HjpWindow *win) {
     if (!win) return;
     @autoreleasepool {
+        for (HjpAccessibilityElement *element in win->glview.accessibleCache.allValues) element.live = NO;
+        win->glview.ownerWindow = NULL;
         [win->nswin setDelegate:nil];
         if ([NSOpenGLContext currentContext] == win->glctx)
             [NSOpenGLContext clearCurrentContext];
@@ -778,6 +820,68 @@ void hjp_set_text_input_rect(HjpWindow *window, float x, float y, float w, float
     float local_y = view.isFlipped ? y : view.bounds.size.height - y - h;
     view.inputRect = NSMakeRect(x, local_y, w, h);
     [view.inputContext invalidateCharacterCoordinates];
+}
+
+void hjp_accessibility_begin(HjpWindow *window) {
+    HjpOpenGLView *view = window ? window->glview : nil;
+    if (!view) return;
+    if (!view.accessibleCache) view.accessibleCache = [NSMutableDictionary dictionary];
+    if (!view.accessibleFrame) view.accessibleFrame = [NSMutableArray array];
+    [view.accessibleFrame removeAllObjects];
+    for (HjpAccessibilityElement *element in view.accessibleCache.allValues) {
+        element.live = NO;
+        element.accessibilityEnabled = NO;
+    }
+}
+int hjp_accessibility_window_id(HjpWindow *window) {
+    return window ? window->windowId : -1;
+}
+bool hjp_accessibility_announce(HjpWindow *window, const char *text) {
+    if (!window || !window->glview || !text || !*text) return false;
+    NSString *message = [NSString stringWithUTF8String:text];
+    if (!message) return false;
+    NSAccessibilityPostNotificationWithUserInfo(NSApp, NSAccessibilityAnnouncementRequestedNotification,
+        @{NSAccessibilityAnnouncementKey: message, NSAccessibilityPriorityKey: @(NSAccessibilityPriorityMedium)});
+    return true;
+}
+bool hjp_accessibility_add(HjpWindow *window, uint32_t id, const char *name, const char *help,
+    int role, float x, float y, float w, float h, bool enabled, bool selected) {
+    HjpOpenGLView *view = window ? window->glview : nil;
+    if (!view || !view.accessibleCache || w <= 0 || h <= 0 || !isfinite(x) || !isfinite(y) || !isfinite(w) || !isfinite(h)) return false;
+    NSNumber *key = @(id);
+    HjpAccessibilityElement *element = view.accessibleCache[key];
+    if (!element) {
+        if (view.accessibleCache.count >= 512) {
+            for (NSNumber *old in view.accessibleCache.allKeys) if (!view.accessibleCache[old].live) {
+                [view.accessibleCache removeObjectForKey:old]; break;
+            }
+        }
+        if (view.accessibleCache.count >= 512) return false;
+        element = [[HjpAccessibilityElement alloc] init];
+        element.widgetID = id;
+        element.ownerView = view;
+        view.accessibleCache[key] = element;
+    }
+    if (!element.live) [view.accessibleFrame addObject:element];
+    element.live = YES;
+    element.accessibilityElement = YES;
+    element.accessibilityRole = role == 1 ? NSAccessibilityCheckBoxRole : role == 2 ? NSAccessibilityRadioButtonRole : NSAccessibilityButtonRole;
+    element.accessibilityLabel = (name ? [NSString stringWithUTF8String:name] : nil) ?: @"";
+    element.accessibilityHelp = (help ? [NSString stringWithUTF8String:help] : nil) ?: @"";
+    element.accessibilityEnabled = enabled;
+    element.accessibilityValue = role == 1 || role == 2 ? @(selected) : nil;
+    element.accessibilityFrameInParentSpace = NSMakeRect(x, view.isFlipped ? y : view.bounds.size.height - y - h, w, h);
+    return true;
+}
+void hjp_accessibility_end(HjpWindow *window) {
+    HjpOpenGLView *view = window ? window->glview : nil;
+    if (!view) return;
+    for (NSNumber *key in [view.accessibleCache.allKeys copy])
+        if (!view.accessibleCache[key].live) [view.accessibleCache removeObjectForKey:key];
+    NSArray *next = [view.accessibleFrame copy];
+    BOOL changed = ![view.accessiblePublished isEqualToArray:next];
+    view.accessiblePublished = next;
+    if (changed) NSAccessibilityPostNotification(view, NSAccessibilityLayoutChangedNotification);
 }
 
 /* =====================================================================

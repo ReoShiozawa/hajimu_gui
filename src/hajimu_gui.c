@@ -220,6 +220,7 @@ typedef struct {
 /* --- 入力状態 (フレーム単位) --- */
 typedef struct {
     int mx, my;                 /* 現在のマウス座標                 */
+    uint32_t accessibility_press;
     int pmx, pmy;               /* 前フレームのマウス座標           */
     bool down;                  /* ボタン押下中                     */
     bool clicked;               /* このフレームで押された           */
@@ -361,10 +362,13 @@ typedef struct {
         bool enabled, input_allowed, pending, consumed;
     } actions[64];
     int action_count;
+    uint32_t pending_accessibility_press;
 } GuiApp;
 
 static GuiApp  g_apps[GUI_MAX_APPS];
 static GuiApp *g_cur  = NULL;           /* 描画中の現在アプリ        */
+static void gui_accessible(uint32_t id, const char *name, int role, float x, float y,
+    float w, float h, bool enabled, bool selected);
 static struct { int id; const void *owner; HjpHistory data; } g_histories[16];
 static int g_history_next_id = 1;
 static void gui_histories_close(const void *owner) {
@@ -902,6 +906,19 @@ static inline bool gui_hit(float px, float py,
     return px >= x && px < x + w && py >= y && py < y + h;
 }
 
+/* 操作領域も描画と同じ祖先領域へ制限する。 */
+static bool gui_visible_rect(float *x, float *y, float *w, float *h) {
+    float right = fminf(*x + *w, g_cur->win_w), bottom = fminf(*y + *h, g_cur->win_h);
+    *x = fmaxf(0, *x); *y = fmaxf(0, *y);
+    for (int i = 0; i < GUI_MAX_SCROLL; i++) if (g_scrolls[i].active) {
+        *x = fmaxf(*x, g_scrolls[i].x); *y = fmaxf(*y, g_scrolls[i].y);
+        right = fminf(right, g_scrolls[i].x + g_scrolls[i].w);
+        bottom = fminf(bottom, g_scrolls[i].y + g_scrolls[i].h);
+    }
+    *w = fmaxf(0, right - *x); *h = fmaxf(0, bottom - *y);
+    return *w > 0 && *h > 0;
+}
+
 /* --- レイアウト進行 --- */
 static inline GuiHorizontalGroup *gui_current_horizontal(void) {
     if (!g_cur || g_cur->horizontal_depth <= 0) return NULL;
@@ -959,6 +976,9 @@ static void gui_nav_move(int direction) {
 }
 
 static void gui_nav_begin(void) {
+#ifdef __APPLE__
+    hjp_accessibility_begin(g_cur->window);
+#endif
     g_cur->action_count = 0;
     g_cur->modal_entered = false;
     g_cur->modal_input_saved = false;
@@ -971,6 +991,9 @@ static void gui_nav_begin(void) {
 }
 
 static void gui_nav_end(void) {
+#ifdef __APPLE__
+    hjp_accessibility_end(g_cur->window);
+#endif
     bool found = false;
     for (int i = 0; i < g_cur->nav_current_count; i++)
         if (g_cur->nav_current[i] == g_cur->nav_focus) found = true;
@@ -987,6 +1010,8 @@ static void gui_nav_end(void) {
 }
 
 static bool gui_nav_register(uint32_t id, float x, float y, float w, float h) {
+    float vx = x, vy = y, vw = w, vh = h;
+    if (!gui_visible_rect(&vx, &vy, &vw, &vh)) return false;
     if (!g_cur->nav_enabled || g_disabled || w <= 0 || h <= 0 ||
         (g_cur->modal_title[0] && !g_cur->modal_entered)) return false;
     bool registered = false;
@@ -1043,7 +1068,9 @@ static bool gui_widget_logic(uint32_t id,
         return false;
     }
 
-    bool hov = gui_hit((float)g_cur->in.mx, (float)g_cur->in.my, x, y, w, h);
+    float vx = x, vy = y, vw = w, vh = h;
+    bool visible = gui_visible_rect(&vx, &vy, &vw, &vh);
+    bool hov = visible && gui_hit((float)g_cur->in.mx, (float)g_cur->in.my, vx, vy, vw, vh);
 
     if (hov) g_cur->hot = id;
 
@@ -1052,6 +1079,11 @@ static bool gui_widget_logic(uint32_t id,
 
     /* クリック判定 */
     bool clicked = false;
+    if (g_cur->in.accessibility_press == id && id != 0) {
+        g_cur->in.accessibility_press = 0;
+        g_cur->last = (GuiLastWidget){x, y, w, h, hov};
+        return visible;
+    }
     if (g_cur->active == id) {
         if (g_cur->in.released) {
             if (hov) clicked = true;
@@ -1230,6 +1262,8 @@ static Value fn_draw_loop(int argc, Value *argv) {
 
         /* ── イベント処理 ── */
         app->in.clicked  = false;
+        app->in.accessibility_press = app->pending_accessibility_press;
+        app->pending_accessibility_press = 0;
         app->in.released = false;
         app->in.scroll_y = 0;
         app->in.pmx = app->in.mx;
@@ -1304,6 +1338,19 @@ static Value fn_draw_loop(int argc, Value *argv) {
             case HJP_EVENT_TEXTEDITING:
                 memcpy(app->composition, ev.text.text, sizeof(app->composition));
                 app->composition[sizeof(app->composition) - 1] = '\0';
+                break;
+            case HJP_EVENT_ACCESSIBILITY_PRESS:
+                for (int wi = 0; wi < GUI_MAX_APPS; wi++) {
+                    GuiApp *target = &g_apps[wi];
+                    if (target->valid && target->window == ev.accessibility.window) {
+#ifdef __APPLE__
+                        if (hjp_accessibility_window_id(target->window) != ev.accessibility.generation) continue;
+#endif
+                        if (target == app) target->in.accessibility_press = ev.accessibility.id;
+                        else target->pending_accessibility_press = ev.accessibility.id;
+                        break;
+                    }
+                }
                 break;
             case HJP_EVENT_KEYDOWN: {
                 HjpKeycode k = ev.key.sym;
@@ -1812,6 +1859,7 @@ static Value fn_detail_row(int argc, Value *argv) {
                         w - 24, GUI_FONT_SIZE * 1.4f, false);
     }
     clicked = gui_nav_control(gui_hash(argv[0].string.data), x, y, w, h) || clicked;
+    gui_accessible(gui_hash(argv[0].string.data), argv[1].string.data, 0, x, y, w, h, !g_disabled, selected);
     gui_advance(h);
     return hajimu_bool(clicked);
 }
@@ -2005,6 +2053,7 @@ static Value fn_button(int argc, Value *argv) {
 
     g_disabled = disabled;
     clicked = gui_nav_control(id, x, y, btn_w, btn_h) || clicked;
+    gui_accessible(id, label, 0, x, y, btn_w, btn_h, !disabled, false);
     g_disabled = previous_disabled;
     gui_advance(btn_h);
     return hajimu_bool(clicked);
@@ -2072,6 +2121,7 @@ static Value fn_checkbox(int argc, Value *argv) {
     hjpTextAlign(vg, HJP_ALIGN_LEFT | HJP_ALIGN_MIDDLE);
     hjpText(vg, bx + GUI_CHECK_SIZE + 8.0f, y + row_h * 0.5f, label, NULL);
 
+    gui_accessible(id, label, 1, x, y, total_w, row_h, !g_disabled, checked);
     gui_advance(row_h);
     return hajimu_bool(checked);
 }
@@ -2133,6 +2183,7 @@ static Value fn_radio(int argc, Value *argv) {
     hjpText(vg, cx + GUI_RADIO_RADIUS + 8.0f, cy, label, NULL);
 
     clicked = gui_nav_control(id, x, y, total_w, row_h) || clicked;
+    gui_accessible(id, label, 2, x, y, total_w, row_h, !g_disabled, selected || clicked);
     gui_advance(row_h);
     return clicked ? hajimu_string(label) : argv[2];
 }
@@ -6234,6 +6285,7 @@ static Value fn_small_button(int argc, Value *argv) {
     gui_single_line(vg, label, x + 8, y, btn_w - 16, btn_h, true);
 
     clicked = gui_nav_control(id, x, y, btn_w, btn_h) || clicked;
+    gui_accessible(id, label, 0, x, y, btn_w, btn_h, !g_disabled, false);
     gui_advance(btn_h);
     return hajimu_bool(clicked);
 }
@@ -14757,6 +14809,23 @@ static struct {
     char role[64];
 } g_a11y_current;
 
+static void gui_accessible(uint32_t id, const char *name, int role, float x, float y,
+    float w, float h, bool enabled, bool selected) {
+#ifdef __APPLE__
+    if (g_cur && (!g_cur->modal_title[0] || g_cur->modal_entered)) {
+        const char *label = g_a11y_current.name[0] ? g_a11y_current.name : name;
+        if (strcmp(g_a11y_current.role, "checkbox") == 0) role = 1;
+        else if (strcmp(g_a11y_current.role, "radio") == 0) role = 2;
+        if (gui_visible_rect(&x, &y, &w, &h))
+            hjp_accessibility_add(g_cur->window, id, label, g_a11y_current.desc, role,
+                x, y, w, h, enabled, selected);
+    }
+#else
+    (void)id; (void)name; (void)role; (void)x; (void)y; (void)w; (void)h; (void)enabled; (void)selected;
+#endif
+    memset(&g_a11y_current, 0, sizeof(g_a11y_current));
+}
+
 static struct {
     char msg[256];
     int  mode;  /* 0=off, 1=polite, 2=assertive */
@@ -14765,27 +14834,33 @@ static struct {
 static bool g_a11y_focus_ring = true;
 static bool g_a11y_reduce_motion = false;
 
+static void gui_a11y_copy(char *dest, size_t capacity, const char *src) {
+    size_t n = strlen(src);
+    if (n >= capacity) {
+        n = capacity - 1;
+        while (n && ((unsigned char)src[n] & 0xc0) == 0x80) n--;
+    }
+    memcpy(dest, src, n); dest[n] = '\0';
+}
+
 /* アクセシブル名(名前) → 無 */
 static Value fn_a11y_name(int argc, Value *argv) {
-    (void)argc;
-    snprintf(g_a11y_current.name, sizeof(g_a11y_current.name),
-             "%s", argv[0].string.data);
+    if (argc < 1 || argv[0].type != VALUE_STRING) return hajimu_null();
+    gui_a11y_copy(g_a11y_current.name, sizeof(g_a11y_current.name), argv[0].string.data);
     return hajimu_null();
 }
 
 /* アクセシブル説明(説明) → 無 */
 static Value fn_a11y_desc(int argc, Value *argv) {
-    (void)argc;
-    snprintf(g_a11y_current.desc, sizeof(g_a11y_current.desc),
-             "%s", argv[0].string.data);
+    if (argc < 1 || argv[0].type != VALUE_STRING) return hajimu_null();
+    gui_a11y_copy(g_a11y_current.desc, sizeof(g_a11y_current.desc), argv[0].string.data);
     return hajimu_null();
 }
 
 /* アクセシブルロール(ロール) → 無 */
 static Value fn_a11y_role(int argc, Value *argv) {
-    (void)argc;
-    snprintf(g_a11y_current.role, sizeof(g_a11y_current.role),
-             "%s", argv[0].string.data);
+    if (argc < 1 || argv[0].type != VALUE_STRING) return hajimu_null();
+    gui_a11y_copy(g_a11y_current.role, sizeof(g_a11y_current.role), argv[0].string.data);
     return hajimu_null();
 }
 
@@ -14831,12 +14906,14 @@ static Value fn_keyboard_trap(int argc, Value *argv) {
 
 /* スクリーンリーダー通知(メッセージ) → 無 */
 static Value fn_sr_announce(int argc, Value *argv) {
-    (void)argc;
-    snprintf(g_live_region.msg, sizeof(g_live_region.msg),
-             "%s", argv[0].string.data);
+    if (argc < 1 || argv[0].type != VALUE_STRING) return hajimu_bool(false);
+    gui_a11y_copy(g_live_region.msg, sizeof(g_live_region.msg), argv[0].string.data);
     g_live_region.mode = 2; /* assertive */
-    /* トーストとしてユーザーにも表示 */
-    return hajimu_null();
+#ifdef __APPLE__
+    return hajimu_bool(g_cur && hjp_accessibility_announce(g_cur->window, argv[0].string.data));
+#else
+    return hajimu_bool(false);
+#endif
 }
 
 /* 動き軽減(有効) → 無 */
@@ -24749,7 +24826,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.12.0",
+        .version        = "14.13.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,

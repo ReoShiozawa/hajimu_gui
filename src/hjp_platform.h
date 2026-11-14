@@ -66,6 +66,7 @@ enum HjpEventType {
     HJP_EVENT_KEYUP,
     HJP_EVENT_DROPFILE,
     HJP_EVENT_TEXTEDITING,
+    HJP_EVENT_ACCESSIBILITY_PRESS,
 };
 
 /* --- ウィンドウイベントサブタイプ --- */
@@ -176,6 +177,7 @@ typedef struct {
         HjpWindowEventData   window;
         HjpTextInputEvent    text;
         HjpKeyEvent          key;
+        struct { HjpWindow *window; uint32_t id; int generation; } accessibility;
         HjpDropEvent         drop;
     };
 } HjpEvent;
@@ -235,6 +237,12 @@ void hjp_start_text_input(void);
 void hjp_stop_text_input(void);
 #ifdef __APPLE__
 void hjp_set_text_input_rect(HjpWindow *window, float x, float y, float w, float h);
+void hjp_accessibility_begin(HjpWindow *window);
+void hjp_accessibility_end(HjpWindow *window);
+int hjp_accessibility_window_id(HjpWindow *window);
+bool hjp_accessibility_announce(HjpWindow *window, const char *text);
+bool hjp_accessibility_add(HjpWindow *window, uint32_t id, const char *name, const char *help,
+    int role, float x, float y, float w, float h, bool enabled, bool selected);
 #endif
 
 /* --- キーボード状態 --- */
