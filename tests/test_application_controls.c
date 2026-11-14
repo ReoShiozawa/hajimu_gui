@@ -1,5 +1,16 @@
+#include <sys/wait.h>
+static pid_t control_waitpid(pid_t pid, int *status, int flags);
+#define HJP_TASK_WAITPID control_waitpid
 #include "../src/hajimu_gui.c"
 #include <assert.h>
+
+static pid_t deferred_pid;
+static int deferred_polls;
+static pid_t control_waitpid(pid_t pid, int *status, int flags) {
+    assert(flags == WNOHANG);
+    if (pid == deferred_pid && deferred_polls > 0) { deferred_polls--; return 0; }
+    return waitpid(pid, status, flags);
+}
 
 /* OSの実入力を送らず、部品が参照するフレーム入力を再現する。 */
 static void frame(bool down, bool released, int mx) {
@@ -326,6 +337,53 @@ static void check_accessible_text(void) {
     hjpCancelFrame(g_cur->vg);
 }
 
+static int cancel_notifications;
+static Value cancellation_observe(Value *callback, int argc, Value *argv) {
+    (void)callback;
+    assert(argc == 1 && argv[0].type == VALUE_DICT);
+    assert(!strcmp(gui_dict_lookup(argv[0], "状態").string.data, "取消"));
+    assert(gui_dict_lookup(argv[0], "終了コード").number == 128 + SIGKILL);
+    assert(gui_dict_lookup(argv[0], "進捗").number == -1);
+    cancel_notifications++;
+    return hajimu_null();
+}
+
+static void check_task_cancellation(void) {
+    char *args[] = {"/bin/sleep", "10", NULL};
+    int id = hjp_task_start_with_io(g_cur, args, true, true);
+    HjpTask *task = hjp_task_find(id, g_cur);
+    assert(task);
+    deferred_pid = task->pid; deferred_polls = 50;
+    Value argument = hajimu_number(id);
+    assert(fn_task_cancel(1, &argument).boolean);
+    assert(task->state == HJP_TASK_CANCELLING && task->pid == deferred_pid && deferred_polls == 49);
+    assert(fn_task_progress(1, &argument).number == -1);
+    Value state = fn_task_state(1, &argument);
+    assert(!strcmp(gui_dict_lookup(state, "状態").string.data, "取消中"));
+    assert(!fn_task_release(1, &argument).boolean);
+    HajimuRuntime *previous = __hajimu_runtime;
+    HajimuRuntime runtime = {.call = cancellation_observe};
+    __hajimu_runtime = &runtime;
+    Value notify[] = {argument, {.type = VALUE_FUNCTION}};
+    for (int i = 0; i < 5; i++) {
+        frame(false, false, 500);
+        assert(!fn_task_notify(2, notify).boolean);
+        hjpCancelFrame(g_cur->vg);
+    }
+    assert(cancel_notifications == 0 && task->pid == deferred_pid && deferred_polls > 0);
+    deferred_polls = 0;
+    for (int i = 0; i < 1000 && task->pid; i++) {
+        hjp_task_poll(task);
+        if (task->pid) hjp_delay(1);
+    }
+    assert(!task->pid && task->state == HJP_TASK_CANCELLED);
+    assert(fn_task_notify(2, notify).boolean && cancel_notifications == 1);
+    assert(!fn_task_notify(2, notify).boolean);
+    assert(fn_task_release(1, &argument).boolean);
+    assert(waitpid(deferred_pid, NULL, WNOHANG) == -1 && errno == ECHILD);
+    __hajimu_runtime = previous;
+}
+
 int main(void) {
     size_t function_count = sizeof(gui_functions) / sizeof(gui_functions[0]);
     for (size_t i = 0; i < function_count; i++) {
@@ -346,6 +404,7 @@ int main(void) {
     check_text_navigation();
     check_document_edits();
     check_accessible_text();
+    check_task_cancellation();
     char oversized[GUI_MAX_TEXT_BUF + 8];
     memset(oversized, 'a', GUI_MAX_TEXT_BUF - 2);
     memcpy(oversized + GUI_MAX_TEXT_BUF - 2, "日本", 7);

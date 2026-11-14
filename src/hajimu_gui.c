@@ -16698,7 +16698,7 @@ static Value fn_task_state(int argc, Value *argv) {
     HjpTask *task = argc >= 1 ? gui_task_lookup(argv[0]) : NULL;
     hjp_task_poll(task);
     if (task) {
-        const char *names[] = {"不明", "実行中", "成功", "失敗", "取消"};
+        const char *names[] = {"不明", "実行中", "成功", "失敗", "取消", "取消中"};
         state = names[task->state];
         exit_code = task->exit_code;
         progress = gui_task_progress(task);
@@ -25265,8 +25265,9 @@ static Value fn_api_status(int argc, Value *argv) {
             state = "部分対応"; reason = "Unicode符号位置での選択/カーソルとmacOS文書同期。実IME・複数ウィンドウ・他OSの検査は未完了";
         } else if (found->fn == fn_ime_composition) {
             state = "部分対応"; reason = "フレーム内の変換通知とmacOS文書選択/置換を接続。実IME・長い未確定文字表示・他OSは未完了";
-        } else if (found->fn == fn_async_exec || found->fn == fn_task_progress || found->fn == fn_task_notify || found->fn == fn_task_output) {
-            state = "部分対応"; reason = "POSIXプロセスタスクと上限付き出力/進捗IPC。任意クロージャの隔離実行・Windowsは未対応";
+        } else if (found->fn == fn_async_exec || found->fn == fn_task_progress || found->fn == fn_task_notify ||
+                   found->fn == fn_task_output || found->fn == fn_task_state || found->fn == fn_task_cancel || found->fn == fn_task_release) {
+            state = "部分対応"; reason = "POSIXタスク・出力/進捗IPC・非同期取消要求。破棄時の同期回収・任意関数・Windowsは未完了";
         } else if (found->fn == fn_a11y_name || found->fn == fn_a11y_desc || found->fn == fn_a11y_role || found->fn == fn_sr_announce) {
             state = "部分対応"; reason = "macOSの基本部品と通常入力欄の編集/選択/フォーカス。外部AX・実読み上げ・テーブル/ツリー・他OSは未完了";
         } else if (found->fn == fn_focus_traversal) {
@@ -25299,7 +25300,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.21.0",
+        .version        = "14.22.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,

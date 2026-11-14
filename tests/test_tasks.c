@@ -1,7 +1,26 @@
+#include <sys/wait.h>
+static pid_t checked_waitpid(pid_t pid, int *status, int flags);
+static int checked_kill(pid_t group, int signal);
+#define HJP_TASK_WAITPID checked_waitpid
+#define HJP_TASK_KILL checked_kill
 #include "../src/hjp_tasks.h"
 #include <assert.h>
 #include <stdio.h>
 #include <time.h>
+
+static pid_t delayed_pid;
+static int delay_polls;
+static int kill_error;
+static int checked_kill(pid_t group, int signal) {
+    assert(group < 0 && signal == SIGKILL);
+    if (kill_error) { errno = kill_error; return -1; }
+    return kill(group, signal);
+}
+static pid_t checked_waitpid(pid_t pid, int *status, int flags) {
+    assert(flags == WNOHANG);
+    if (pid == delayed_pid && delay_polls > 0) { delay_polls--; return 0; }
+    return waitpid(pid, status, flags);
+}
 
 static void finish(HjpTask *task) {
     for (int i = 0; i < 3000 && (task->pid || task->out.fd >= 0 || task->err.fd >= 0 || task->progress_fd >= 0); i++) {
@@ -38,9 +57,29 @@ int main(void) {
     id = hjp_task_start(&owner, slow);
     task = hjp_task_find(id, &owner);
     pid_t child = task->pid;
+    delayed_pid = child; delay_polls = 10;
+    kill_error = EPERM;
+    assert(!hjp_task_cancel(task));
+    assert(task->pid == child && task->state == HJP_TASK_RUNNING && task->error == EPERM);
+    kill_error = 0;
     assert(hjp_task_cancel(task));
+    assert(task->state == HJP_TASK_CANCELLING && task->pid == child && delay_polls == 8 && task->error == 0);
+    assert(!hjp_task_cancel(task));
+    finish(task);
     assert(task->state == HJP_TASK_CANCELLED && task->pid == 0);
     assert(waitpid(child, NULL, WNOHANG) == -1 && errno == ECHILD);
+    char *group[] = {"/bin/sh", "-c", "sleep 30 & printf 'ready'; wait", NULL};
+    id = hjp_task_start_with_io(&owner, group, true, false);
+    task = hjp_task_find(id, &owner);
+    assert(task);
+    for (int i = 0; i < 1000 && !task->out.length; i++) {
+        hjp_task_poll(task);
+        struct timespec delay = {0, 1000000}; nanosleep(&delay, NULL);
+    }
+    assert(task->out.length == 5);
+    assert(hjp_task_cancel(task));
+    finish(task);
+    assert(task->state == HJP_TASK_CANCELLED && task->out.eof && task->err.eof);
     int before_fds = open_fds();
     for (int i = 0; i < 30; i++) assert(hjp_task_start_with_io(&owner, missing, true, true) == -1);
     assert(open_fds() == before_fds);
@@ -79,6 +118,7 @@ int main(void) {
     id = hjp_task_start_with_io(&owner, slow, true, true);
     task = hjp_task_find(id, &owner);
     assert(hjp_task_cancel(task));
+    finish(task);
     assert(task->out.fd < 0 && task->err.fd < 0 && task->progress_fd < 0);
     hjp_tasks_close(&owner);
     assert(open_fds() == before_fds);

@@ -16,6 +16,13 @@
 #include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <time.h>
+#ifndef HJP_TASK_WAITPID
+#define HJP_TASK_WAITPID waitpid
+#endif
+#ifndef HJP_TASK_KILL
+#define HJP_TASK_KILL kill
+#endif
 extern char **environ;
 #define HJP_TASK_OUTPUT_LIMIT 16384
 #define HJP_TASK_READ_BUDGET 16384
@@ -32,6 +39,7 @@ typedef struct {
     pid_t pid;
     const void *owner;
     bool notified;
+    bool cancel_requested;
     bool capture_output;
     HjpTaskOutput out, err;
     int progress_fd;
@@ -40,7 +48,7 @@ typedef struct {
     size_t progress_length;
     bool progress_overflow;
 } HjpTask;
-enum { HJP_TASK_RUNNING = 1, HJP_TASK_SUCCEEDED, HJP_TASK_FAILED, HJP_TASK_CANCELLED };
+enum { HJP_TASK_RUNNING = 1, HJP_TASK_SUCCEEDED, HJP_TASK_FAILED, HJP_TASK_CANCELLED, HJP_TASK_CANCELLING };
 static HjpTask hjp_tasks[32];
 static int hjp_task_next_id = 1;
 
@@ -162,15 +170,16 @@ static void hjp_task_poll(HjpTask *task) {
     hjp_task_read_output(&task->err);
     hjp_task_read_progress(task);
     if (!task->pid) return;
-    int status;
-    pid_t done = waitpid(task->pid, &status, WNOHANG);
+    int status = 0;
+    pid_t done = HJP_TASK_WAITPID(task->pid, &status, WNOHANG);
     if (done == 0 || (done < 0 && errno == EINTR)) return;
-    task->pid = 0;
     if (done < 0) {
-        task->state = HJP_TASK_FAILED; task->error = errno; return;
+        task->pid = 0; task->state = HJP_TASK_FAILED; task->error = errno; return;
     }
+    if (!WIFEXITED(status) && !WIFSIGNALED(status)) return;
+    task->pid = 0;
     task->exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
-    task->state = task->exit_code == 0 ? HJP_TASK_SUCCEEDED : HJP_TASK_FAILED;
+    task->state = task->cancel_requested ? HJP_TASK_CANCELLED : task->exit_code == 0 ? HJP_TASK_SUCCEEDED : HJP_TASK_FAILED;
 }
 /* fd 3を進捗専用に予約する。親の標準FDが閉じていてもdup2先と衝突させない。 */
 static bool hjp_task_pipe(int pair[2]) {
@@ -245,22 +254,27 @@ static inline int hjp_task_start(const void *owner, char *const *args) {
     return hjp_task_start_with_io(owner, args, false, false);
 }
 static bool hjp_task_cancel(HjpTask *task) {
-    if (!task || !task->pid) return false;
+    if (!task || !task->pid || task->cancel_requested) return false;
     hjp_task_poll(task);
     if (!task->pid) return false;
-    /* プロセスグループ全体を停止してから必ず回収する。 */
-    if (kill(-task->pid, SIGKILL) < 0 && errno != ESRCH) return false;
-    int status;
-    while (waitpid(task->pid, &status, 0) < 0) if (errno != EINTR) break;
-    task->pid = 0;
-    task->state = HJP_TASK_CANCELLED;
-    hjp_task_read_output(&task->out); hjp_task_read_output(&task->err); hjp_task_read_progress(task);
-    hjp_task_close_io(task);
+    /* 要求だけを送り、回収済みになるまでPIDとパイプを保持する。 */
+    if (HJP_TASK_KILL(-task->pid, SIGKILL) < 0 && errno != ESRCH) { task->error = errno; return false; }
+    task->cancel_requested = true;
+    task->state = HJP_TASK_CANCELLING;
+    task->error = 0;
     return true;
 }
 static void hjp_tasks_close(const void *owner) {
     for (size_t i = 0; i < 32; i++) if (hjp_tasks[i].id && hjp_tasks[i].owner == owner) {
         hjp_task_cancel(&hjp_tasks[i]);
+        /* アプリ破棄時の同期回収は別契約。待機中もパイプを読み、出力詰まりを防ぐ。 */
+        while (hjp_tasks[i].pid) {
+            hjp_task_poll(&hjp_tasks[i]);
+            if (hjp_tasks[i].pid) {
+                struct timespec pause = {0, 1000000};
+                nanosleep(&pause, NULL);
+            }
+        }
         hjp_task_close_io(&hjp_tasks[i]);
         memset(&hjp_tasks[i], 0, sizeof(hjp_tasks[i]));
     }
