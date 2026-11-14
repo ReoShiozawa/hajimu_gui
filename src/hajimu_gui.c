@@ -322,6 +322,7 @@ typedef struct {
     GuiInput modal_input;
     uint32_t modal_restore_focus;
     char composition[128];
+    uint64_t composition_version, composition_notified;
     uint32_t nav_previous[512], nav_current[512];
     int nav_previous_count, nav_current_count;
     /* 上限付きの一覧状態。別ウィンドウや剰余の一致で状態を共有しない。 */
@@ -367,6 +368,17 @@ typedef struct {
 
 static GuiApp  g_apps[GUI_MAX_APPS];
 static GuiApp *g_cur  = NULL;           /* 描画中の現在アプリ        */
+static void gui_ime_update(GuiApp *app, const char *text) {
+    size_t length = strlen(text);
+    if (length >= sizeof(app->composition)) {
+        length = sizeof(app->composition) - 1;
+        while (length && ((unsigned char)text[length] & 0xc0) == 0x80) length--;
+    }
+    if (strlen(app->composition) == length && !memcmp(app->composition, text, length)) return;
+    memcpy(app->composition, text, length);
+    app->composition[length] = '\0';
+    app->composition_version++;
+}
 static void gui_accessible(uint32_t id, const char *name, int role, float x, float y,
     float w, float h, bool enabled, bool selected);
 static struct { int id; const void *owner; HjpHistory data; } g_histories[16];
@@ -1336,8 +1348,7 @@ static Value fn_draw_loop(int argc, Value *argv) {
                 break;
             }
             case HJP_EVENT_TEXTEDITING:
-                memcpy(app->composition, ev.text.text, sizeof(app->composition));
-                app->composition[sizeof(app->composition) - 1] = '\0';
+                gui_ime_update(app, ev.text.text);
                 break;
             case HJP_EVENT_ACCESSIBILITY_PRESS:
                 for (int wi = 0; wi < GUI_MAX_APPS; wi++) {
@@ -14579,13 +14590,16 @@ static Value fn_ime_state(int argc, Value *argv) {
                      "未確定文字列", hajimu_string(g_cur ? g_cur->composition : ""));
 }
 
-/* IME合成(コールバック) → 無 */
+/* 呼出元フレームで最新の変更を配送し、コールバックは保持しない。 */
 static Value fn_ime_composition(int argc, Value *argv) {
-    (void)argc;
-    /* hjp_platformではTEXTEDITINGイベントとして受け取れるが、
-       ここではコールバックを登録するフラグを立てる */
-    (void)argv[0];
-    return hajimu_null();
+    if (!g_cur || argc < 1 || argv[0].type != VALUE_FUNCTION || !hajimu_runtime_available() ||
+        g_cur->composition_version == g_cur->composition_notified ||
+        (g_cur->modal_title[0] && !g_cur->modal_entered)) return hajimu_bool(false);
+    g_cur->composition_notified = g_cur->composition_version;
+    Value state = fn_ime_state(0, NULL);
+    dict_set(&state, "変更番号", hajimu_number((double)g_cur->composition_version));
+    hajimu_call(&argv[0], 1, &state);
+    return hajimu_bool(true);
 }
 
 /* =====================================================================
@@ -24841,7 +24855,7 @@ static Value fn_api_status(int argc, Value *argv) {
                 break;
             }
         if (found->fn == fn_ime_composition) {
-            state = "未実装"; reason = "コールバック引数を利用していません";
+            state = "部分対応"; reason = "フレーム内呼出で最新の変換状態変更を通知。macOS接続のみで文書選択/置換と実IME検査は未完了";
         } else if (found->fn == fn_async_exec || found->fn == fn_task_progress || found->fn == fn_task_notify) {
             state = "部分対応"; reason = "POSIXプロセスタスクのみ。任意クロージャの隔離実行・Windowsは未対応";
         } else if (found->fn == fn_a11y_name || found->fn == fn_a11y_desc || found->fn == fn_a11y_role || found->fn == fn_sr_announce) {
@@ -24876,7 +24890,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.14.0",
+        .version        = "14.15.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,

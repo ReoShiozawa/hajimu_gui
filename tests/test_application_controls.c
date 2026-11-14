@@ -14,6 +14,64 @@ static void frame(bool down, bool released, int mx) {
     hjpBeginFrame(g_cur->vg, 640, 400, 1);
 }
 
+static int ime_notifications;
+static const char *ime_expected;
+static Value ime_observe(Value *callback, int argc, Value *argv) {
+    assert(argc == 1 && argv[0].type == VALUE_DICT);
+    assert(!strcmp(gui_dict_lookup(argv[0], "未確定文字列").string.data, ime_expected));
+    assert(gui_dict_lookup(argv[0], "変換中").boolean == (ime_expected[0] != '\0'));
+    assert(gui_dict_lookup(argv[0], "変更番号").number == (double)g_cur->composition_version);
+    ime_notifications++;
+    /* 通知済みの更新を、再入したコールバックから再配送しない。 */
+    assert(!fn_ime_composition(1, callback).boolean);
+    return hajimu_null();
+}
+
+static void check_ime_notifications(void) {
+    HajimuRuntime *previous_runtime = __hajimu_runtime;
+    HajimuRuntime runtime = {.call = ime_observe};
+    Value callback = {.type = VALUE_FUNCTION};
+    gui_ime_update(g_cur, "に");
+    assert(!fn_ime_composition(1, &callback).boolean);
+    __hajimu_runtime = &runtime;
+    ime_expected = "に";
+    assert(fn_ime_composition(1, &callback).boolean);
+    assert(!fn_ime_composition(1, &callback).boolean);
+    gui_ime_update(g_cur, "に");
+    assert(!fn_ime_composition(1, &callback).boolean);
+    gui_ime_update(g_cur, "日本");
+    gui_ime_update(g_cur, "日本語");
+    ime_expected = "日本語";
+    assert(!fn_ime_composition(0, NULL).boolean);
+    Value invalid = hajimu_null();
+    assert(!fn_ime_composition(1, &invalid).boolean);
+    snprintf(g_cur->modal_title, sizeof(g_cur->modal_title), "IME test");
+    assert(!fn_ime_composition(1, &callback).boolean);
+    g_cur->modal_entered = true;
+    assert(fn_ime_composition(1, &callback).boolean);
+    g_cur->modal_entered = false;
+    g_cur->modal_title[0] = '\0';
+    gui_ime_update(g_cur, "");
+    ime_expected = "";
+    assert(fn_ime_composition(1, &callback).boolean);
+    assert(ime_notifications == 3);
+    char long_text[301];
+    for (int i = 0; i < 100; i++) memcpy(long_text + i * 3, "あ", 3);
+    long_text[300] = '\0';
+    gui_ime_update(g_cur, long_text);
+    assert(strlen(g_cur->composition) == 126);
+    uint64_t version = g_cur->composition_version;
+    gui_ime_update(g_cur, long_text);
+    assert(g_cur->composition_version == version);
+    gui_ime_update(g_cur, "");
+    g_cur->composition_notified = g_cur->composition_version;
+    GuiApp *app = g_cur;
+    g_cur = NULL;
+    assert(!fn_ime_composition(1, &callback).boolean);
+    g_cur = app;
+    __hajimu_runtime = previous_runtime;
+}
+
 int main(void) {
     size_t function_count = sizeof(gui_functions) / sizeof(gui_functions[0]);
     for (size_t i = 0; i < function_count; i++) {
@@ -28,6 +86,7 @@ int main(void) {
     Value app = fn_app_create(3, app_args);
     assert(app.type == VALUE_NUMBER);
     g_cur = &g_apps[(int)app.number];
+    check_ime_notifications();
     assert(fn_focus_traversal(0, NULL).boolean);
     frame(false, false, 500);
     gui_nav_begin();

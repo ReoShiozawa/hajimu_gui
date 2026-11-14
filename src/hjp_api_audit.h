@@ -7,7 +7,6 @@ static const char *gui_constant_return_candidates[] = {
     "音声停止",
     "音量",
     "SVG読み込み",
-    "IME合成",
     "依存フィールド",
     "ウィジェット画像化",
     "キャンバス画像化",
