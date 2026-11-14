@@ -769,6 +769,58 @@ static void check_modal_stack(void) {
     hjpCancelFrame(g_cur->vg);
 }
 
+static void check_text_block_layout(void) {
+    frame(false, false, 500);
+    Value options = make_dict();
+    dict_set(&options, "幅", hajimu_number(90));
+    dict_set(&options, "サイズ", hajimu_number(20));
+    dict_set(&options, "行高さ", hajimu_number(32));
+    Value args[] = {hajimu_string("説明文は内容に応じて折り返します。\r\n次の行\n"), options};
+    GuiLayout saved = g_cur->lay;
+    GuiLastWidget last = g_cur->last;
+    g_next_widget_w = 171;
+    int depth = hjpStateDepth(g_cur->vg);
+    float font_line_before, font_line_after;
+    hjpTextMetrics(g_cur->vg, NULL, NULL, &font_line_before);
+    Value result = fn_text_measure(2, args);
+    hjpTextMetrics(g_cur->vg, NULL, NULL, &font_line_after);
+    assert(font_line_before == font_line_after);
+    double height = gui_dict_lookup(result, "高さ").number;
+    double lines = gui_dict_lookup(result, "行数").number;
+    assert(lines > 3 && height == lines * 32);
+    assert(!memcmp(&saved, &g_cur->lay, sizeof(saved)) && !memcmp(&last, &g_cur->last, sizeof(last)));
+    assert(g_next_widget_w == 171 && hjpStateDepth(g_cur->vg) == depth);
+    fn_text(2, args);
+    assert(g_cur->last.w == 90 && g_cur->last.h == height);
+    assert(fabs(g_cur->lay.y - height - GUI_MARGIN) < 0.01);
+    float following = g_cur->lay.y;
+    fn_text_wrapped(2, args);
+    assert(g_cur->last.h == height && g_cur->last.y == following);
+    args[0] = hajimu_string(""); result = fn_text_measure(2, args);
+    assert(gui_dict_lookup(result, "行数").number == 1 && gui_dict_lookup(result, "高さ").number == 32);
+    args[0] = hajimu_string("A\r\n\r\n"); result = fn_text_measure(2, args);
+    assert(gui_dict_lookup(result, "行数").number == 3);
+    char many[262];
+    for (int i = 0; i < 130; i++) { many[i * 2] = 'a'; many[i * 2 + 1] = '\n'; }
+    many[260] = 0;
+    args[0] = hajimu_string(many); result = fn_text_measure(2, args);
+    assert(gui_dict_lookup(result, "行数").number == 131);
+    args[0] = hajimu_string("e\xcc\x81" "\xf0\x9f\x87\xaf\xf0\x9f\x87\xb5");
+    dict_set(&options, "幅", hajimu_number(1)); args[1] = options;
+    result = fn_text_measure(2, args);
+    assert(gui_dict_lookup(result, "行数").number == 2);
+    dict_set(&options, "幅", hajimu_number(NAN)); args[1] = options;
+    saved = g_cur->lay; g_next_widget_w = 171;
+    assert(fn_text_measure(2, args).type == VALUE_NULL);
+    dict_set(&options, "幅", hajimu_number(90));
+    dict_set(&options, "色", hajimu_number(1e100)); args[1] = options;
+    assert(fn_text_measure(2, args).type == VALUE_NULL);
+    fn_text_wrapped(2, args);
+    assert(!memcmp(&saved, &g_cur->lay, sizeof(saved)) && g_next_widget_w == 171);
+    assert(hjpStateDepth(g_cur->vg) == depth);
+    hjpCancelFrame(g_cur->vg);
+}
+
 static void check_modal_forms(void) {
     frame(false, false, 500); gui_nav_begin();
     Value parent = modal_list("form", NULL), none = modal_list(NULL, NULL);
@@ -965,6 +1017,7 @@ int main(void) {
     check_window_close_input();
     check_modal_stack();
     check_modal_forms();
+    check_text_block_layout();
     check_form_scrolling();
     char oversized[GUI_MAX_TEXT_BUF + 8];
     memset(oversized, 'a', GUI_MAX_TEXT_BUF - 2);

@@ -2162,59 +2162,112 @@ static Value fn_detail_row(int argc, Value *argv) {
     return hajimu_bool(clicked);
 }
 
-static Value fn_text(int argc, Value *argv) {
-    if (!g_cur || argc < 1 || argv[0].type != VALUE_STRING)
-        return hajimu_null();
+static Hjpcolor gui_arg_color(Value v);
 
-    Hjpcontext *vg = g_cur->vg;
-    const char *text = argv[0].string.data;
+typedef struct {
+    float size, width, line_height;
+    Hjpcolor color;
+} GuiTextBlock;
 
-    float sz  = GUI_FONT_SIZE;
-    Hjpcolor col = TH_TEXT;
-
-    /* オプション解析 */
-    if (argc >= 2 && argv[1].type == VALUE_DICT) {
+/* 測定と描画で寸法の解釈を共有し、測定自体はレイアウトを進めない。 */
+static bool gui_text_block_options(int argc, Value *argv, float width, GuiTextBlock *block) {
+    *block = (GuiTextBlock){GUI_FONT_SIZE, width, 0, TH_TEXT};
+    if (argc >= 2 && argv[1].type == VALUE_NUMBER) block->size = (float)argv[1].number;
+    else if (argc >= 2 && argv[1].type == VALUE_DICT) {
         for (int i = 0; i < argv[1].dict.length; i++) {
-            const char *k = argv[1].dict.keys[i];
-            Value       v = argv[1].dict.values[i];
-            if (strcmp(k, "サイズ") == 0 && v.type == VALUE_NUMBER)
-                sz = (float)v.number;
-            else if (strcmp(k, "色") == 0 && v.type == VALUE_NUMBER)
-                col = gui_unpack(v.number);
+            const char *key = argv[1].dict.keys[i];
+            Value value = argv[1].dict.values[i];
+            if (!strcmp(key, "色")) {
+                if (value.type != VALUE_STRING && value.type != VALUE_NUMBER) return false;
+                if (value.type == VALUE_NUMBER && (!isfinite(value.number) || value.number < 0 || value.number > UINT32_MAX)) return false;
+                block->color = gui_arg_color(value);
+            } else {
+                if (value.type != VALUE_NUMBER || !isfinite(value.number) || value.number <= 0) return false;
+                if (!strcmp(key, "サイズ")) block->size = (float)value.number;
+                else if (!strcmp(key, "幅")) block->width = fminf(width, (float)value.number);
+                else if (!strcmp(key, "行高さ")) block->line_height = (float)value.number;
+                else return false;
+            }
         }
-    } else if (argc >= 2 && argv[1].type == VALUE_NUMBER) {
-        sz = (float)argv[1].number;
-    }
+    } else if (argc >= 2) return false;
+    if (!isfinite(block->size) || block->size <= 0 || block->size > 512 ||
+        !isfinite(block->width) || block->width <= 0 || !isfinite(block->line_height)) return false;
+    if (block->line_height == 0) block->line_height = block->size * 1.4f;
+    return block->line_height >= block->size;
+}
 
-    float x, y, w;
-    gui_pos(&x, &y, &w);
-
-    hjpFontFaceId(vg, g_cur->font_id);
-    hjpFontSize(vg, sz);
-    hjpFillColor(vg, col);
-    hjpTextAlign(vg, HJP_ALIGN_LEFT | HJP_ALIGN_TOP);
-
-    /* 折り返し描画 */
-    float line_h = sz * 1.4f;
+static bool gui_text_block_layout(const char *text, const GuiTextBlock *block,
+                                  bool draw, float x, float y, float *width, int *lines) {
+    Hjpcontext *vg = g_cur->vg;
+    const char *start = text, *end = text + strlen(text);
+    float measured = 0;
+    int count = 0;
     HjptextRow rows[64];
-    const char *start = text;
-    const char *end   = text + strlen(text);
-    float cy = y;
     while (start < end) {
-        int nrows = hjpTextBreakLines(vg, start, end, w, rows, 64);
-        if (nrows <= 0) break;
-        for (int i = 0; i < nrows; i++) {
-            hjpText(vg, x, cy, rows[i].start, rows[i].end);
-            cy += line_h;
+        int n = hjpTextBreakLines(vg, start, end, block->width, rows, 64);
+        if (n <= 0 || rows[n - 1].next <= start) return false;
+        if (count > INT_MAX - n) return false;
+        for (int i = 0; i < n; i++) {
+            measured = fmaxf(measured, rows[i].width);
+            if (draw) hjpText(vg, x, y + (float)(count + i) * block->line_height, rows[i].start, rows[i].end);
         }
-        start = rows[nrows - 1].next;
+        count += n;
+        start = rows[n - 1].next;
     }
+    /* 末尾改行の次にも空行がある。空文字も一行分の場所を持つ。 */
+    if (!count || (end > text && (end[-1] == '\n' || end[-1] == '\r'))) {
+        if (count == INT_MAX) return false;
+        count++;
+    }
+    *width = measured;
+    *lines = count;
+    return true;
+}
 
-    float total_h = cy - y;
-    if (total_h < line_h) total_h = line_h;
-    g_cur->last = (GuiLastWidget){x, y, w, total_h, false};
-    gui_advance(total_h);
+static Value gui_text_block(int argc, Value *argv, bool measure) {
+    if (!g_cur || argc < 1 || argc > 2 || argv[0].type != VALUE_STRING) return hajimu_null();
+    float x = 0, y = 0, available = FLT_MAX;
+    GuiTextBlock block;
+    if (!gui_text_block_options(argc, argv, available, &block)) return hajimu_null();
+    if (!measure) {
+        gui_pos(&x, &y, &available);
+        block.width = fminf(block.width, available);
+        if (!isfinite(block.width) || block.width <= 0) return hajimu_null();
+    }
+    Hjpcontext *vg = g_cur->vg;
+    int depth = hjpStateDepth(vg);
+    hjpSave(vg);
+    if (hjpStateDepth(vg) != depth + 1) return hajimu_null();
+    hjpFontFaceId(vg, g_cur->font_id);
+    hjpFontSize(vg, block.size);
+    hjpFillColor(vg, block.color);
+    hjpTextAlign(vg, HJP_ALIGN_LEFT | HJP_ALIGN_TOP);
+    float width;
+    int lines;
+    bool valid = gui_text_block_layout(argv[0].string.data, &block, false, x, y, &width, &lines);
+    if (!valid) { hjpRestore(vg); return hajimu_null(); }
+    float height = (float)lines * block.line_height;
+    if (!isfinite(height)) { hjpRestore(vg); return hajimu_null(); }
+    if (!measure) {
+        hjpIntersectScissor(vg, x, y, block.width, height);
+        gui_text_block_layout(argv[0].string.data, &block, true, x, y, &width, &lines);
+    }
+    hjpRestore(vg);
+    if (measure) {
+        Value result = make_dict();
+        dict_set(&result, "幅", hajimu_number(width));
+        dict_set(&result, "高さ", hajimu_number(height));
+        dict_set(&result, "行数", hajimu_number(lines));
+        dict_set(&result, "行高さ", hajimu_number(block.line_height));
+        return result;
+    }
+    g_cur->last = (GuiLastWidget){x, y, block.width, height, false};
+    gui_advance(height);
     return hajimu_null();
+}
+
+static Value fn_text(int argc, Value *argv) {
+    return gui_text_block(argc, argv, false);
 }
 
 /* ---------------------------------------------------------------
@@ -8967,29 +9020,7 @@ static Value fn_text_colored(int argc, Value *argv) {
  * 折返しテキスト(テキスト)
  * ---------------------------------------------------------------*/
 static Value fn_text_wrapped(int argc, Value *argv) {
-    if (!g_cur || argc < 1 || argv[0].type != VALUE_STRING)
-        return hajimu_null();
-
-    Hjpcontext *vg = g_cur->vg;
-    const char *text = argv[0].string.data;
-
-    float x, y, w;
-    gui_pos(&x, &y, &w);
-
-    hjpFontFaceId(vg, g_cur->font_id);
-    hjpFontSize(vg, GUI_FONT_SIZE);
-    hjpFillColor(vg, TH_TEXT);
-    hjpTextAlign(vg, HJP_ALIGN_LEFT | HJP_ALIGN_TOP);
-
-    float bounds[4];
-    hjpTextBoxBounds(vg, x, y, w, text, NULL, bounds);
-    hjpTextBox(vg, x, y, w, text, NULL);
-
-    float h = bounds[3] - bounds[1];
-    if (h < GUI_FONT_SIZE) h = GUI_FONT_SIZE;
-    g_cur->last = (GuiLastWidget){x, y, w, h + 4, false};
-    gui_advance(h + 4);
-    return hajimu_null();
+    return gui_text_block(argc, argv, false);
 }
 
 /* ---------------------------------------------------------------
@@ -11991,17 +12022,8 @@ static Value fn_draw_alpha(int argc, Value *argv) {
 
 /* テキスト測定(文字列) → 辞書{幅, 高さ} */
 static Value fn_text_measure(int argc, Value *argv) {
-    (void)argc;
-    const char *txt = argv[0].string.data;
     if (!g_cur) return gui_dict2("幅", hajimu_number(0), "高さ", hajimu_number(0));
-
-    Hjpcontext *vg = g_cur->vg;
-    float bounds[4];
-    hjpFontSize(vg, g_custom_font_size > 0 ? g_custom_font_size : GUI_FONT_SIZE);
-    hjpTextBounds(vg, 0, 0, txt, NULL, bounds);
-    float tw = bounds[2] - bounds[0];
-    float th = bounds[3] - bounds[1];
-    return gui_dict2("幅", hajimu_number(tw), "高さ", hajimu_number(th));
+    return gui_text_block(argc, argv, true);
 }
 
 /* ラベル付き値(ラベル, 値) → 無 */
@@ -24548,7 +24570,7 @@ static HajimuPluginFunc gui_functions[] = {
     {"フローティングボタン", fn_fab,           3, 3},
     /* --- Phase 16: リッチコンテンツ --- */
     {"色付きテキスト",       fn_text_colored,  2, 2},
-    {"折返しテキスト",       fn_text_wrapped,  1, 1},
+    {"折返しテキスト",       fn_text_wrapped,  1, 2},
     {"無効テキスト",         fn_text_disabled, 1, 1},
     {"箇条書き",             fn_bullet_text,   1, 1},
     {"テキスト選択",         fn_text_selectable, 1, 1},
@@ -24641,7 +24663,7 @@ static HajimuPluginFunc gui_functions[] = {
     {"テクスチャパターン",   fn_texture_pattern, 5, 5},
     {"描画アルファ",         fn_draw_alpha,      1, 1},
     /* Phase 26: テキスト・データ表示拡張 */
-    {"テキスト測定",         fn_text_measure,    1, 1},
+    {"テキスト測定",         fn_text_measure,    1, 2},
     {"ラベル付き値",         fn_label_value,     2, 2},
     {"統計カード",           fn_stat_card,       2, 3},
     {"空状態表示",           fn_empty_state,     0, 1},
@@ -25696,6 +25718,8 @@ static Value fn_api_status(int argc, Value *argv) {
             state = "部分対応"; reason = "予約スタック・範囲付き描画・フォーカス復帰。旧ダイアログ/全特殊部品の入力統一と全OS実操作は未完了";
         } else if (found->fn == fn_text_input || found->fn == fn_password_input || found->fn == fn_textarea) {
             state = "部分対応"; reason = "Unicode書記素単位の移動/削除/クリック/折返し。字形合成・実IMEと全OS実操作・全入力部品への統一は未完了";
+        } else if (found->fn == fn_text || found->fn == fn_text_wrapped || found->fn == fn_text_measure) {
+            state = "部分対応"; reason = "幅/サイズ/行高さを共有する内容計測と描画。書記素単位の折返し、字形合成/単語境界/禁則処理/全OS実描画は未完了";
         } else if (found->fn == fn_input_state) {
             state = "部分対応"; reason = "世代付き配送・共通/アプリ別キューの超過リセットと破棄数。全OS実操作・全画面同時描画・入力消費の全体統一は未完了";
         } else if (found->fn == fn_app_quit || found->fn == fn_request_close || found->fn == fn_close_state) {
@@ -25739,7 +25763,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.28.0",
+        .version        = "14.29.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,
