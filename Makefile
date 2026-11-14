@@ -66,7 +66,7 @@ FONT_FILE = NotoSansCJKjp-Regular.otf
 all: $(OUT)
 	@echo "  ビルド完了: $(OUT)"
 
-$(OUT): $(SRC_C) $(SRC_PLATFORM) Makefile $(HAJIMU_INCLUDE)/hajimu_plugin.h $(HAJIMU_INCLUDE)/hajimu_abi.h
+$(OUT): $(SRC_C) $(SRC_PLATFORM) $(wildcard src/*.h) Makefile $(HAJIMU_INCLUDE)/hajimu_plugin.h $(HAJIMU_INCLUDE)/hajimu_abi.h
 	$(CC) $(CFLAGS) -o $@ $(SRC_C) $(SRC_PLATFORM) $(LDFLAGS)
 
 clean:

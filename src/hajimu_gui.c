@@ -43,6 +43,8 @@
 #include <ctype.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <limits.h>
+#include "hjp_tasks.h"
 #ifndef _WIN32
 #include <sys/file.h>
 #endif
@@ -1371,6 +1373,9 @@ static Value fn_draw_loop(int argc, Value *argv) {
 
         /* ── ユーザーコールバック実行 ── */
         g_cur = app;
+#ifndef _WIN32
+        for (size_t ti = 0; ti < 32; ti++) if (hjp_tasks[ti].owner == app) hjp_task_poll(&hjp_tasks[ti]);
+#endif
         gui_nav_begin();
         g_frame_count++;
         hajimu_call(&callback, 0, NULL);
@@ -1490,6 +1495,9 @@ static Value fn_draw_loop(int argc, Value *argv) {
         }
     }
 
+#ifndef _WIN32
+    hjp_tasks_close(app);
+#endif
     return hajimu_null();
 }
 
@@ -1523,6 +1531,9 @@ static Value fn_app_quit(int argc, Value *argv) {
     /* 描画コールバック中は fn_draw_loop が現在のフレームを閉じる。
      * ここで vg/window を破棄すると、コールバック復帰後に解放済み領域へ触れてしまう。 */
     if (g_cur == app) return hajimu_null();
+#ifndef _WIN32
+    hjp_tasks_close(app);
+#endif
 
     if (app->vg) { hjpDeleteGL3(app->vg); app->vg = NULL; }
     if (app->gl) { hjp_gl_delete_context(app->gl); app->gl = NULL; }
@@ -16121,21 +16132,97 @@ static Value fn_throttle(int argc, Value *argv) {
 
 /* 非同期実行(関数, 完了コールバック) → 数値 */
 static Value fn_async_exec(int argc, Value *argv) {
-    (void)argc; (void)argv;
-    /* hjp_thread_create相当 — スタブ */
-    return hajimu_number(0);
+    if (!g_cur || argc < 2 || argv[0].type != VALUE_DICT || argv[1].type != VALUE_NULL) {
+        fprintf(stderr, "[hajimu_gui] 非同期実行: 現在は実行ファイル/引数の辞書と無を指定してください。共有クロージャの実行は未対応です。\n");
+        return hajimu_number(-1);
+    }
+#ifdef _WIN32
+    return hajimu_number(-1);
+#else
+    Value executable = hajimu_null(), args = hajimu_null();
+    for (int i = 0; i < argv[0].dict.length; i++) {
+        if (strcmp(argv[0].dict.keys[i], "実行ファイル") == 0) executable = argv[0].dict.values[i];
+        if (strcmp(argv[0].dict.keys[i], "引数") == 0) args = argv[0].dict.values[i];
+    }
+    if (executable.type != VALUE_STRING || !executable.string.data[0] ||
+        args.type != VALUE_ARRAY || args.array.length > 64) return hajimu_number(-1);
+    char *process_args[66] = {0};
+    process_args[0] = executable.string.data;
+    for (int i = 0; i < args.array.length; i++) {
+        if (args.array.elements[i].type != VALUE_STRING) return hajimu_number(-1);
+        process_args[i + 1] = args.array.elements[i].string.data;
+    }
+    return hajimu_number(hjp_task_start(g_cur, process_args));
+#endif
 }
 
 /* タスク進捗(タスク) → 数値 */
 static Value fn_task_progress(int argc, Value *argv) {
-    (void)argc; (void)argv;
-    return hajimu_number(100); /* 常に完了 */
+    (void)argc;
+#ifndef _WIN32
+    if (argv[0].type == VALUE_NUMBER && isfinite(argv[0].number) && argv[0].number > 0 && argv[0].number < INT_MAX) {
+        HjpTask *task = hjp_task_find((int)argv[0].number, g_cur);
+        hjp_task_poll(task);
+        if (task && task->state == HJP_TASK_SUCCEEDED) return hajimu_number(100);
+    }
+#endif
+    return hajimu_number(-1); /* 実行中は割合不明。失敗・不明IDも成功扱いにしない。 */
 }
 
 /* タスクキャンセル(タスク) → 無 */
 static Value fn_task_cancel(int argc, Value *argv) {
-    (void)argc; (void)argv;
-    return hajimu_null();
+    (void)argc;
+#ifndef _WIN32
+    if (argv[0].type == VALUE_NUMBER && isfinite(argv[0].number) && argv[0].number > 0 && argv[0].number < INT_MAX)
+        return hajimu_bool(hjp_task_cancel(hjp_task_find((int)argv[0].number, g_cur)));
+#endif
+    return hajimu_bool(false);
+}
+
+static Value fn_task_state(int argc, Value *argv) {
+    (void)argc;
+    const char *state = "不明";
+    int exit_code = -1;
+#ifndef _WIN32
+    HjpTask *task = NULL;
+    if (argv[0].type == VALUE_NUMBER && isfinite(argv[0].number) && argv[0].number > 0 && argv[0].number < INT_MAX)
+        task = hjp_task_find((int)argv[0].number, g_cur);
+    hjp_task_poll(task);
+    if (task) {
+        const char *names[] = {"不明", "実行中", "成功", "失敗", "取消"};
+        state = names[task->state];
+        exit_code = task->exit_code;
+    }
+#endif
+    return gui_dict2("状態", hajimu_string(state), "終了コード", hajimu_number(exit_code));
+}
+
+static Value fn_task_release(int argc, Value *argv) {
+    (void)argc;
+#ifndef _WIN32
+    if (argv[0].type != VALUE_NUMBER || !isfinite(argv[0].number) || argv[0].number <= 0 || argv[0].number >= INT_MAX) return hajimu_bool(false);
+    HjpTask *task = hjp_task_find((int)argv[0].number, g_cur);
+    hjp_task_poll(task);
+    if (task && !task->pid) { memset(task, 0, sizeof(*task)); return hajimu_bool(true); }
+#endif
+    return hajimu_bool(false);
+}
+
+/* 完了イベントの配送は呼出元のGUIスレッドで行い、クロージャを保持しない。 */
+static Value fn_task_notify(int argc, Value *argv) {
+    if (!g_cur || argc < 2 || argv[1].type != VALUE_FUNCTION || !hajimu_runtime_available()) return hajimu_bool(false);
+#ifndef _WIN32
+    if (argv[0].type != VALUE_NUMBER || !isfinite(argv[0].number) || argv[0].number <= 0 || argv[0].number >= INT_MAX) return hajimu_bool(false);
+    HjpTask *task = hjp_task_find((int)argv[0].number, g_cur);
+    hjp_task_poll(task);
+    if (task && !task->pid && !task->notified) {
+        task->notified = true;
+        Value event = fn_task_state(1, argv);
+        hajimu_call(&argv[1], 1, &event);
+        return hajimu_bool(true);
+    }
+#endif
+    return hajimu_bool(false);
 }
 
 /* ローディングオーバーレイ(ID, 表示) → 無 */
@@ -23244,6 +23331,8 @@ HAJIMU_PLUGIN_EXPORT void hajimu_plugin_set_runtime(HajimuRuntime *rt) {
 HAJIMU_PLUGIN_EXPORT bool hajimu_plugin_borrows_arguments(Value (*fn)(int, Value *)) {
     return fn == fn_text || fn == fn_heading || fn == fn_button ||
         fn == fn_ellipsis_text || fn == fn_detail_row || fn == fn_small_button ||
+        fn == fn_async_exec || fn == fn_task_progress || fn == fn_task_cancel ||
+        fn == fn_task_state || fn == fn_task_release || fn == fn_task_notify ||
         fn == fn_progress || fn == fn_text_input || fn == fn_combobox ||
         fn == fn_list || fn == fn_tab_bar || fn == fn_segment_control;
 }
@@ -23777,6 +23866,9 @@ static HajimuPluginFunc gui_functions[] = {
     {"非同期実行",             fn_async_exec,         2, 2},
     {"タスク進捗",             fn_task_progress,      1, 1},
     {"タスクキャンセル",       fn_task_cancel,        1, 1},
+    {"タスク状態",             fn_task_state,         1, 1},
+    {"タスク解放",             fn_task_release,       1, 1},
+    {"タスク通知",             fn_task_notify,        2, 2},
     {"ローディングオーバーレイ", fn_loading_overlay,  2, 2},
     {"イベントバス発火",       fn_event_bus_emit,     2, 2},
     {"イベントバス購読",       fn_event_bus_on,       2, 2},
