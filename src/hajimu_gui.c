@@ -309,6 +309,8 @@ typedef struct {
     float px_ratio;             /* Retina 倍率                      */
 
     bool   running;
+    bool   closing, loop_active;
+    int    close_frames, close_error;
     int    target_fps;
     GuiRGBA bg;
 
@@ -408,13 +410,41 @@ static void gui_histories_close(const void *owner) {
         memset(&g_histories[i], 0, sizeof(g_histories[i]));
     }
 }
+static void gui_begin_close(GuiApp *app) {
+    app->running = false;
+    app->closing = true;
+    app->close_error = 0;
+    app->focused = app->nav_focus = app->active = app->text_drag = 0;
+    gui_ime_update(app, "");
+#ifdef __APPLE__
+    hjp_set_text_input_context(app->window, 0, "", 0, 0, 0);
+    hjp_accessibility_begin(app->window);
+    hjp_accessibility_end(app->window);
+#endif
+}
 static bool gui_request_close(GuiApp *app) {
+    if (app->closing) return true;
     if (app->close_guard.type == VALUE_FUNCTION) {
         Value allowed = hajimu_call(&app->close_guard, 0, NULL);
         if (allowed.type != VALUE_BOOL || !allowed.boolean) return false;
     }
-    app->running = false;
+    gui_begin_close(app);
     return true;
+}
+
+static bool gui_close_ready(GuiApp *app) {
+    int result = 1, error = 0;
+#ifndef _WIN32
+    result = hjp_tasks_close_step(app, &error);
+#endif
+    if (result == 1) { app->closing = false; return true; }
+    if (result < 0) {
+        app->closing = false;
+        app->running = true;
+        app->close_error = error;
+        fprintf(stderr, "[hajimu_gui] 終了取消: タスク停止要求に失敗しました (errno=%d)\n", error);
+    }
+    return false;
 }
 static int     g_frame_count = 0;       /* 全描画ループ共通フレーム数 */
 
@@ -1043,7 +1073,7 @@ static void gui_nav_end(void) {
 static bool gui_nav_register(uint32_t id, float x, float y, float w, float h) {
     float vx = x, vy = y, vw = w, vh = h;
     if (!gui_visible_rect(&vx, &vy, &vw, &vh)) return false;
-    if (!g_cur->nav_enabled || g_disabled || w <= 0 || h <= 0 ||
+    if (!g_cur->nav_enabled || g_cur->closing || g_disabled || w <= 0 || h <= 0 ||
         (g_cur->modal_title[0] && !g_cur->modal_entered)) return false;
     bool registered = false;
     for (int i = 0; i < g_cur->nav_current_count; i++)
@@ -1091,7 +1121,7 @@ static bool gui_nav_control(uint32_t id, float x, float y, float w, float h) {
 static bool gui_widget_logic(uint32_t id,
                               float x, float y, float w, float h,
                               bool *hovered, bool *pressed) {
-    if (g_disabled || w <= 0 || h <= 0) {
+    if (g_cur->closing || g_disabled || w <= 0 || h <= 0) {
         *hovered = false;
         *pressed = false;
         if (g_cur->active == id) g_cur->active = 0;
@@ -1287,8 +1317,13 @@ static Value fn_draw_loop(int argc, Value *argv) {
     }
 
     GuiApp *app = &g_apps[idx];
+    if (app->loop_active) {
+        fprintf(stderr, "[hajimu_gui] 描画ループ: 同じアプリへの再入はできません\n");
+        return hajimu_null();
+    }
+    app->loop_active = true;
 
-    while (app->running) {
+    while (app->running || app->closing) {
         uint32_t frame_start = hjp_get_ticks();
 
         /* ── イベント処理 ── */
@@ -1321,6 +1356,15 @@ static Value fn_draw_loop(int argc, Value *argv) {
 
         HjpEvent ev;
         while (hjp_poll_event(&ev)) {
+            if (app->closing && ev.type != HJP_EVENT_WINDOWEVENT) {
+                if (ev.type == HJP_EVENT_DROPFILE && ev.drop.file) hjp_free(ev.drop.file);
+                /* 他ウィンドウを明示するAX/文書要求は通常の配送経路へ渡す。 */
+                bool other_window = ev.type == HJP_EVENT_ACCESSIBILITY_PRESS ? ev.accessibility.window != app->window :
+                    (ev.type == HJP_EVENT_TEXTREPLACE || ev.type == HJP_EVENT_TEXTSELECTION ||
+                     ev.type == HJP_EVENT_ACCESSIBILITY_FOCUS || ev.type == HJP_EVENT_ACCESSIBILITY_TEXTREPLACE ||
+                     ev.type == HJP_EVENT_ACCESSIBILITY_TEXTSELECTION) && ev.edit.window != app->window;
+                if (!other_window) continue;
+            }
             switch (ev.type) {
             case HJP_EVENT_QUIT:
                 gui_request_close(app);
@@ -1447,7 +1491,7 @@ static Value fn_draw_loop(int argc, Value *argv) {
                 break;
             }
         }
-        if (!app->running) break;
+        if (!app->running && (!app->closing || gui_close_ready(app))) break;
 
         /* ── フレーム開始 ── */
         hjp_gl_get_drawable_size(app->window, &app->fb_w, &app->fb_h);
@@ -1493,7 +1537,14 @@ static Value fn_draw_loop(int argc, Value *argv) {
         g_frame_count++;
         app->text_context_published = false;
         for (int i = 0; i < app->text_buf_count; i++) app->text_bufs[i].ax_visible = false;
-        hajimu_call(&callback, 0, NULL);
+        if (app->closing) {
+            if (app->close_frames < INT_MAX) app->close_frames++;
+            hjpFontFaceId(app->vg, app->font_id);
+            hjpFontSize(app->vg, 16);
+            hjpTextAlign(app->vg, HJP_ALIGN_CENTER | HJP_ALIGN_MIDDLE);
+            hjpFillColor(app->vg, TH_TEXT);
+            hjpText(app->vg, app->win_w * 0.5f, app->win_h * 0.5f, "終了処理中", NULL);
+        } else hajimu_call(&callback, 0, NULL);
 #ifdef __APPLE__
         if (!app->text_context_published) {
             hjp_set_text_input_context(app->window, 0, "", 0, 0, 0);
@@ -1505,7 +1556,7 @@ static Value fn_draw_loop(int argc, Value *argv) {
 
         /* コールバック内の終了要求ではリソースを即時解放しない。
          * 開始済みフレームだけを閉じ、呼び出し元へ安全に制御を戻す。 */
-        if (!app->running) {
+        if (!app->running && !app->closing) {
             g_cur = NULL;
             hjpEndFrame(app->vg);
             break;
@@ -1517,9 +1568,10 @@ static Value fn_draw_loop(int argc, Value *argv) {
         }
 
         /* ── タイマー発火 (Phase 10) ── */
-        {
+        if (app->running) {
             uint32_t tnow = hjp_get_ticks();
             for (int ti = 0; ti < GUI_MAX_TIMERS; ti++) {
+                if (!app->running) break;
                 if (!g_timers[ti].active) continue;
                 if ((int)(tnow - g_timers[ti].last_fire) >=
                     g_timers[ti].interval_ms) {
@@ -1530,7 +1582,7 @@ static Value fn_draw_loop(int argc, Value *argv) {
             }
         }
 
-        if (!app->running) {
+        if (!app->running && !app->closing) {
             g_cur = NULL;
             hjpEndFrame(app->vg);
             break;
@@ -1620,6 +1672,7 @@ static Value fn_draw_loop(int argc, Value *argv) {
 #ifndef _WIN32
     hjp_tasks_close(app);
 #endif
+    app->loop_active = false;
     gui_histories_close(app);
     return hajimu_null();
 }
@@ -1643,17 +1696,39 @@ static Value fn_request_close(int argc, Value *argv) {
     return hajimu_bool(gui_request_close(&g_apps[idx]));
 }
 
+static Value fn_close_state(int argc, Value *argv) {
+    const char *state = "不明";
+    int frames = 0, error = 0, pending = 0;
+    if (argc == 1 && argv[0].type == VALUE_NUMBER && isfinite(argv[0].number) &&
+        argv[0].number >= 0 && argv[0].number < GUI_MAX_APPS && floor(argv[0].number) == argv[0].number) {
+        GuiApp *app = &g_apps[(int)argv[0].number];
+        if (app->valid) {
+            state = app->closing ? "終了処理中" : app->running ? "実行中" : "停止";
+            frames = app->close_frames; error = app->close_error;
+#ifndef _WIN32
+            for (size_t i = 0; i < 32; i++) if (hjp_tasks[i].id && hjp_tasks[i].owner == app && hjp_tasks[i].pid) pending++;
+#endif
+        }
+    }
+    Value result = make_dict();
+    dict_set(&result, "状態", hajimu_string(state));
+    dict_set(&result, "終了待機フレーム", hajimu_number(frames));
+    dict_set(&result, "エラー番号", hajimu_number(error));
+    dict_set(&result, "未回収タスク", hajimu_number(pending));
+    return result;
+}
+
 static Value fn_app_quit(int argc, Value *argv) {
     if (argc < 1 || argv[0].type != VALUE_NUMBER) return hajimu_null();
     int idx = (int)argv[0].number;
     if (idx < 0 || idx >= GUI_MAX_APPS || !g_apps[idx].valid) return hajimu_null();
 
     GuiApp *app = &g_apps[idx];
-    app->running = false;
+    if (!app->closing) gui_begin_close(app);
 
-    /* 描画コールバック中は fn_draw_loop が現在のフレームを閉じる。
+    /* ループ実行中はイベント/確認コールバックからでも破棄を遅延する。
      * ここで vg/window を破棄すると、コールバック復帰後に解放済み領域へ触れてしまう。 */
-    if (g_cur == app) return hajimu_null();
+    if (app->loop_active || g_cur == app) return hajimu_null();
     gui_histories_close(app);
 #ifndef _WIN32
     hjp_tasks_close(app);
@@ -1663,6 +1738,7 @@ static Value fn_app_quit(int argc, Value *argv) {
     if (app->gl) { hjp_gl_delete_context(app->gl); app->gl = NULL; }
     if (app->window) { hjp_window_destroy(app->window); app->window = NULL; }
     app->valid = false;
+    app->closing = false;
 
     /* 全アプリ終了ならプラットフォームも解放 */
     bool any = false;
@@ -2551,7 +2627,7 @@ static int gui_text_hit_offset(Hjpcontext *vg, const char *start, const char *en
 }
 
 static bool gui_text_hover(float x, float y, float w, float h) {
-    return !g_disabled && !(g_cur->modal_title[0] && !g_cur->modal_entered) &&
+    return !g_cur->closing && !g_disabled && !(g_cur->modal_title[0] && !g_cur->modal_entered) &&
         gui_visible_rect(&x, &y, &w, &h) && gui_hit(g_cur->in.mx, g_cur->in.my, x, y, w, h);
 }
 
@@ -2592,7 +2668,7 @@ static bool gui_text_replace_selection(GuiTextBuf *tb, const char *text, int len
 }
 
 static bool gui_apply_document_event(GuiApp *app, const HjpEvent *event) {
-    if (!event->edit.id || app->focused != event->edit.id ||
+    if (app->closing || !event->edit.id || app->focused != event->edit.id ||
         event->edit.window != app->window || !app->window ||
         event->edit.generation != hjp_window_get_id(app->window)) return false;
     for (int i = 0; i < app->text_buf_count; i++) {
@@ -2624,7 +2700,7 @@ static bool gui_apply_document_event(GuiApp *app, const HjpEvent *event) {
 }
 
 static bool gui_apply_accessibility_focus(GuiApp *app, const HjpEvent *event) {
-    if (event->edit.window != app->window || !app->window ||
+    if (app->closing || event->edit.window != app->window || !app->window ||
         event->edit.generation != hjp_window_get_id(app->window)) return false;
     for (int i = 0; i < app->text_buf_count; i++) {
         GuiTextBuf *tb = &app->text_bufs[i];
@@ -2647,7 +2723,7 @@ static bool gui_apply_accessibility_focus(GuiApp *app, const HjpEvent *event) {
 
 static void gui_publish_text_context(GuiTextBuf *tb, uint32_t id, bool secure) {
 #ifdef __APPLE__
-    if (g_cur->focused != id || g_disabled || (g_cur->modal_title[0] && !g_cur->modal_entered)) return;
+    if (g_cur->closing || g_cur->focused != id || g_disabled || (g_cur->modal_title[0] && !g_cur->modal_entered)) return;
     int start, end;
     start = tb->sel_start == tb->sel_end ? tb->cursor : tb->sel_start;
     end = tb->sel_start == tb->sel_end ? tb->cursor : tb->sel_end;
@@ -2664,7 +2740,7 @@ static void gui_publish_text_context(GuiTextBuf *tb, uint32_t id, bool secure) {
 /* テキストバッファにキー入力を反映（フォーカス中のみ呼ばれる）。 */
 static void gui_text_buf_edit(GuiTextBuf *tb, bool allow_copy) {
     GuiInput *in = &g_cur->in;
-    if (g_disabled || g_cur->composition[0] ||
+    if (g_cur->closing || g_disabled || g_cur->composition[0] ||
         (g_cur->modal_title[0] && !g_cur->modal_entered)) return;
     if (in->key_a) {
         tb->sel_start = 0; tb->sel_end = tb->cursor = tb->len;
@@ -14918,7 +14994,7 @@ static Value fn_ime_state(int argc, Value *argv) {
 
 /* 呼出元フレームで最新の変更を配送し、コールバックは保持しない。 */
 static Value fn_ime_composition(int argc, Value *argv) {
-    if (!g_cur || argc < 1 || argv[0].type != VALUE_FUNCTION || !hajimu_runtime_available() ||
+    if (!g_cur || g_cur->closing || argc < 1 || argv[0].type != VALUE_FUNCTION || !hajimu_runtime_available() ||
         g_cur->composition_version == g_cur->composition_notified ||
         (g_cur->modal_title[0] && !g_cur->modal_entered)) return hajimu_bool(false);
     g_cur->composition_notified = g_cur->composition_version;
@@ -15152,7 +15228,7 @@ static struct {
 static void gui_accessible(uint32_t id, const char *name, int role, float x, float y,
     float w, float h, bool enabled, bool selected) {
 #ifdef __APPLE__
-    if (g_cur && (!g_cur->modal_title[0] || g_cur->modal_entered)) {
+    if (g_cur && !g_cur->closing && (!g_cur->modal_title[0] || g_cur->modal_entered)) {
         const char *label = g_a11y_current.name[0] ? g_a11y_current.name : name;
         if (strcmp(g_a11y_current.role, "checkbox") == 0) role = 1;
         else if (strcmp(g_a11y_current.role, "radio") == 0) role = 2;
@@ -15172,7 +15248,7 @@ static void gui_accessible_text(GuiTextBuf *tb, uint32_t id, const char *name,
     tb->ax_enabled = !g_disabled;
     tb->ax_secure = secure;
 #ifdef __APPLE__
-    if (g_cur && (!g_cur->modal_title[0] || g_cur->modal_entered) &&
+    if (g_cur && !g_cur->closing && (!g_cur->modal_title[0] || g_cur->modal_entered) &&
         gui_visible_rect(&x, &y, &w, &h)) {
         int start, end;
         gui_text_selection(tb, &start, &end);
@@ -16623,8 +16699,8 @@ static Value fn_throttle(int argc, Value *argv) {
 
 /* 非同期実行(プロセス設定辞書, 無) → タスクID */
 static Value fn_async_exec(int argc, Value *argv) {
-    if (!g_cur || argc < 2 || argv[0].type != VALUE_DICT || argv[1].type != VALUE_NULL) {
-        fprintf(stderr, "[hajimu_gui] 非同期実行: 現在は実行ファイル/引数の辞書と無を指定してください。共有クロージャの実行は未対応です。\n");
+    if (!g_cur || g_cur->closing || argc < 2 || argv[0].type != VALUE_DICT || argv[1].type != VALUE_NULL) {
+        fprintf(stderr, "[hajimu_gui] 非同期実行: 実行中のアプリで実行ファイル/引数の辞書と無を指定してください。共有クロージャの実行は未対応です。\n");
         return hajimu_number(-1);
     }
 #ifdef _WIN32
@@ -16761,7 +16837,7 @@ static Value fn_task_release(int argc, Value *argv) {
 
 /* 完了イベントの配送は呼出元のGUIスレッドで行い、クロージャを保持しない。 */
 static Value fn_task_notify(int argc, Value *argv) {
-    if (!g_cur || argc < 2 || argv[1].type != VALUE_FUNCTION || !hajimu_runtime_available()) return hajimu_bool(false);
+    if (!g_cur || g_cur->closing || argc < 2 || argv[1].type != VALUE_FUNCTION || !hajimu_runtime_available()) return hajimu_bool(false);
 #ifndef _WIN32
     HjpTask *task = gui_task_lookup(argv[0]);
     hjp_task_poll(task);
@@ -23882,7 +23958,7 @@ HAJIMU_PLUGIN_EXPORT bool hajimu_plugin_borrows_arguments(Value (*fn)(int, Value
     return fn == fn_text || fn == fn_heading || fn == fn_button ||
         fn == fn_ellipsis_text || fn == fn_detail_row || fn == fn_small_button ||
         fn == fn_async_exec || fn == fn_task_progress || fn == fn_task_cancel ||
-        fn == fn_task_state || fn == fn_task_release || fn == fn_task_notify ||
+        fn == fn_task_state || fn == fn_task_release || fn == fn_task_notify || fn == fn_task_output || fn == fn_close_state ||
         fn == fn_action_register || fn == fn_action_button || fn == fn_action_menu || fn == fn_action_take ||
         fn == fn_constrained_widths ||
         fn == fn_history_create || fn == fn_history_push || fn == fn_history_undo ||
@@ -23908,6 +23984,7 @@ static HajimuPluginFunc gui_functions[] = {
     {"アプリ終了",           fn_app_quit,      1, 1},
     {"終了確認設定",         fn_close_guard,   2, 2},
     {"アプリ終了要求",       fn_request_close, 1, 1},
+    {"アプリ終了状態",       fn_close_state, 1, 1},
     {"ウィンドウサイズ",     fn_window_size,   1, 1},
     {"ウィンドウタイトル",   fn_window_title,  2, 2},
     {"ウィンドウリサイズ",   fn_window_resize, 3, 3},
@@ -25261,13 +25338,15 @@ static Value fn_api_status(int argc, Value *argv) {
                 reason = "静的監査で固定返却だけの実装を検出。意図した定数関数か未実装かは個別確認が必要";
                 break;
             }
-        if (found->fn == fn_text_cursor_pos || found->fn == fn_text_select_range) {
+        if (found->fn == fn_app_quit || found->fn == fn_request_close || found->fn == fn_close_state) {
+            state = "部分対応"; reason = "描画ループ内の終了待機を非ブロッキング回収。ループ外の破棄は同期、他OS実機検査は未完了";
+        } else if (found->fn == fn_text_cursor_pos || found->fn == fn_text_select_range) {
             state = "部分対応"; reason = "Unicode符号位置での選択/カーソルとmacOS文書同期。実IME・複数ウィンドウ・他OSの検査は未完了";
         } else if (found->fn == fn_ime_composition) {
             state = "部分対応"; reason = "フレーム内の変換通知とmacOS文書選択/置換を接続。実IME・長い未確定文字表示・他OSは未完了";
         } else if (found->fn == fn_async_exec || found->fn == fn_task_progress || found->fn == fn_task_notify ||
                    found->fn == fn_task_output || found->fn == fn_task_state || found->fn == fn_task_cancel || found->fn == fn_task_release) {
-            state = "部分対応"; reason = "POSIXタスク・出力/進捗IPC・非同期取消要求。破棄時の同期回収・任意関数・Windowsは未完了";
+            state = "部分対応"; reason = "POSIXタスク・出力/進捗IPC・GUI内終了待機。ループ外の破棄は同期、任意関数・Windowsは未完了";
         } else if (found->fn == fn_a11y_name || found->fn == fn_a11y_desc || found->fn == fn_a11y_role || found->fn == fn_sr_announce) {
             state = "部分対応"; reason = "macOSの基本部品と通常入力欄の編集/選択/フォーカス。外部AX・実読み上げ・テーブル/ツリー・他OSは未完了";
         } else if (found->fn == fn_focus_traversal) {
@@ -25300,7 +25379,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.22.0",
+        .version        = "14.23.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,

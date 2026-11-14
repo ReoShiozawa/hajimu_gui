@@ -1,14 +1,30 @@
 #include <sys/wait.h>
 static pid_t control_waitpid(pid_t pid, int *status, int flags);
+static int control_kill(pid_t group, int signal);
 #define HJP_TASK_WAITPID control_waitpid
+#define HJP_TASK_KILL control_kill
 #include "../src/hajimu_gui.c"
 #include <assert.h>
 
 static pid_t deferred_pid;
 static int deferred_polls;
+static GuiApp *closing_capture_app;
+static bool closing_capture_requested;
+static int control_kill_error;
+static int control_kill(pid_t group, int signal) {
+    if (control_kill_error) { errno = control_kill_error; return -1; }
+    return kill(group, signal);
+}
 static pid_t control_waitpid(pid_t pid, int *status, int flags) {
     assert(flags == WNOHANG);
-    if (pid == deferred_pid && deferred_polls > 0) { deferred_polls--; return 0; }
+    if (pid == deferred_pid && deferred_polls > 0) {
+        const char *capture = getenv("GUI_CLOSE_CAPTURE");
+        if (capture && closing_capture_app && closing_capture_app->close_frames >= 2 && !closing_capture_requested) {
+            snprintf(closing_capture_app->screenshot_path, sizeof(closing_capture_app->screenshot_path), "%s", capture);
+            closing_capture_app->screenshot_pending = closing_capture_requested = true;
+        }
+        deferred_polls--; return 0;
+    }
     return waitpid(pid, status, flags);
 }
 
@@ -384,6 +400,119 @@ static void check_task_cancellation(void) {
     __hajimu_runtime = previous;
 }
 
+static int close_callback_tag, close_guard_tag, close_timer_tag;
+static int closing_callbacks, closing_guards, closing_timers, closing_task_id, closing_history_slot;
+static bool fail_first_close;
+static Value closing_app;
+static Value lifecycle_observe(Value *callback, int argc, Value *argv) {
+    (void)argv;
+    assert(argc == 0);
+    if (callback->function.definition == (struct ASTNode *)&close_guard_tag) {
+        closing_guards++;
+        return hajimu_bool(true);
+    }
+    if (callback->function.definition == (struct ASTNode *)&close_timer_tag) {
+        closing_timers++;
+        return hajimu_null();
+    }
+    assert(callback->function.definition == (struct ASTNode *)&close_callback_tag);
+    closing_callbacks++;
+    if (closing_callbacks == 1) {
+        Value reentry[] = {closing_app, *callback};
+        assert(fn_draw_loop(2, reentry).type == VALUE_NULL && closing_callbacks == 1);
+        Value initial[] = {hajimu_string("keep history until shutdown completes")};
+        closing_history_slot = gui_history_index(fn_history_create(1, initial));
+        assert(closing_history_slot >= 0);
+        char *args[] = {"/bin/sleep", "10", NULL};
+        closing_task_id = hjp_task_start_with_io(g_cur, args, true, true);
+        HjpTask *task = hjp_task_find(closing_task_id, g_cur);
+        assert(task);
+        deferred_pid = task->pid; deferred_polls = 30;
+        if (fail_first_close) control_kill_error = EPERM;
+    } else {
+        assert(fail_first_close && closing_callbacks == 2);
+        assert(g_cur->running && !g_cur->closing && g_cur->close_error == EPERM);
+        assert(hjp_task_find(closing_task_id, g_cur)->pid == deferred_pid);
+        assert(g_histories[closing_history_slot].id != 0);
+        control_kill_error = 0;
+    }
+    gui_ime_update(g_cur, "仮");
+    assert(fn_request_close(1, &closing_app).boolean);
+    assert(g_cur->closing && g_cur->loop_active && g_cur->vg && g_cur->window);
+    int guards = closing_guards;
+    assert(fn_request_close(1, &closing_app).boolean && closing_guards == guards);
+    fn_app_quit(1, &closing_app);
+    assert(g_cur->valid && g_cur->window);
+    assert(!fn_ime_composition(1, callback).boolean);
+    Value configuration = gui_dict2("実行ファイル", hajimu_string("/bin/true"), "引数",
+        (Value){.type = VALUE_ARRAY});
+    Value spawn[] = {configuration, hajimu_null()};
+    assert(fn_async_exec(2, spawn).number == -1);
+    return hajimu_null();
+}
+
+static void check_closing_loop(void) {
+    GuiApp *original = g_cur;
+    HajimuRuntime *previous = __hajimu_runtime;
+    HajimuRuntime runtime = {.call = lifecycle_observe};
+    GuiTimer original_timer = g_timers[0];
+    for (int failure = 0; failure < 2; failure++) {
+        fail_first_close = failure != 0;
+        closing_callbacks = closing_guards = closing_timers = 0;
+        Value create[] = {hajimu_string("Closing lifecycle regression"), hajimu_number(480), hajimu_number(240)};
+        closing_app = fn_app_create(3, create);
+        GuiApp *app = &g_apps[(int)closing_app.number];
+        closing_capture_app = failure ? NULL : app;
+        app->target_fps = 120;
+        app->close_guard = (Value){.type = VALUE_FUNCTION, .function.definition = (struct ASTNode *)&close_guard_tag};
+        g_timers[0].active = true; g_timers[0].interval_ms = 0;
+        g_timers[0].callback = (Value){.type = VALUE_FUNCTION, .function.definition = (struct ASTNode *)&close_timer_tag};
+        __hajimu_runtime = &runtime;
+        Value draw[] = {closing_app, {.type = VALUE_FUNCTION, .function.definition = (struct ASTNode *)&close_callback_tag}};
+        g_cur = NULL;
+        fn_draw_loop(2, draw);
+        assert(!app->loop_active && !app->running && !app->closing && app->valid);
+        assert(app->close_frames >= 5 && closing_callbacks == (failure ? 2 : 1));
+        assert(closing_guards == closing_callbacks && closing_timers == 0);
+        assert(!hjp_task_find(closing_task_id, app));
+        assert(g_histories[closing_history_slot].id == 0);
+        assert(waitpid(deferred_pid, NULL, WNOHANG) == -1 && errno == ECHILD);
+        Value state = fn_close_state(1, &closing_app);
+        assert(!strcmp(gui_dict_lookup(state, "状態").string.data, "停止"));
+        assert(gui_dict_lookup(state, "終了待機フレーム").number >= 5);
+        assert(gui_dict_lookup(state, "未回収タスク").number == 0);
+        fn_app_quit(1, &closing_app);
+        assert(!app->valid);
+    }
+    const char *capture = getenv("GUI_CLOSE_CAPTURE");
+    if (capture) {
+        assert(closing_capture_requested);
+        FILE *file = fopen(capture, "rb");
+        assert(file);
+        char line[128]; int width, height;
+        assert(fgets(line, sizeof(line), file) && !strcmp(line, "P6\n"));
+        assert(fgets(line, sizeof(line), file) && sscanf(line, "%d %d", &width, &height) == 2);
+        assert(width > 0 && height > 0 && width < 10000 && height < 10000);
+        assert(fgets(line, sizeof(line), file) && !strcmp(line, "255\n"));
+        size_t size = (size_t)width * height * 3;
+        unsigned char *pixels = malloc(size);
+        assert(pixels && fread(pixels, 1, size, file) == size);
+        int contrast = 0;
+        for (int y = height / 3; y < height * 2 / 3; y++) for (int x = width / 4; x < width * 3 / 4; x++) {
+            size_t p = ((size_t)y * width + x) * 3;
+            if (abs((int)pixels[p] - pixels[0]) + abs((int)pixels[p + 1] - pixels[1]) +
+                abs((int)pixels[p + 2] - pixels[2]) > 120) contrast++;
+        }
+        assert(contrast > 50);
+        free(pixels); fclose(file);
+    }
+    closing_capture_app = NULL;
+    g_timers[0] = original_timer;
+    __hajimu_runtime = previous;
+    g_cur = original;
+    hjp_gl_make_current(original->window, original->gl);
+}
+
 int main(void) {
     size_t function_count = sizeof(gui_functions) / sizeof(gui_functions[0]);
     for (size_t i = 0; i < function_count; i++) {
@@ -405,6 +534,7 @@ int main(void) {
     check_document_edits();
     check_accessible_text();
     check_task_cancellation();
+    check_closing_loop();
     char oversized[GUI_MAX_TEXT_BUF + 8];
     memset(oversized, 'a', GUI_MAX_TEXT_BUF - 2);
     memcpy(oversized + GUI_MAX_TEXT_BUF - 2, "日本", 7);

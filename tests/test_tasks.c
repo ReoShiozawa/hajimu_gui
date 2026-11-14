@@ -83,6 +83,26 @@ int main(void) {
     int before_fds = open_fds();
     for (int i = 0; i < 30; i++) assert(hjp_task_start_with_io(&owner, missing, true, true) == -1);
     assert(open_fds() == before_fds);
+    id = hjp_task_start_with_io(&owner, slow, true, true);
+    task = hjp_task_find(id, &owner);
+    child = task->pid;
+    delayed_pid = child; delay_polls = 30;
+    int close_error = 0;
+    kill_error = EPERM;
+    assert(hjp_tasks_close_step(&owner, &close_error) == -1 && close_error == EPERM);
+    assert(hjp_task_find(id, &owner) == task && task->pid == child);
+    kill_error = 0;
+    assert(hjp_tasks_close_step(&owner, &close_error) == 0 && close_error == 0);
+    assert(task->pid == child && task->state == HJP_TASK_CANCELLING);
+    delay_polls = 0;
+    int closed = 0;
+    for (int i = 0; i < 3000 && !closed; i++) {
+        closed = hjp_tasks_close_step(&owner, &close_error);
+        assert(closed >= 0 && close_error == 0);
+        struct timespec delay = {0, 1000000}; nanosleep(&delay, NULL);
+    }
+    assert(closed == 1 && !hjp_task_find(id, &owner) && open_fds() == before_fds);
+    assert(waitpid(child, NULL, WNOHANG) == -1 && errno == ECHILD);
     const char *original_env = getenv("HAJIMU_PROGRESS_FD");
     char *captured[] = {"/bin/sh", "-c", "[ \"$HAJIMU_PROGRESS_FD\" = 3 ] || exit 91; printf '日本語\\n'; printf 'error\\n' >&2; printf '25.5\\n' >&3; sleep 0.1; printf '75\\n' >&3", NULL};
     id = hjp_task_start_with_io(&owner, captured, true, true);

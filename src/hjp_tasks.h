@@ -264,6 +264,21 @@ static bool hjp_task_cancel(HjpTask *task) {
     task->error = 0;
     return true;
 }
+/* 1回だけ取消/回収を進める。待機0、完了1、要求失敗-1。所有権は回収まで保持する。 */
+static int hjp_tasks_close_step(const void *owner, int *error) {
+    bool pending = false;
+    *error = 0;
+    for (size_t i = 0; i < 32; i++) if (hjp_tasks[i].id && hjp_tasks[i].owner == owner) {
+        HjpTask *task = &hjp_tasks[i];
+        hjp_task_poll(task);
+        if (task->pid && !task->cancel_requested) {
+            if (!hjp_task_cancel(task) && task->pid) *error = task->error ? task->error : EIO;
+        }
+        if (task->pid) pending = true;
+        else { hjp_task_close_io(task); memset(task, 0, sizeof(*task)); }
+    }
+    return *error ? -1 : pending ? 0 : 1;
+}
 static void hjp_tasks_close(const void *owner) {
     for (size_t i = 0; i < 32; i++) if (hjp_tasks[i].id && hjp_tasks[i].owner == owner) {
         hjp_task_cancel(&hjp_tasks[i]);
