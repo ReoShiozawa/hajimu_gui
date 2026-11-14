@@ -72,6 +72,54 @@ static void check_ime_notifications(void) {
     __hajimu_runtime = previous_runtime;
 }
 
+static void check_textarea_layout(void) {
+    frame(false, false, 500);
+    Hjpcontext *vg = g_cur->vg;
+    hjpFontFaceId(vg, g_cur->font_id);
+    hjpFontSize(vg, GUI_FONT_SIZE);
+    HjptextRow rows[128];
+    const char *empty = "";
+    int count = gui_textarea_rows(vg, empty, 60, rows, 128);
+    assert(count == 1 && gui_textarea_caret_row(rows, count, empty) == 0);
+    const char *trailing = "a\n\n";
+    count = gui_textarea_rows(vg, trailing, 60, rows, 128);
+    assert(count == 3 && gui_textarea_caret_row(rows, count, trailing + 3) == 2);
+    const char *wrapped = "abcdefghijABCDEFGHIJ";
+    count = gui_textarea_rows(vg, wrapped, 30, rows, 128);
+    assert(count > 2);
+    assert(rows[0].next == rows[1].start);
+    assert(gui_textarea_caret_row(rows, count, rows[1].start) == 1);
+    assert(gui_textarea_caret_row(rows, count, wrapped + strlen(wrapped)) == count - 1);
+    GuiTextBuf buffer = {.len = 6, .cursor = 3};
+    memcpy(buffer.buf, "前後", 7);
+    char display[GUI_MAX_TEXT_BUF + 128];
+    int caret = gui_textarea_display(&buffer, "日本語", display);
+    assert(!strcmp(display, "前日本語後") && caret == 12);
+    assert(!strcmp(buffer.buf, "前後") && buffer.len == 6 && buffer.cursor == 3);
+    count = gui_textarea_rows(vg, display, 24, rows, 128);
+    assert(count > 1);
+    int ci = gui_textarea_caret_row(rows, count, display + caret);
+    assert(display + caret >= rows[ci].start && display + caret <= rows[ci].end);
+
+    Value args[] = {hajimu_string("textarea-layout"), hajimu_string("一\n二\n三\n四\n五\n六"), hajimu_number(2)};
+    uint32_t id = gui_hash("textarea-layout");
+    g_cur->focused = id;
+    GuiTextBuf *tb = gui_get_text_buf(id, args[1].string.data);
+    fn_textarea(3, args);
+    assert(tb->scroll_y > 0);
+    tb->cursor = 0;
+    frame(false, false, 500);
+    fn_textarea(3, args);
+    assert(tb->scroll_y == 0);
+    gui_ime_update(g_cur, "未確定");
+    frame(false, false, 500);
+    fn_textarea(3, args);
+    assert(!strcmp(tb->buf, args[1].string.data));
+    gui_ime_update(g_cur, "");
+    g_cur->focused = 0;
+    hjpCancelFrame(vg);
+}
+
 int main(void) {
     size_t function_count = sizeof(gui_functions) / sizeof(gui_functions[0]);
     for (size_t i = 0; i < function_count; i++) {
@@ -87,6 +135,12 @@ int main(void) {
     assert(app.type == VALUE_NUMBER);
     g_cur = &g_apps[(int)app.number];
     check_ime_notifications();
+    check_textarea_layout();
+    char oversized[GUI_MAX_TEXT_BUF + 8];
+    memset(oversized, 'a', GUI_MAX_TEXT_BUF - 2);
+    memcpy(oversized + GUI_MAX_TEXT_BUF - 2, "日本", 7);
+    GuiTextBuf *limited = gui_get_text_buf(gui_hash("utf8-initial-limit"), oversized);
+    assert(limited->len == GUI_MAX_TEXT_BUF - 2);
     assert(fn_focus_traversal(0, NULL).boolean);
     frame(false, false, 500);
     gui_nav_begin();

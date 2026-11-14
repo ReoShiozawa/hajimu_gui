@@ -274,6 +274,7 @@ typedef struct {
     int      cursor;            /* カーソル位置 (バイトオフセット) */
     int      sel_start;         /* 選択開始 (バイト)             */
     int      sel_end;           /* 選択終了 (バイト)             */
+    float    scroll_y;          /* 複数行入力の表示位置 */
 } GuiTextBuf;
 
 /* --- コンボボックス開閉状態 --- */
@@ -2440,6 +2441,7 @@ static GuiTextBuf *gui_get_text_buf(uint32_t id, const char *init_val) {
     if (init_val && *init_val) {
         int n = (int)strlen(init_val);
         if (n >= GUI_MAX_TEXT_BUF) n = GUI_MAX_TEXT_BUF - 1;
+        while (n > 0 && ((unsigned char)init_val[n] & 0xc0) == 0x80) n--;
         memcpy(tb->buf, init_val, n);
         tb->buf[n] = '\0';
         tb->len = n;
@@ -2502,6 +2504,7 @@ static void gui_text_buf_process(GuiTextBuf *tb) {
             int cl = (int)strlen(clip);
             int avail = GUI_MAX_TEXT_BUF - 1 - tb->len;
             if (cl > avail) cl = avail;
+            while (cl > 0 && ((unsigned char)clip[cl] & 0xc0) == 0x80) cl--;
             if (cl > 0) {
                 memmove(tb->buf + tb->cursor + cl,
                         tb->buf + tb->cursor,
@@ -2867,6 +2870,34 @@ static Value fn_number_input(int argc, Value *argv) {
     return hajimu_number(val);
 }
 
+/* 表示専用に未確定文字を挿入する。確定バッファと履歴は変更しない。 */
+static int gui_textarea_display(GuiTextBuf *tb, const char *composition, char *out) {
+    size_t marked = strlen(composition);
+    memcpy(out, tb->buf, tb->cursor);
+    memcpy(out + tb->cursor, composition, marked);
+    memcpy(out + tb->cursor + marked, tb->buf + tb->cursor, tb->len - tb->cursor + 1);
+    return tb->cursor + (int)marked;
+}
+
+static int gui_textarea_rows(Hjpcontext *vg, const char *text, float width,
+                             HjptextRow *rows, int capacity) {
+    const char *end = text + strlen(text);
+    int count = hjpTextBreakLines(vg, text, end, fmaxf(1, width), rows, capacity);
+    /* 描画エンジンが省く、空文書と末尾改行の次の行も編集位置に含める。 */
+    if ((!count || (end > text && end[-1] == '\n')) && count < capacity) {
+        rows[count++] = (HjptextRow){.start = end, .end = end, .next = end};
+    }
+    return count;
+}
+
+static int gui_textarea_caret_row(HjptextRow *rows, int count, const char *cursor) {
+    for (int i = 0; i < count; i++) {
+        if (cursor < rows[i].end ||
+            (cursor == rows[i].end && (rows[i].next > rows[i].end || i == count - 1))) return i;
+    }
+    return count - 1;
+}
+
 /* ---------------------------------------------------------------
  * テキストエリア(ラベル, 値 [, 行数]) → 文字列
  *   複数行テキスト入力。Enter で改行挿入。
@@ -2936,7 +2967,7 @@ static Value fn_textarea(int argc, Value *argv) {
 
     /* テキスト描画 (折り返し) */
     hjpSave(vg);
-    hjpScissor(vg, x + GUI_INPUT_PAD, y + GUI_INPUT_PAD,
+    hjpIntersectScissor(vg, x + GUI_INPUT_PAD, y + GUI_INPUT_PAD,
                fw - GUI_INPUT_PAD * 2, fh - GUI_INPUT_PAD * 2);
     hjpFontFaceId(vg, g_cur->font_id);
     hjpFontSize(vg, GUI_FONT_SIZE);
@@ -2948,53 +2979,46 @@ static Value fn_textarea(int argc, Value *argv) {
     float ty = y + GUI_INPUT_PAD;
     float tw = fw - GUI_INPUT_PAD * 2;
 
-    /* 行ごとに描画 */
-    const char *start = tb->buf;
-    const char *end = tb->buf + tb->len;
-    float cy = ty;
-    while (start <= end && cy < y + fh) {
-        const char *nl = strchr(start, '\n');
-        const char *line_end = nl ? nl : end;
-        if (line_end > start) {
-            HjptextRow rows[16];
-            const char *s = start;
-            while (s < line_end) {
-                int nr = hjpTextBreakLines(vg, s, line_end, tw, rows, 16);
-                if (nr <= 0) break;
-                for (int i = 0; i < nr; i++) {
-                    hjpText(vg, tx, cy, rows[i].start, rows[i].end);
-                    cy += line_h;
-                }
-                s = rows[nr - 1].next;
-            }
-        } else {
-            cy += line_h;
+    char display[GUI_MAX_TEXT_BUF + sizeof(g_cur->composition)];
+    int caret = gui_textarea_display(tb, focused ? g_cur->composition : "", display);
+    HjptextRow rows[GUI_MAX_TEXT_BUF + sizeof(g_cur->composition)];
+    int count = gui_textarea_rows(vg, display, tw, rows, sizeof(rows) / sizeof(rows[0]));
+    int caret_row = gui_textarea_caret_row(rows, count, display + caret);
+    float visible_h = fh - GUI_INPUT_PAD * 2;
+    float caret_y = caret_row * line_h;
+    if (focused) {
+        if (caret_y < tb->scroll_y) tb->scroll_y = caret_y;
+        if (caret_y + line_h > tb->scroll_y + visible_h)
+            tb->scroll_y = caret_y + line_h - visible_h;
+    }
+    tb->scroll_y = fmaxf(0, fminf(tb->scroll_y, count * line_h - visible_h));
+    const char *marked_start = display + tb->cursor;
+    const char *marked_end = display + caret;
+    for (int i = 0; i < count; i++) {
+        float cy = ty + i * line_h - tb->scroll_y;
+        if (cy + line_h <= ty || cy >= ty + visible_h) continue;
+        hjpText(vg, tx, cy, rows[i].start, rows[i].end);
+        const char *a = rows[i].start > marked_start ? rows[i].start : marked_start;
+        const char *b = rows[i].end < marked_end ? rows[i].end : marked_end;
+        if (focused && a < b) {
+            float left = tx + hjpTextBounds(vg, 0, 0, rows[i].start, a, NULL);
+            float right = tx + hjpTextBounds(vg, 0, 0, rows[i].start, b, NULL);
+            hjpBeginPath(vg); hjpMoveTo(vg, left, cy + line_h - 2);
+            hjpLineTo(vg, right, cy + line_h - 2);
+            hjpStrokeColor(vg, TH_ACCENT); hjpStrokeWidth(vg, 1); hjpStroke(vg);
         }
-        if (!nl) break;
-        start = nl + 1;
     }
 
-    /* カーソル */
     if (focused) {
+        float cx = tx + hjpTextBounds(vg, 0, 0, rows[caret_row].start, display + caret, NULL);
+        float cy = ty + caret_y - tb->scroll_y;
+#ifdef __APPLE__
+        hjp_set_text_input_rect(g_cur->window, fminf(cx, tx + fmaxf(0, tw - 1)), cy, 1, line_h);
+#endif
         uint32_t t = hjp_get_ticks();
         if ((t / GUI_CURSOR_BLINK_MS) % 2 == 0) {
-            /* カーソル位置を概算 */
-            float cx_pos = tx;
-            float cy_pos = ty;
-            const char *s = tb->buf;
-            const char *cpos = tb->buf + tb->cursor;
-            while (s < cpos) {
-                const char *nl2 = memchr(s, '\n', cpos - s);
-                if (nl2) {
-                    cy_pos += line_h;
-                    s = nl2 + 1;
-                } else {
-                    cx_pos = tx + hjpTextBounds(vg, 0, 0, s, cpos, NULL);
-                    break;
-                }
-            }
             hjpBeginPath(vg);
-            hjpRect(vg, cx_pos, cy_pos, 1.5f, line_h);
+            hjpRect(vg, cx, cy, 1.5f, line_h);
             hjpFillColor(vg, TH_TEXT);
             hjpFill(vg);
         }
@@ -24890,7 +24914,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.15.0",
+        .version        = "14.16.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,
