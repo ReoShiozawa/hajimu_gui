@@ -326,6 +326,8 @@ typedef struct {
     uint32_t modal_restore_focus;
     char composition[128];
     uint32_t text_drag;
+    bool text_context_published;
+    uint32_t text_context_id;
     uint64_t composition_version, composition_notified;
     uint32_t nav_previous[512], nav_current[512];
     int nav_previous_count, nav_current_count;
@@ -372,6 +374,7 @@ typedef struct {
 
 static GuiApp  g_apps[GUI_MAX_APPS];
 static GuiApp *g_cur  = NULL;           /* 描画中の現在アプリ        */
+static bool gui_apply_document_event(GuiApp *app, const HjpEvent *event);
 static void gui_input_modifiers(GuiInput *input, HjpKeymod modifiers) {
 #ifdef __APPLE__
     input->mod_ctrl = (modifiers & HJP_KMOD_GUI) != 0;
@@ -1369,6 +1372,17 @@ static Value fn_draw_loop(int argc, Value *argv) {
             case HJP_EVENT_TEXTEDITING:
                 gui_ime_update(app, ev.text.text);
                 break;
+            case HJP_EVENT_TEXTREPLACE:
+            case HJP_EVENT_TEXTSELECTION:
+                for (int i = 0; i < GUI_MAX_APPS; i++) {
+                    GuiApp *target = &g_apps[i];
+                    if (target->window == ev.edit.window && target->window &&
+                        hjp_window_get_id(target->window) == ev.edit.generation) {
+                        gui_apply_document_event(target, &ev);
+                        break;
+                    }
+                }
+                break;
             case HJP_EVENT_ACCESSIBILITY_PRESS:
                 for (int wi = 0; wi < GUI_MAX_APPS; wi++) {
                     GuiApp *target = &g_apps[wi];
@@ -1469,7 +1483,14 @@ static Value fn_draw_loop(int argc, Value *argv) {
 #endif
         gui_nav_begin();
         g_frame_count++;
+        app->text_context_published = false;
         hajimu_call(&callback, 0, NULL);
+#ifdef __APPLE__
+        if (!app->text_context_published) {
+            hjp_set_text_input_context(app->window, 0, "", 0, 0, 0);
+            app->text_context_id = 0;
+        }
+#endif
         if (!app->in.down) app->text_drag = 0;
         gui_nav_end();
 
@@ -2561,6 +2582,51 @@ static bool gui_text_replace_selection(GuiTextBuf *tb, const char *text, int len
     return true;
 }
 
+static bool gui_apply_document_event(GuiApp *app, const HjpEvent *event) {
+    if (!event->edit.id || app->focused != event->edit.id ||
+        event->edit.window != app->window || !app->window ||
+        event->edit.generation != hjp_window_get_id(app->window)) return false;
+    for (int i = 0; i < app->text_buf_count; i++) {
+        GuiTextBuf *tb = &app->text_bufs[i];
+        if (tb->id != event->edit.id) continue;
+        int start = event->edit.start, end = event->edit.end;
+        if (start < 0 || end < start || end > tb->len ||
+            gui_text_boundary(tb, start) != start || gui_text_boundary(tb, end) != end) return false;
+        int previous_start = tb->sel_start, previous_end = tb->sel_end, previous_cursor = tb->cursor;
+        tb->sel_start = start; tb->sel_end = tb->cursor = end;
+        if (event->type == HJP_EVENT_TEXTSELECTION) {
+            if (event->edit.cursor != start && event->edit.cursor != end) {
+                tb->sel_start = previous_start; tb->sel_end = previous_end; tb->cursor = previous_cursor;
+                return false;
+            }
+            tb->sel_start = event->edit.cursor == start ? end : start;
+            tb->sel_end = tb->cursor = event->edit.cursor;
+            tb->preferred_x_valid = false;
+            return true;
+        }
+        if (gui_text_replace_selection(tb, event->edit.text, (int)strlen(event->edit.text))) return true;
+        tb->sel_start = previous_start; tb->sel_end = previous_end; tb->cursor = previous_cursor;
+        return false;
+    }
+    return false;
+}
+
+static void gui_publish_text_context(GuiTextBuf *tb, uint32_t id, bool secure) {
+#ifdef __APPLE__
+    if (g_cur->focused != id || g_disabled || (g_cur->modal_title[0] && !g_cur->modal_entered)) return;
+    int start, end;
+    start = tb->sel_start == tb->sel_end ? tb->cursor : tb->sel_start;
+    end = tb->sel_start == tb->sel_end ? tb->cursor : tb->sel_end;
+    if (!secure || g_cur->text_context_id != id)
+        hjp_set_text_input_context(g_cur->window, secure ? 0 : id, secure ? "" : tb->buf,
+                                   secure ? 0 : start, secure ? 0 : end, GUI_MAX_TEXT_BUF);
+    g_cur->text_context_id = id;
+    g_cur->text_context_published = true;
+#else
+    (void)tb; (void)id; (void)secure;
+#endif
+}
+
 /* テキストバッファにキー入力を反映（フォーカス中のみ呼ばれる）。 */
 static void gui_text_buf_edit(GuiTextBuf *tb, bool allow_copy) {
     GuiInput *in = &g_cur->in;
@@ -2705,6 +2771,7 @@ static Value fn_text_input(int argc, Value *argv) {
     }
     /* フォーカス中: 入力処理 */
     if (focused) gui_text_buf_process(tb);
+    gui_publish_text_context(tb, id, false);
 
     /* フィールド背景 */
     hjpBeginPath(vg);
@@ -2832,6 +2899,7 @@ static Value fn_password_input(int argc, Value *argv) {
         gui_text_mouse(tb, id, hov, offset);
     }
     if (focused) gui_text_buf_edit(tb, false);
+    gui_publish_text_context(tb, id, true);
 
     /* フィールド描画 */
     hjpBeginPath(vg);
@@ -3113,6 +3181,7 @@ static Value fn_textarea(int argc, Value *argv) {
     } else if (focused) {
         gui_text_buf_process(tb);
     }
+    gui_publish_text_context(tb, id, false);
 
     /* 背景 */
     hjpBeginPath(vg);
@@ -25075,9 +25144,9 @@ static Value fn_api_status(int argc, Value *argv) {
                 break;
             }
         if (found->fn == fn_text_cursor_pos || found->fn == fn_text_select_range) {
-            state = "部分対応"; reason = "描画済み入力欄のUnicode符号位置による選択/カーソル。OS文書範囲との同期は未完了";
+            state = "部分対応"; reason = "Unicode符号位置での選択/カーソルとmacOS文書同期。実IME・複数ウィンドウ・他OSの検査は未完了";
         } else if (found->fn == fn_ime_composition) {
-            state = "部分対応"; reason = "フレーム内呼出で最新の変換状態変更を通知。macOS接続のみで文書選択/置換と実IME検査は未完了";
+            state = "部分対応"; reason = "フレーム内の変換通知とmacOS文書選択/置換を接続。実IME・長い未確定文字表示・他OSは未完了";
         } else if (found->fn == fn_async_exec || found->fn == fn_task_progress || found->fn == fn_task_notify) {
             state = "部分対応"; reason = "POSIXプロセスタスクのみ。任意クロージャの隔離実行・Windowsは未対応";
         } else if (found->fn == fn_a11y_name || found->fn == fn_a11y_desc || found->fn == fn_a11y_role || found->fn == fn_sr_announce) {
@@ -25112,7 +25181,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.18.0",
+        .version        = "14.19.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,

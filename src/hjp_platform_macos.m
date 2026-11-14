@@ -257,6 +257,15 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
 }
 @property(nonatomic, copy) NSString *composition;
 @property(nonatomic) NSRange compositionSelection;
+@property(nonatomic, copy) NSString *inputDocument;
+@property(nonatomic) NSRange documentSelection;
+@property(nonatomic) NSRange compositionBase;
+@property(nonatomic) uint32_t documentID;
+@property(nonatomic) int documentCapacity;
+@property(nonatomic) NSUInteger documentAnchor;
+@property(nonatomic) NSUInteger documentCursor;
+@property(nonatomic) BOOL handledTextCommand;
+- (void)clearComposition;
 @property(nonatomic) NSRect inputRect;
 @property(nonatomic, assign) HjpWindow *ownerWindow;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, HjpAccessibilityElement *> *accessibleCache;
@@ -379,11 +388,32 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
     e.type = HJP_EVENT_KEYDOWN;
     e.key.sym = sym;
     e.key.mod = hjp__macModToHjp([event modifierFlags]);
-    /* 変換中のEnter・矢印・削除をアプリ側の操作へ二重配送しない。 */
-    if (![self hasMarkedText]) hjp__pushEvent(&e);
-
-    /* テキスト入力 (interpretKeyEvents を通す) */
-    [self interpretKeyEvents:@[event]];
+    BOOL wasMarked = self.hasMarkedText;
+    self.handledTextCommand = NO;
+    /* 確定本文を持つ場合、標準の編集操作をOS側の文書状態へ先に反映する。 */
+    if (self.documentID && !wasMarked && (event.modifierFlags & NSEventModifierFlagCommand)) {
+        if (sym == HJPK_a) {
+            [self doCommandBySelector:@selector(selectAll:)];
+        } else if (sym == HJPK_c || sym == HJPK_x) {
+            NSString *selected = [self.inputDocument substringWithRange:self.documentSelection];
+            if (selected.length) {
+                hjp_set_clipboard_text(selected.UTF8String);
+                if (sym == HJPK_x) [self insertText:@"" replacementRange:self.documentSelection];
+            }
+            self.handledTextCommand = YES;
+        } else if (sym == HJPK_v) {
+            char *clip = hjp_get_clipboard_text();
+            if (clip) {
+                NSString *pasted = [[NSString alloc] initWithUTF8String:clip];
+                if (pasted.length) [self insertText:pasted replacementRange:NSMakeRange(NSNotFound, 0)];
+                hjp_free(clip);
+            }
+            self.handledTextCommand = YES;
+        }
+    }
+    /* テキスト入力 (interpretKeyEvents を通す)。変換中の操作を二重配送しない。 */
+    if (!self.handledTextCommand) [self interpretKeyEvents:@[event]];
+    if (!wasMarked && !self.handledTextCommand) hjp__pushEvent(&e);
 }
 - (void)keyUp:(NSEvent *)event {
     HjpKeycode sym = hjp__macKeyToHjp([event keyCode]);
@@ -402,11 +432,95 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
 }
 
 /* --- NSTextInputClient --- */
+- (NSString *)documentWithComposition {
+    NSString *document = self.inputDocument ?: @"";
+    if (![self hasMarkedText]) return document;
+    return [document stringByReplacingCharactersInRange:self.compositionBase withString:self.composition];
+}
+
+/* OSの仮想文書上の範囲を、未確定文字を除く確定本文へ戻す。 */
+- (NSRange)committedRange:(NSRange)range {
+    NSString *document = self.inputDocument ?: @"";
+    if (range.location == NSNotFound)
+        return [self hasMarkedText] ? self.compositionBase : self.documentSelection;
+    NSUInteger total = [self documentWithComposition].length;
+    if (range.location > total || range.length > total - range.location) return NSMakeRange(NSNotFound, 0);
+    if (![self hasMarkedText]) return range;
+    NSUInteger a = self.compositionBase.location, b = a + self.composition.length;
+    NSUInteger start = range.location, end = NSMaxRange(range);
+    start = start <= a ? start : start >= b ? start - self.composition.length + self.compositionBase.length : a;
+    end = end <= a ? end : end >= b ? end - self.composition.length + self.compositionBase.length : NSMaxRange(self.compositionBase);
+    if (start > document.length || end > document.length || start > end) return NSMakeRange(NSNotFound, 0);
+    return NSMakeRange(start, end - start);
+}
+
+- (BOOL)emitDocumentEdit:(NSRange)range text:(NSString *)text selectionOnly:(BOOL)selectionOnly {
+    NSString *document = self.inputDocument ?: @"";
+    if (!self.ownerWindow || !self.documentID || range.location == NSNotFound ||
+        range.location > document.length || range.length > document.length - range.location) return NO;
+    NSData *prefix = [[document substringToIndex:range.location] dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *removed = [[document substringWithRange:range] dataUsingEncoding:NSUTF8StringEncoding];
+    if (!prefix || !removed) return NO; /* UTF-16サロゲートの途中を拒否する。 */
+    const char *utf8 = text.UTF8String;
+    if (!utf8) return NO;
+    size_t remaining = strlen(utf8), offset = 0;
+    size_t required = 1;
+    if (!selectionOnly && remaining) {
+        required = 0;
+        for (size_t position = 0; position < remaining; required++) {
+            size_t n = MIN(remaining - position, (size_t)127);
+            while (n && ((unsigned char)utf8[position + n] & 0xc0) == 0x80) n--;
+            position += n;
+        }
+    }
+    int freeEvents = HJP_MAX_EVENTS - 1 -
+        (g_hjp.evHead - g_hjp.evTail + HJP_MAX_EVENTS) % HJP_MAX_EVENTS;
+    /* 後続の未確定状態通知も含め、置換の一部だけを配送しない。 */
+    if (required + 1 > (size_t)freeEvents) return NO;
+    do {
+        HjpEvent event = {0};
+        event.type = selectionOnly ? HJP_EVENT_TEXTSELECTION : HJP_EVENT_TEXTREPLACE;
+        event.edit.window = self.ownerWindow;
+        event.edit.generation = self.ownerWindow->windowId;
+        event.edit.id = self.documentID;
+        event.edit.start = (int)(prefix.length + offset);
+        event.edit.end = event.edit.start + (offset ? 0 : (int)removed.length);
+        event.edit.cursor = event.edit.end;
+        size_t n = MIN(remaining, sizeof(event.edit.text) - 1);
+        while (n && ((unsigned char)utf8[offset + n] & 0xc0) == 0x80) n--;
+        if (n) memcpy(event.edit.text, utf8 + offset, n);
+        hjp__pushEvent(&event);
+        offset += n;
+        remaining -= n;
+        if (selectionOnly) break;
+    } while (remaining);
+    return YES;
+}
+
 - (void)insertText:(id)aString replacementRange:(NSRange)replacementRange {
-    (void)replacementRange;
     NSString *str = ([aString isKindOfClass:[NSAttributedString class]])
                     ? [aString string] : aString;
-    if ([self hasMarkedText]) [self unmarkText];
+    if (self.documentID) {
+        NSRange range = [self committedRange:replacementRange];
+        NSString *document = self.inputDocument ?: @"";
+        if (range.location == NSNotFound) return;
+        NSUInteger retained = [document lengthOfBytesUsingEncoding:NSUTF8StringEncoding] -
+            [[document substringWithRange:range] lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+        NSUInteger available = (NSUInteger)MAX(0, self.documentCapacity - 1) > retained ? self.documentCapacity - 1 - retained : 0;
+        const char *bytes = str.UTF8String;
+        if (!bytes) return;
+        size_t n = MIN(strlen(bytes), available);
+        while (n && ((unsigned char)bytes[n] & 0xc0) == 0x80) n--;
+        if (str.length && !n) { [self clearComposition]; return; }
+        str = [[NSString alloc] initWithBytes:bytes length:n encoding:NSUTF8StringEncoding];
+        if (![self emitDocumentEdit:range text:str selectionOnly:NO]) return;
+        self.inputDocument = [document stringByReplacingCharactersInRange:range withString:str];
+        self.documentSelection = NSMakeRange(range.location + str.length, 0);
+        self.documentAnchor = self.documentCursor = self.documentSelection.location;
+        [self clearComposition];
+        return;
+    }
+    if ([self hasMarkedText]) [self clearComposition];
     const char *utf8 = [str UTF8String];
     /* キューの1イベントに収まるUTF-8境界で分割する。 */
     while (utf8 && *utf8) {
@@ -422,9 +536,58 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
         utf8 += n;
     }
 }
-- (void)doCommandBySelector:(SEL)aSelector { (void)aSelector; }
+- (void)doCommandBySelector:(SEL)aSelector {
+    if (!self.documentID || self.hasMarkedText) return;
+    NSString *name = NSStringFromSelector(aSelector);
+    BOOL extend = [name hasSuffix:@"AndModifySelection:"];
+    BOOL left = [name isEqualToString:@"moveLeft:"] || [name isEqualToString:@"moveLeftAndModifySelection:"];
+    BOOL right = [name isEqualToString:@"moveRight:"] || [name isEqualToString:@"moveRightAndModifySelection:"];
+    BOOL home = [name isEqualToString:@"moveToBeginningOfDocument:"] || [name isEqualToString:@"moveToBeginningOfDocumentAndModifySelection:"];
+    BOOL end = [name isEqualToString:@"moveToEndOfDocument:"] || [name isEqualToString:@"moveToEndOfDocumentAndModifySelection:"];
+    BOOL all = [name isEqualToString:@"selectAll:"];
+    if ([name isEqualToString:@"deleteBackward:"] || [name isEqualToString:@"deleteForward:"]) {
+        NSRange range = self.documentSelection;
+        if (!range.length) {
+            if ([name isEqualToString:@"deleteBackward:"] && range.location)
+                range = [self.inputDocument rangeOfComposedCharacterSequenceAtIndex:range.location - 1];
+            else if ([name isEqualToString:@"deleteForward:"] && range.location < self.inputDocument.length)
+                range = [self.inputDocument rangeOfComposedCharacterSequenceAtIndex:range.location];
+        }
+        [self insertText:@"" replacementRange:range];
+        self.handledTextCommand = YES;
+        return;
+    }
+    if (left || right || home || end || all) {
+        NSUInteger cursor = self.documentCursor, anchor = self.documentAnchor;
+        if (all) { anchor = 0; cursor = self.inputDocument.length; }
+        else if (left) cursor = !extend && self.documentSelection.length ? self.documentSelection.location :
+            cursor ? [self.inputDocument rangeOfComposedCharacterSequenceAtIndex:cursor - 1].location : 0;
+        else if (right) cursor = !extend && self.documentSelection.length ? NSMaxRange(self.documentSelection) :
+            cursor < self.inputDocument.length ? NSMaxRange([self.inputDocument rangeOfComposedCharacterSequenceAtIndex:cursor]) : cursor;
+        else cursor = home ? 0 : self.inputDocument.length;
+        if (!all && !extend) anchor = cursor;
+        NSRange range = NSMakeRange(MIN(anchor, cursor), MAX(anchor, cursor) - MIN(anchor, cursor));
+        if ([self emitDocumentEdit:range text:@"" selectionOnly:YES]) {
+            int latest = (g_hjp.evHead + HJP_MAX_EVENTS - 1) % HJP_MAX_EVENTS;
+            g_hjp.events[latest].edit.cursor = (int)[[self.inputDocument substringToIndex:cursor] lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+            self.documentSelection = range;
+            self.documentAnchor = anchor; self.documentCursor = cursor;
+        }
+        self.handledTextCommand = YES;
+        return;
+    }
+    /* 折返し上下移動などGUI側で処理する操作の後は、次の描画まで範囲指定を使わない。 */
+    self.documentID = 0;
+    self.inputDocument = @"";
+}
 - (void)setMarkedText:(id)aString selectedRange:(NSRange)selectedRange replacementRange:(NSRange)replacementRange {
-    (void)replacementRange;
+    NSRange range = self.documentID ? [self committedRange:replacementRange] : NSMakeRange(0, 0);
+    if (range.location == NSNotFound) return;
+    if (self.documentID && ![self emitDocumentEdit:range text:@"" selectionOnly:YES]) return;
+    self.compositionBase = range;
+    self.documentSelection = range;
+    self.documentAnchor = range.location;
+    self.documentCursor = NSMaxRange(range);
     self.composition = [aString isKindOfClass:[NSAttributedString class]] ? [aString string] : aString;
     NSUInteger length = self.composition.length;
     NSUInteger start = MIN(selectedRange.location, length);
@@ -440,19 +603,29 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
     if (n) memcpy(e.text.text, utf8, n);
     hjp__pushEvent(&e);
 }
-- (void)unmarkText {
+- (void)clearComposition {
+    BOOL hadComposition = self.hasMarkedText;
     self.composition = @"";
     self.compositionSelection = NSMakeRange(0, 0);
-    HjpEvent e = {0}; e.type = HJP_EVENT_TEXTEDITING; hjp__pushEvent(&e);
+    if (hadComposition) {
+        HjpEvent e = {0}; e.type = HJP_EVENT_TEXTEDITING; hjp__pushEvent(&e);
+    }
 }
-- (NSRange)selectedRange { return [self hasMarkedText] ? self.compositionSelection : NSMakeRange(NSNotFound, 0); }
-- (NSRange)markedRange { return [self hasMarkedText] ? NSMakeRange(0, self.composition.length) : NSMakeRange(NSNotFound, 0); }
+- (void)unmarkText {
+    if ([self hasMarkedText]) [self insertText:self.composition replacementRange:NSMakeRange(NSNotFound, 0)];
+}
+- (NSRange)selectedRange {
+    if ([self hasMarkedText]) return NSMakeRange(self.compositionBase.location + self.compositionSelection.location, self.compositionSelection.length);
+    return self.documentID ? self.documentSelection : NSMakeRange(NSNotFound, 0);
+}
+- (NSRange)markedRange { return [self hasMarkedText] ? NSMakeRange(self.compositionBase.location, self.composition.length) : NSMakeRange(NSNotFound, 0); }
 - (BOOL)hasMarkedText { return self.composition.length > 0; }
 - (NSAttributedString *)attributedSubstringForProposedRange:(NSRange)range actualRange:(NSRangePointer)actualRange {
-    if (![self hasMarkedText] || range.location > self.composition.length) return nil;
-    NSRange valid = NSMakeRange(range.location, MIN(range.length, self.composition.length - range.location));
+    NSString *document = [self documentWithComposition];
+    if (range.location > document.length) return nil;
+    NSRange valid = NSMakeRange(range.location, MIN(range.length, document.length - range.location));
     if (actualRange) *actualRange = valid;
-    return [[NSAttributedString alloc] initWithString:[self.composition substringWithRange:valid]];
+    return [[NSAttributedString alloc] initWithString:[document substringWithRange:valid]];
 }
 - (NSArray *)validAttributesForMarkedText { return @[]; }
 - (NSRect)firstRectForCharacterRange:(NSRange)range actualRange:(NSRangePointer)actualRange {
@@ -811,8 +984,40 @@ void hjp_start_text_input(void) {
 }
 void hjp_stop_text_input(void) {
     NSView *view = NSApp.keyWindow.contentView;
-    if ([view isKindOfClass:[HjpOpenGLView class]] && [(HjpOpenGLView *)view hasMarkedText])
-        [(HjpOpenGLView *)view unmarkText];
+    if ([view isKindOfClass:[HjpOpenGLView class]]) {
+        HjpOpenGLView *input = (HjpOpenGLView *)view;
+        [input clearComposition];
+        input.documentID = 0;
+        input.inputDocument = @"";
+    }
+}
+
+void hjp_set_text_input_context(HjpWindow *window, uint32_t id, const char *text,
+                               int start, int end, int capacity) {
+    HjpOpenGLView *view = window ? window->glview : nil;
+    if (!view) return;
+    if (!id) {
+        if (view.hasMarkedText) [view clearComposition];
+        view.documentID = 0;
+        view.inputDocument = @"";
+        return;
+    }
+    if (!text) return;
+    size_t length = strlen(text);
+    if (start < 0 || end < 0 || (size_t)start > length || (size_t)end > length || capacity <= 0 || length >= (size_t)capacity) return;
+    NSString *document = [[NSString alloc] initWithUTF8String:text];
+    NSString *prefix = [[NSString alloc] initWithBytes:text length:start encoding:NSUTF8StringEncoding];
+    NSString *finish = [[NSString alloc] initWithBytes:text length:end encoding:NSUTF8StringEncoding];
+    if (!document || !prefix || !finish) return;
+    if (view.documentID != id || ![view.inputDocument isEqualToString:document]) {
+        if (view.hasMarkedText) [view clearComposition];
+        view.inputDocument = document;
+    }
+    view.documentID = id;
+    view.documentCapacity = capacity;
+    view.documentAnchor = prefix.length; view.documentCursor = finish.length;
+    view.documentSelection = NSMakeRange(MIN(prefix.length, finish.length),
+        MAX(prefix.length, finish.length) - MIN(prefix.length, finish.length));
 }
 
 void hjp_set_text_input_rect(HjpWindow *window, float x, float y, float w, float h) {

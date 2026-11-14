@@ -260,6 +260,32 @@ static void check_text_navigation(void) {
     hjpCancelFrame(vg);
 }
 
+static void check_document_edits(void) {
+    uint32_t id = gui_hash("document-edit");
+    GuiTextBuf *tb = gui_get_text_buf(id, "A😀日本Z");
+    g_cur->focused = id;
+    HjpEvent event = {.type = HJP_EVENT_TEXTSELECTION};
+    event.edit.window = g_cur->window;
+    event.edit.generation = hjp_window_get_id(g_cur->window);
+    event.edit.id = id; event.edit.start = 5; event.edit.end = event.edit.cursor = 11;
+    assert(gui_apply_document_event(g_cur, &event));
+    assert(tb->sel_start == 5 && tb->sel_end == 11);
+    event.type = HJP_EVENT_TEXTREPLACE;
+    snprintf(event.edit.text, sizeof(event.edit.text), "%s", "日本語");
+    assert(gui_apply_document_event(g_cur, &event));
+    assert(!strcmp(tb->buf, "A😀日本語Z") && tb->len == 15 && tb->cursor == 14);
+    event.edit.start = 2; event.edit.end = 3;
+    assert(!gui_apply_document_event(g_cur, &event));
+    assert(!strcmp(tb->buf, "A😀日本語Z"));
+    event.edit.start = 1; event.edit.end = 5; event.edit.text[0] = '\0';
+    assert(gui_apply_document_event(g_cur, &event));
+    assert(!strcmp(tb->buf, "A日本語Z"));
+    event.edit.generation++;
+    assert(!gui_apply_document_event(g_cur, &event));
+    g_cur->focused = 0;
+    assert(!gui_apply_document_event(g_cur, &event));
+}
+
 int main(void) {
     size_t function_count = sizeof(gui_functions) / sizeof(gui_functions[0]);
     for (size_t i = 0; i < function_count; i++) {
@@ -278,6 +304,7 @@ int main(void) {
     check_textarea_layout();
     check_text_selection();
     check_text_navigation();
+    check_document_edits();
     char oversized[GUI_MAX_TEXT_BUF + 8];
     memset(oversized, 'a', GUI_MAX_TEXT_BUF - 2);
     memcpy(oversized + GUI_MAX_TEXT_BUF - 2, "日本", 7);
