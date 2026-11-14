@@ -1,0 +1,9 @@
+# 上流原本は改行も含めて保持し、固定SHA-256を全OSで検証する。
+vendor/utf8proc/utf8proc.c -text
+vendor/utf8proc/utf8proc.h -text
+vendor/utf8proc/utf8proc_data.c -text
+vendor/utf8proc/LICENSE.md -text
+tests/data/GraphemeBreakTest-18.0.0.txt -text
+tests/data/UNICODE-LICENSE.txt -text
+tests/data/unicode.sha256 text eol=lf
+tests/check-grapheme.sh text eol=lf

@@ -8,6 +8,7 @@
 - 取得元: https://github.com/JuliaStrings/utf8proc/archive/79cdd5ab40c79afa559f689ffc13b76812dee1ac.tar.gz
 - アーカイブSHA-256: `e8fadfcd531d65525cbef157b866c5408e2e3f0d7c0f3aefb0bce01a7a08e35d`
 - `utf8proc.c` / `utf8proc.h` / `utf8proc_data.c` / `LICENSE.md` は上流から無改変で収録
+- `.gitattributes` で原本とUnicode公式テストの改行変換を無効化し、Windowsの自動CRLF変換でも固定ハッシュを維持する。ハッシュ一覧と検査スクリプトはLFで保持する
 - ライセンス全文: [LICENSE.md](LICENSE.md)。バイナリの再配布にも同梱する
 
 `src/hjp_unicode.c` から内部リンクし、追加のシステムライブラリは要求しない。macOS/Linuxではutf8procのシンボルを隠し、他のプラグインやホストが使う版との衝突を避ける。
