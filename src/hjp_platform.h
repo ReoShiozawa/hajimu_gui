@@ -65,6 +65,7 @@ enum HjpEventType {
     HJP_EVENT_KEYDOWN,
     HJP_EVENT_KEYUP,
     HJP_EVENT_DROPFILE,
+    HJP_EVENT_TEXTEDITING,
 };
 
 /* --- ウィンドウイベントサブタイプ --- */
@@ -232,6 +233,9 @@ void  hjp_set_clipboard_text(const char *text);
 /* --- テキスト入力 --- */
 void hjp_start_text_input(void);
 void hjp_stop_text_input(void);
+#ifdef __APPLE__
+void hjp_set_text_input_rect(HjpWindow *window, float x, float y, float w, float h);
+#endif
 
 /* --- キーボード状態 --- */
 const uint8_t *hjp_get_keyboard_state(int *numkeys);

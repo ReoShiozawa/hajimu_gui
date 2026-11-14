@@ -10,8 +10,37 @@ int main(int argc, char **argv) {
         for (int i = 0; i < 20; i++) {
             __weak HjpWindowDelegate *delegate;
             @autoreleasepool {
-                HjpWindow *win = hjp_window_create("寿命検査", 0, 0, 320, 200, 0);
+                HjpWindow *win = hjp_window_create("寿命検査", 0, 0, 320, 200, i == 0 ? HJP_WINDOW_OPENGL : 0);
                 assert(win != NULL);
+                if (i == 0) {
+                    HjpOpenGLView *view = win->glview;
+                    [view setMarkedText:@"にほん" selectedRange:NSMakeRange(1, 1) replacementRange:NSMakeRange(NSNotFound, 0)];
+                    assert(view.hasMarkedText);
+                    assert(view.markedRange.length == 3);
+                    assert(view.selectedRange.location == 1);
+                    NSRange actual;
+                    assert([[[view attributedSubstringForProposedRange:NSMakeRange(1, 99) actualRange:&actual] string] isEqualToString:@"ほん"]);
+                    assert(actual.length == 2);
+                    hjp_set_text_input_rect(win, 25, 40, 1, 30);
+                    NSRect candidate = [view firstRectForCharacterRange:NSMakeRange(0, 1) actualRange:&actual];
+                    assert(candidate.size.height == 30 && isfinite(candidate.origin.x));
+                    g_hjp.evHead = g_hjp.evTail = 0;
+                    NSMutableString *commit = [NSMutableString string];
+                    for (int c = 0; c < 300; c++) [commit appendString:@"語"];
+                    [view insertText:commit replacementRange:NSMakeRange(NSNotFound, 0)];
+                    assert(!view.hasMarkedText && view.markedRange.location == NSNotFound);
+                    HjpEvent e;
+                    size_t bytes = 0;
+                    bool cleared = false;
+                    while (hjp__popEvent(&e)) {
+                        if (e.type == HJP_EVENT_TEXTEDITING) cleared = e.text.text[0] == '\0';
+                        if (e.type == HJP_EVENT_TEXTINPUT) {
+                            assert([[NSString alloc] initWithUTF8String:e.text.text] != nil);
+                            bytes += strlen(e.text.text);
+                        }
+                    }
+                    assert(cleared && bytes == strlen(commit.UTF8String));
+                }
                 delegate = win->delegate;
                 assert(delegate != nil);
                 assert([win->nswin delegate] == delegate);

@@ -222,7 +222,7 @@ typedef struct {
     bool released;              /* このフレームで離された           */
     int  scroll_y;              /* スクロール量                     */
     /* キーボード入力 (Phase 3) */
-    char text_input[128];       /* テキスト入力で受けた UTF-8 */
+    char text_input[4096];      /* 同一フレームの複数の確定イベントを保持 */
     int  text_input_len;        /* 今フレームの入力バイト数     */
     bool key_backspace;         /* Backspace 押下                 */
     bool key_delete;            /* Delete 押下                    */
@@ -316,6 +316,7 @@ typedef struct {
     bool modal_entered, modal_input_saved;
     GuiInput modal_input;
     uint32_t modal_restore_focus;
+    char composition[128];
     uint32_t nav_previous[512], nav_current[512];
     int nav_previous_count, nav_current_count;
     /* 上限付きの一覧状態。別ウィンドウや剰余の一致で状態を共有しない。 */
@@ -944,7 +945,7 @@ static void gui_nav_begin(void) {
     g_cur->modal_entered = false;
     g_cur->modal_input_saved = false;
     g_cur->nav_current_count = 0;
-    if (g_cur->nav_enabled && g_cur->in.key_tab &&
+    if (g_cur->nav_enabled && !g_cur->composition[0] && g_cur->in.key_tab &&
         (!g_cur->focused || g_cur->focused == g_cur->nav_focus)) {
         gui_nav_move(g_cur->in.mod_shift ? -1 : 1);
         g_cur->in.key_tab = false;
@@ -994,6 +995,9 @@ static void gui_nav_text(uint32_t id, float x, float y, float w, float h) {
         g_cur->focused = 0;
         hjp_stop_text_input();
     }
+#ifdef __APPLE__
+    if (g_cur->focused == id) hjp_set_text_input_rect(g_cur->window, x + GUI_INPUT_PAD, y, 1, h);
+#endif
 }
 
 static bool gui_nav_control(uint32_t id, float x, float y, float w, float h) {
@@ -1001,7 +1005,7 @@ static bool gui_nav_control(uint32_t id, float x, float y, float w, float h) {
     Hjpcontext *vg = g_cur->vg;
     hjpBeginPath(vg); hjpRoundedRect(vg, x + 2, y + 2, fmaxf(0, w - 4), fmaxf(0, h - 4), 3);
     hjpStrokeColor(vg, TH_ACCENT); hjpStrokeWidth(vg, 2); hjpStroke(vg);
-    if (!g_cur->focused && (g_cur->in.key_return || g_cur->in.last_key == ' ')) {
+    if (!g_cur->focused && !g_cur->composition[0] && (g_cur->in.key_return || g_cur->in.last_key == ' ')) {
         g_cur->in.key_return = false;
         g_cur->in.last_key = 0;
         return true;
@@ -1279,6 +1283,10 @@ static Value fn_draw_loop(int argc, Value *argv) {
                 }
                 break;
             }
+            case HJP_EVENT_TEXTEDITING:
+                memcpy(app->composition, ev.text.text, sizeof(app->composition));
+                app->composition[sizeof(app->composition) - 1] = '\0';
+                break;
             case HJP_EVENT_KEYDOWN: {
                 HjpKeycode k = ev.key.sym;
                 HjpKeymod  m = ev.key.mod;
@@ -2321,12 +2329,14 @@ static GuiTextBuf *gui_get_text_buf(uint32_t id, const char *init_val) {
 /* テキストバッファにキー入力を反映（フォーカス中のみ呼ばれる） */
 static void gui_text_buf_process(GuiTextBuf *tb) {
     GuiInput *in = &g_cur->in;
+    if (g_cur->composition[0]) return;
 
     /* テキスト挿入 */
     if (in->text_input_len > 0) {
         int avail = GUI_MAX_TEXT_BUF - 1 - tb->len;
         int n = in->text_input_len;
         if (n > avail) n = avail;
+        while (n > 0 && ((unsigned char)in->text_input[n] & 0xc0) == 0x80) n--;
         if (n > 0) {
             memmove(tb->buf + tb->cursor + n,
                     tb->buf + tb->cursor,
@@ -2515,6 +2525,23 @@ static Value fn_text_input(int argc, Value *argv) {
         }
     }
 
+    if (focused && g_cur->composition[0]) {
+        float cx = fx + GUI_INPUT_PAD + hjpTextBounds(vg, 0, 0, tb->buf, tb->buf + tb->cursor, NULL);
+        float cw = hjpTextBounds(vg, 0, 0, g_cur->composition, NULL, NULL);
+        hjpBeginPath(vg); hjpRect(vg, cx, y + 2, cw, GUI_INPUT_H - 4);
+        hjpFillColor(vg, TH_WIDGET_ACTIVE); hjpFill(vg);
+        hjpFillColor(vg, TH_TEXT);
+        hjpText(vg, cx, y + GUI_INPUT_H * 0.5f, g_cur->composition, NULL);
+        hjpBeginPath(vg); hjpMoveTo(vg, cx, y + GUI_INPUT_H - 5);
+        hjpLineTo(vg, cx + cw, y + GUI_INPUT_H - 5);
+        hjpStrokeColor(vg, TH_ACCENT); hjpStrokeWidth(vg, 1); hjpStroke(vg);
+    }
+#ifdef __APPLE__
+    if (focused) {
+        float cx = fx + GUI_INPUT_PAD + hjpTextBounds(vg, 0, 0, tb->buf, tb->buf + tb->cursor, NULL);
+        hjp_set_text_input_rect(g_cur->window, fminf(cx, fx + fw - GUI_INPUT_PAD), y, 1, GUI_INPUT_H);
+    }
+#endif
     hjpRestore(vg);
 
     g_cur->last = (GuiLastWidget){fx, y, fw, GUI_INPUT_H, hov};
@@ -2762,7 +2789,7 @@ static Value fn_textarea(int argc, Value *argv) {
     }
 
     /* Enter → 改行挿入 */
-    if (focused && g_cur->in.key_return) {
+    if (focused && !g_cur->composition[0] && g_cur->in.key_return) {
         if (tb->len < GUI_MAX_TEXT_BUF - 2) {
             memmove(tb->buf + tb->cursor + 1,
                     tb->buf + tb->cursor,
@@ -14430,6 +14457,12 @@ static Value fn_input_formatter(int argc, Value *argv) {
     return hajimu_null();
 }
 
+static Value fn_ime_state(int argc, Value *argv) {
+    (void)argc; (void)argv;
+    return gui_dict2("変換中", hajimu_bool(g_cur && g_cur->composition[0]),
+                     "未確定文字列", hajimu_string(g_cur ? g_cur->composition : ""));
+}
+
 /* IME合成(コールバック) → 無 */
 static Value fn_ime_composition(int argc, Value *argv) {
     (void)argc;
@@ -23620,6 +23653,7 @@ static HajimuPluginFunc gui_functions[] = {
     {"テキスト折畿",           fn_text_fold,          2, 2},
     {"入力フォーマッタ",       fn_input_formatter,    2, 2},
     {"IME合成",               fn_ime_composition,    1, 1},
+    {"IME状態",               fn_ime_state,          0, 0},
     /* Phase 38: フォーム枠組み */
     {"フォーム作成",           fn_form_create,        1, 1},
     {"フォーム送信",           fn_form_submit,        1, 1},

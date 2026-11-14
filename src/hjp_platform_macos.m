@@ -243,6 +243,9 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
 {
     NSTrackingArea *trackingArea;
 }
+@property(nonatomic, copy) NSString *composition;
+@property(nonatomic) NSRange compositionSelection;
+@property(nonatomic) NSRect inputRect;
 @end
 
 @implementation HjpOpenGLView
@@ -325,7 +328,8 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
     e.type = HJP_EVENT_KEYDOWN;
     e.key.sym = sym;
     e.key.mod = hjp__macModToHjp([event modifierFlags]);
-    hjp__pushEvent(&e);
+    /* 変換中のEnter・矢印・削除をアプリ側の操作へ二重配送しない。 */
+    if (![self hasMarkedText]) hjp__pushEvent(&e);
 
     /* テキスト入力 (interpretKeyEvents を通す) */
     [self interpretKeyEvents:@[event]];
@@ -351,26 +355,59 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
     (void)replacementRange;
     NSString *str = ([aString isKindOfClass:[NSAttributedString class]])
                     ? [aString string] : aString;
-    HjpEvent e = {0};
-    e.type = HJP_EVENT_TEXTINPUT;
+    if ([self hasMarkedText]) [self unmarkText];
     const char *utf8 = [str UTF8String];
-    if (utf8) strncpy(e.text.text, utf8, sizeof(e.text.text)-1);
-    hjp__pushEvent(&e);
+    /* キューの1イベントに収まるUTF-8境界で分割する。 */
+    while (utf8 && *utf8) {
+        HjpEvent e = {0};
+        e.type = HJP_EVENT_TEXTINPUT;
+        size_t n = strlen(utf8);
+        if (n >= sizeof(e.text.text)) {
+            n = sizeof(e.text.text) - 1;
+            while (n && ((unsigned char)utf8[n] & 0xc0) == 0x80) n--;
+        }
+        memcpy(e.text.text, utf8, n);
+        hjp__pushEvent(&e);
+        utf8 += n;
+    }
 }
 - (void)doCommandBySelector:(SEL)aSelector { (void)aSelector; }
 - (void)setMarkedText:(id)aString selectedRange:(NSRange)selectedRange replacementRange:(NSRange)replacementRange {
-    (void)aString; (void)selectedRange; (void)replacementRange;
+    (void)replacementRange;
+    self.composition = [aString isKindOfClass:[NSAttributedString class]] ? [aString string] : aString;
+    NSUInteger length = self.composition.length;
+    NSUInteger start = MIN(selectedRange.location, length);
+    self.compositionSelection = NSMakeRange(start, MIN(selectedRange.length, length - start));
+    HjpEvent e = {0};
+    e.type = HJP_EVENT_TEXTEDITING;
+    const char *utf8 = self.composition.UTF8String;
+    size_t n = utf8 ? strlen(utf8) : 0;
+    if (n >= sizeof(e.text.text)) {
+        n = sizeof(e.text.text) - 1;
+        while (n && ((unsigned char)utf8[n] & 0xc0) == 0x80) n--;
+    }
+    if (n) memcpy(e.text.text, utf8, n);
+    hjp__pushEvent(&e);
 }
-- (void)unmarkText {}
-- (NSRange)selectedRange { return NSMakeRange(NSNotFound, 0); }
-- (NSRange)markedRange { return NSMakeRange(NSNotFound, 0); }
-- (BOOL)hasMarkedText { return NO; }
+- (void)unmarkText {
+    self.composition = @"";
+    self.compositionSelection = NSMakeRange(0, 0);
+    HjpEvent e = {0}; e.type = HJP_EVENT_TEXTEDITING; hjp__pushEvent(&e);
+}
+- (NSRange)selectedRange { return [self hasMarkedText] ? self.compositionSelection : NSMakeRange(NSNotFound, 0); }
+- (NSRange)markedRange { return [self hasMarkedText] ? NSMakeRange(0, self.composition.length) : NSMakeRange(NSNotFound, 0); }
+- (BOOL)hasMarkedText { return self.composition.length > 0; }
 - (NSAttributedString *)attributedSubstringForProposedRange:(NSRange)range actualRange:(NSRangePointer)actualRange {
-    (void)range; (void)actualRange; return nil;
+    if (![self hasMarkedText] || range.location > self.composition.length) return nil;
+    NSRange valid = NSMakeRange(range.location, MIN(range.length, self.composition.length - range.location));
+    if (actualRange) *actualRange = valid;
+    return [[NSAttributedString alloc] initWithString:[self.composition substringWithRange:valid]];
 }
 - (NSArray *)validAttributesForMarkedText { return @[]; }
 - (NSRect)firstRectForCharacterRange:(NSRange)range actualRange:(NSRangePointer)actualRange {
-    (void)range; (void)actualRange; return NSZeroRect;
+    if (actualRange) *actualRange = range;
+    NSRect rect = [self convertRect:self.inputRect toView:nil];
+    return self.window ? [self.window convertRectToScreen:rect] : NSZeroRect;
 }
 - (NSUInteger)characterIndexForPoint:(NSPoint)point { (void)point; return NSNotFound; }
 
@@ -718,7 +755,19 @@ void hjp_set_clipboard_text(const char *text) {
 void hjp_start_text_input(void) {
     /* macOS では常にテキスト入力可能、特別な処理なし */
 }
-void hjp_stop_text_input(void) { }
+void hjp_stop_text_input(void) {
+    NSView *view = NSApp.keyWindow.contentView;
+    if ([view isKindOfClass:[HjpOpenGLView class]] && [(HjpOpenGLView *)view hasMarkedText])
+        [(HjpOpenGLView *)view unmarkText];
+}
+
+void hjp_set_text_input_rect(HjpWindow *window, float x, float y, float w, float h) {
+    if (!window || !window->glview) return;
+    HjpOpenGLView *view = window->glview;
+    float local_y = view.isFlipped ? y : view.bounds.size.height - y - h;
+    view.inputRect = NSMakeRect(x, local_y, w, h);
+    [view.inputContext invalidateCharacterCoordinates];
+}
 
 /* =====================================================================
  * キーボード/マウス状態
