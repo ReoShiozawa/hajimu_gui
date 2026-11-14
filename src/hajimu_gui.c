@@ -45,6 +45,7 @@
 #include <sys/stat.h>
 #include <limits.h>
 #include "hjp_tasks.h"
+#include "hjp_layout.h"
 #ifndef _WIN32
 #include <sys/file.h>
 #endif
@@ -1661,6 +1662,37 @@ static Value fn_color_hex(int argc, Value *argv) {
  * テキスト(内容 [, オプション])
  *   オプション: {サイズ: 数値, 色: パック色}
  * ---------------------------------------------------------------*/
+static Value fn_constrained_widths(int argc, Value *argv) {
+    Value result = hajimu_array();
+    if (argc < 2 || argv[0].type != VALUE_ARRAY || argv[1].type != VALUE_NUMBER ||
+        argv[0].array.length <= 0 || argv[0].array.length > 64) return result;
+    double gap = GUI_MARGIN;
+    if (argc > 2) {
+        if (argv[2].type != VALUE_NUMBER) return result;
+        gap = argv[2].number;
+    }
+    size_t count = (size_t)argv[0].array.length;
+    HjpTrack tracks[64];
+    double widths[64];
+    for (size_t i = 0; i < count; i++) {
+        Value spec = argv[0].array.elements[i];
+        if (spec.type != VALUE_DICT) return result;
+        tracks[i] = (HjpTrack){0, FLT_MAX, 1};
+        for (int k = 0; k < spec.dict.length; k++) {
+            const char *key = spec.dict.keys[k];
+            Value value = spec.dict.values[k];
+            if (strcmp(key, "最小") != 0 && strcmp(key, "最大") != 0 && strcmp(key, "伸縮") != 0) continue;
+            if (value.type != VALUE_NUMBER) return result;
+            if (strcmp(key, "最小") == 0) tracks[i].minimum = value.number;
+            else if (strcmp(key, "最大") == 0) tracks[i].maximum = value.number;
+            else tracks[i].weight = value.number;
+        }
+    }
+    if (hjp_layout_widths(argv[1].number, gap, tracks, count, widths))
+        for (size_t i = 0; i < count; i++) hajimu_array_push(&result, hajimu_number(widths[i]));
+    return result;
+}
+
 static Value fn_available_width(int argc, Value *argv) {
     (void)argc; (void)argv;
     if (!g_cur) return hajimu_number(0);
@@ -7775,7 +7807,7 @@ static Value fn_child_begin(int argc, Value *argv) {
 
     Hjpcontext *vg = g_cur->vg;
     hjpSave(vg);
-    hjpScissor(vg, x, y, cw, ch);
+    hjpIntersectScissor(vg, x, y, cw, ch);
 
     if (border) {
         hjpBeginPath(vg);
@@ -23343,6 +23375,7 @@ HAJIMU_PLUGIN_EXPORT bool hajimu_plugin_borrows_arguments(Value (*fn)(int, Value
         fn == fn_async_exec || fn == fn_task_progress || fn == fn_task_cancel ||
         fn == fn_task_state || fn == fn_task_release || fn == fn_task_notify ||
         fn == fn_action_register || fn == fn_action_button || fn == fn_action_menu || fn == fn_action_take ||
+        fn == fn_constrained_widths ||
         fn == fn_progress || fn == fn_text_input || fn == fn_combobox ||
         fn == fn_list || fn == fn_tab_bar || fn == fn_segment_control;
 }
@@ -23350,6 +23383,7 @@ HAJIMU_PLUGIN_EXPORT bool hajimu_plugin_borrows_arguments(Value (*fn)(int, Value
 /* 関数テーブル */
 static HajimuPluginFunc gui_functions[] = {
     {"利用可能幅", fn_available_width, 0, 0},
+    {"制約幅", fn_constrained_widths, 2, 3},
     {"省略テキスト", fn_ellipsis_text, 1, 2},
     {"一覧項目", fn_detail_row, 3, 4},
     /* --- Phase 1: コア --- */
@@ -24690,7 +24724,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.10.0",
+        .version        = "14.11.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,
