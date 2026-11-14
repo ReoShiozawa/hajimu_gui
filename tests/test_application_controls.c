@@ -93,7 +93,7 @@ static void check_textarea_layout(void) {
     GuiTextBuf buffer = {.len = 6, .cursor = 3};
     memcpy(buffer.buf, "前後", 7);
     char display[GUI_MAX_TEXT_BUF + 128];
-    int caret = gui_textarea_display(&buffer, "日本語", display);
+    int caret = gui_text_display(&buffer, "日本語", display);
     assert(!strcmp(display, "前日本語後") && caret == 12);
     assert(!strcmp(buffer.buf, "前後") && buffer.len == 6 && buffer.cursor == 3);
     count = gui_textarea_rows(vg, display, 24, rows, 128);
@@ -120,6 +120,81 @@ static void check_textarea_layout(void) {
     hjpCancelFrame(vg);
 }
 
+static void check_text_selection(void) {
+    GuiTextBuf tb = {.len = 7, .cursor = 7};
+    memcpy(tb.buf, "a日本", 8);
+    g_cur->in = (GuiInput){.key_left = true, .mod_shift = true};
+    gui_text_buf_process(&tb);
+    assert(tb.cursor == 4 && tb.sel_start == 7 && tb.sel_end == 4);
+    gui_text_buf_process(&tb);
+    assert(tb.cursor == 1 && tb.sel_start == 7 && tb.sel_end == 1);
+    char visual[GUI_MAX_TEXT_BUF + 128];
+    assert(gui_text_display(&tb, "仮", visual) == 4);
+    assert(!strcmp(visual, "a仮") && !strcmp(tb.buf, "a日本"));
+    g_cur->in = (GuiInput){.text_input_len = 3};
+    memcpy(g_cur->in.text_input, "語", 4);
+    gui_text_buf_process(&tb);
+    assert(!strcmp(tb.buf, "a語") && tb.len == 4 && tb.cursor == 4 && tb.sel_start == tb.sel_end);
+    g_cur->in = (GuiInput){.key_a = true};
+    gui_text_buf_process(&tb);
+    assert(tb.sel_start == 0 && tb.sel_end == tb.len);
+    g_cur->in = (GuiInput){.key_left = true};
+    gui_text_buf_process(&tb);
+    assert(tb.cursor == 0 && tb.sel_start == tb.sel_end);
+    g_cur->in = (GuiInput){.key_right = true, .mod_shift = true};
+    gui_text_buf_process(&tb);
+    assert(tb.sel_start == 0 && tb.sel_end == 1);
+    g_cur->in = (GuiInput){.key_delete = true};
+    gui_text_buf_process(&tb);
+    assert(!strcmp(tb.buf, "語") && tb.cursor == 0);
+    g_cur->in = (GuiInput){.key_end = true};
+    gui_text_buf_process(&tb);
+    g_cur->in = (GuiInput){.key_backspace = true};
+    gui_text_buf_process(&tb);
+    assert(tb.len == 0 && tb.cursor == 0);
+
+    memset(tb.buf, 'a', GUI_MAX_TEXT_BUF - 1);
+    tb.buf[GUI_MAX_TEXT_BUF - 1] = '\0';
+    tb.len = tb.cursor = GUI_MAX_TEXT_BUF - 1;
+    tb.sel_start = tb.sel_end = tb.cursor;
+    assert(!gui_text_replace_selection(&tb, "語", 3));
+    tb.sel_start = tb.cursor - 3;
+    tb.sel_end = tb.cursor;
+    assert(gui_text_replace_selection(&tb, "語", 3));
+    assert(tb.len == GUI_MAX_TEXT_BUF - 1 && !strcmp(tb.buf + tb.len - 3, "語"));
+    tb.sel_start = 0; tb.sel_end = tb.len;
+    g_cur->in = (GuiInput){.key_x = true};
+    gui_text_buf_edit(&tb, false);
+    assert(tb.len == GUI_MAX_TEXT_BUF - 1);
+
+    Value label = hajimu_string("selection-api");
+    GuiTextBuf *field = gui_get_text_buf(gui_hash(label.string.data), "a日本b");
+    Value range[] = {label, hajimu_number(3), hajimu_number(1)};
+    assert(fn_text_select_range(3, range).boolean);
+    assert(field->sel_start == 7 && field->sel_end == 1 && field->cursor == 1);
+    Value pos[] = {label, hajimu_number(2)};
+    assert(fn_text_cursor_pos(2, pos).number == 2 && field->cursor == 4);
+    assert(field->sel_start == field->sel_end);
+    pos[1] = hajimu_number(NAN);
+    assert(fn_text_cursor_pos(2, pos).number == -1 && field->cursor == 4);
+    pos[1] = hajimu_number(1.5);
+    assert(fn_text_cursor_pos(2, pos).number == -1);
+    range[0] = hajimu_string("missing-field");
+    assert(!fn_text_select_range(3, range).boolean);
+    Value replace[] = {label, hajimu_string("日本"), hajimu_string("語")};
+    assert(fn_text_find_replace(3, replace).number == 1);
+    assert(field->len == 5 && !strcmp(field->buf, "a語b"));
+    assert(field->cursor == 4 && field->sel_start == field->sel_end);
+    char too_large[GUI_MAX_TEXT_BUF + 1];
+    memset(too_large, 'a', GUI_MAX_TEXT_BUF);
+    too_large[GUI_MAX_TEXT_BUF] = '\0';
+    replace[1] = hajimu_string("語");
+    replace[2] = hajimu_string(too_large);
+    assert(fn_text_find_replace(3, replace).number == -1);
+    assert(field->len == 5 && !strcmp(field->buf, "a語b"));
+    g_cur->in = (GuiInput){0};
+}
+
 int main(void) {
     size_t function_count = sizeof(gui_functions) / sizeof(gui_functions[0]);
     for (size_t i = 0; i < function_count; i++) {
@@ -136,6 +211,7 @@ int main(void) {
     g_cur = &g_apps[(int)app.number];
     check_ime_notifications();
     check_textarea_layout();
+    check_text_selection();
     char oversized[GUI_MAX_TEXT_BUF + 8];
     memset(oversized, 'a', GUI_MAX_TEXT_BUF - 2);
     memcpy(oversized + GUI_MAX_TEXT_BUF - 2, "日本", 7);
