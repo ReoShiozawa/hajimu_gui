@@ -7,6 +7,15 @@ int main(int argc, char **argv) {
     assert(argc == 2);
     @autoreleasepool {
         assert(hjp_init());
+        hjp_native_menubar_init();
+        hjp_native_menubar_begin_menu("Action Test");
+        hjp_native_menubar_add_item("Save", "Ctrl+S", 321);
+        NSMenuItem *save = [[NSApp.mainMenu itemWithTitle:@"Action Test"].submenu itemWithTag:321];
+        assert(save);
+        hjp_native_menubar_enable_item(321, false);
+        assert(!save.enabled);
+        hjp_native_menubar_enable_item(321, true);
+        assert(save.enabled);
         for (int i = 0; i < 20; i++) {
             __weak HjpWindowDelegate *delegate;
             @autoreleasepool {

@@ -354,6 +354,11 @@ typedef struct {
 
     bool valid;
     Value close_guard;
+    struct {
+        char id[128], label[256], key[32], modifiers[32], shortcut[96];
+        bool enabled, input_allowed, pending, consumed;
+    } actions[64];
+    int action_count;
 } GuiApp;
 
 static GuiApp  g_apps[GUI_MAX_APPS];
@@ -944,6 +949,7 @@ static void gui_nav_move(int direction) {
 }
 
 static void gui_nav_begin(void) {
+    g_cur->action_count = 0;
     g_cur->modal_entered = false;
     g_cur->modal_input_saved = false;
     g_cur->nav_current_count = 0;
@@ -3952,10 +3958,11 @@ static Value fn_menu_item(int argc, Value *argv) {
         if (g_native_build_phase) {
             hjp_native_menubar_add_item(name, shortcut, tag);
         }
+        hjp_native_menubar_enable_item(tag, !g_disabled);
         /* クリック検知 */
         bool clicked = (g_native_clicked_tag == tag);
         if (clicked) g_native_clicked_tag = 0;
-        return hajimu_bool(clicked);
+        return hajimu_bool(clicked && !g_disabled);
     }
 #endif
 
@@ -3971,7 +3978,7 @@ static Value fn_menu_item(int argc, Value *argv) {
 
     hjpBeginPath(vg);
     hjpRect(vg, g_menu_x, iy, GUI_MENU_W, GUI_MENU_ITEM_H);
-    bool hov = gui_hit((float)g_cur->in.mx, (float)g_cur->in.my,
+    bool hov = !g_disabled && gui_hit((float)g_cur->in.mx, (float)g_cur->in.my,
                         g_menu_x, iy, GUI_MENU_W, GUI_MENU_ITEM_H);
     hjpFillColor(vg, hov ? TH_ACCENT : TH_WIDGET_BG);
     hjpFill(vg);
@@ -3981,7 +3988,7 @@ static Value fn_menu_item(int argc, Value *argv) {
 
     hjpFontFaceId(vg, g_cur->font_id);
     hjpFontSize(vg, 14.0f);
-    hjpFillColor(vg, hov ? TH_CHECK : TH_TEXT);
+    hjpFillColor(vg, g_disabled ? TH_TEXT_DIM : (hov ? TH_CHECK : TH_TEXT));
     hjpTextAlign(vg, HJP_ALIGN_LEFT | HJP_ALIGN_MIDDLE);
     hjpText(vg, g_menu_x + 10.0f, iy + GUI_MENU_ITEM_H * 0.5f, name, NULL);
 
@@ -5340,6 +5347,8 @@ static Value fn_shortcut(int argc, Value *argv) {
 /* ---------------------------------------------------------------
  * カーソル設定(種類)
  * ---------------------------------------------------------------*/
+#include "hjp_actions.h"
+
 static Value fn_cursor_set(int argc, Value *argv) {
     if (argc < 1 || argv[0].type != VALUE_STRING) return hajimu_null();
     const char *kind = argv[0].string.data;
@@ -23333,6 +23342,7 @@ HAJIMU_PLUGIN_EXPORT bool hajimu_plugin_borrows_arguments(Value (*fn)(int, Value
         fn == fn_ellipsis_text || fn == fn_detail_row || fn == fn_small_button ||
         fn == fn_async_exec || fn == fn_task_progress || fn == fn_task_cancel ||
         fn == fn_task_state || fn == fn_task_release || fn == fn_task_notify ||
+        fn == fn_action_register || fn == fn_action_button || fn == fn_action_menu || fn == fn_action_take ||
         fn == fn_progress || fn == fn_text_input || fn == fn_combobox ||
         fn == fn_list || fn == fn_tab_bar || fn == fn_segment_control;
 }
@@ -23400,6 +23410,10 @@ static HajimuPluginFunc gui_functions[] = {
     {"メニューセパレーター", fn_menu_separator_item, 0, 0},
     {"ダイアログ",           fn_dialog,        2, 2},
     {"モーダル予約",         fn_modal_reserve, 1, 1},
+    {"アクション登録",       fn_action_register, 2, 3},
+    {"アクションボタン",     fn_action_button, 1, 1},
+    {"アクションメニュー",   fn_action_menu, 1, 1},
+    {"アクション受取",       fn_action_take, 1, 1},
     {"ファイルダイアログ",   fn_file_dialog,   0, 2},
     {"ファイルコピー",       fn_file_copy,     2, 2},
     {"file_copy",             fn_file_copy,     2, 2},
@@ -24676,7 +24690,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.9.0",
+        .version        = "14.10.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,

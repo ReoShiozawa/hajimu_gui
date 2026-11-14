@@ -300,6 +300,9 @@ void hjp_image_free(unsigned char *pixels);
 void     hjp_native_menubar_init(void);
 void     hjp_native_menubar_begin_menu(const char *title);
 void     hjp_native_menubar_add_item(const char *title, const char *shortcut, uint32_t tag);
+#ifdef __APPLE__
+void     hjp_native_menubar_enable_item(uint32_t tag, bool enabled);
+#endif
 void     hjp_native_menubar_add_separator(void);
 void     hjp_native_menubar_end_menu(void);
 uint32_t hjp_native_menubar_poll_clicked(void);

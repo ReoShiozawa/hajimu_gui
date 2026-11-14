@@ -118,9 +118,20 @@ void hjp_native_menubar_begin_menu(const char *title) {
                                                          action:nil
                                                   keyEquivalent:@""];
         g_buildingSubMenu = [[NSMenu alloc] initWithTitle:t];
+        g_buildingSubMenu.autoenablesItems = NO;
         [menuItem setSubmenu:g_buildingSubMenu];
         [[NSApp mainMenu] addItem:menuItem];
     }
+}
+
+static void hjp__enable_menu_item(NSMenu *menu, uint32_t tag, bool enabled) {
+    for (NSMenuItem *item in menu.itemArray) {
+        if ((uint32_t)item.tag == tag && item.action == @selector(menuAction:)) item.enabled = enabled;
+        if (item.submenu) hjp__enable_menu_item(item.submenu, tag, enabled);
+    }
+}
+void hjp_native_menubar_enable_item(uint32_t tag, bool enabled) {
+    hjp__enable_menu_item(NSApp.mainMenu, tag, enabled);
 }
 
 void hjp_native_menubar_add_item(const char *title, const char *shortcut, uint32_t tag) {
