@@ -769,6 +769,84 @@ static void check_modal_stack(void) {
     hjpCancelFrame(g_cur->vg);
 }
 
+static void check_modal_forms(void) {
+    frame(false, false, 500); gui_nav_begin();
+    Value parent = modal_list("form", NULL), none = modal_list(NULL, NULL);
+    Value options = make_dict(); dict_set(&options, "幅", hajimu_number(600)); dict_set(&options, "高さ", hajimu_number(340));
+    Value args[] = {hajimu_string("form"), hajimu_bool(true), options};
+    int baseline = g_cur->text_buf_count;
+    for (int i = 0; i < 200; i++) {
+        assert(fn_modal_reserve(1, &parent).boolean);
+        assert(fn_dialog_begin(3, args).boolean);
+        GuiTextBuf *tb = gui_get_text_buf(gui_hash("value"), i % 2 ? "second" : "first");
+        assert(tb && !strcmp(tb->buf, i % 2 ? "second" : "first") && tb->modal_epoch != 0);
+        assert(fn_dialog_end(0, NULL).boolean);
+        assert(fn_modal_reserve(1, &none).boolean && g_cur->text_buf_count == baseline);
+        hjpCancelFrame(g_cur->vg);
+    }
+    uint64_t serial = g_cur->modal_epoch_counter;
+    g_cur->modal_epoch_counter = UINT64_MAX;
+    assert(!fn_modal_reserve(1, &parent).boolean && !g_cur->modal_count);
+    g_cur->modal_epoch_counter = serial;
+    assert(fn_modal_reserve(1, &parent).boolean);
+    int depth = hjpStateDepth(g_cur->vg);
+    dict_set(&options, "幅", hajimu_number(NAN)); args[2] = options;
+    assert(!fn_dialog_begin(3, args).boolean && hjpStateDepth(g_cur->vg) == depth);
+    dict_set(&options, "幅", hajimu_number(1e20)); dict_set(&options, "高さ", hajimu_number(1e20)); args[2] = options;
+    assert(fn_dialog_begin(3, args).boolean);
+    GuiDialogScope *scope = &g_dialog_scopes[g_cur - g_apps][0];
+    assert(scope->content_x >= 16 && scope->content_y >= 56);
+    assert(scope->content_x + scope->content_w <= g_cur->win_w - 16);
+    assert(scope->content_y + scope->content_h <= g_cur->win_h - 16);
+    assert(fn_dialog_end(0, NULL).boolean);
+    fn_modal_reserve(1, &none); gui_nav_end(); hjpCancelFrame(g_cur->vg);
+}
+
+static void check_form_scrolling(void) {
+    frame(false, false, 500);
+    Value dimensions[] = {hajimu_number(220), hajimu_number(100)};
+    Value slot = fn_scroll_begin(2, dimensions);
+    assert(slot.number >= 0);
+    GuiScrollRegion *region = &g_scrolls[(int)slot.number];
+    region->scroll_y = 0; g_cur->lay.y = region->y + 500;
+    g_cur->in.mx = (int)region->x + 10; g_cur->in.my = (int)region->y + 10; g_cur->in.scroll_y = -1;
+    fn_scroll_end(1, &slot);
+    assert(region->scroll_y == 30 && !g_cur->in.scroll_y);
+    frame(false, false, 500); slot = fn_scroll_begin(2, dimensions);
+    g_cur->lay.y = region->y + 500 - region->scroll_y;
+    g_cur->in.mx = (int)(region->x + region->w - 5); g_cur->in.my = (int)region->y + 90;
+    g_cur->in.down = g_cur->in.clicked = true;
+    fn_scroll_end(1, &slot);
+    assert(region->scroll_y == 400 && !g_cur->in.clicked);
+    frame(false, false, 500); slot = fn_scroll_begin(2, dimensions);
+    g_cur->lay.y = region->y + 20 - region->scroll_y;
+    fn_scroll_end(1, &slot);
+    assert(region->scroll_y == 0 && !g_cur->active);
+    frame(false, false, 500); slot = fn_scroll_begin(2, dimensions);
+    region->scroll_y = 200; g_cur->lay.y = region->y + 300;
+    g_cur->in.mx = (int)(region->x + region->w - 5);
+    g_cur->in.my = (int)region->y + 43;
+    g_cur->in.down = g_cur->in.clicked = true;
+    fn_scroll_end(1, &slot);
+    assert(region->scroll_y == 200 && region->drag_offset == 3);
+    frame(false, false, 500); slot = fn_scroll_begin(2, dimensions);
+    g_cur->lay.y = region->y + 300;
+    g_cur->in.mx = (int)(region->x + region->w - 5);
+    g_cur->in.my = (int)region->y + 53; g_cur->in.down = true;
+    fn_scroll_end(1, &slot);
+    assert(region->scroll_y == 250);
+    g_cur->active = 0;
+    frame(false, false, 500); slot = fn_scroll_begin(2, dimensions);
+    g_cur->lay.y = region->y + 250;
+    g_cur->in.mx = (int)region->x + 10; g_cur->in.my = (int)region->y + 10;
+    g_cur->in.scroll_y = -1; g_disabled = true;
+    fn_scroll_end(1, &slot); g_disabled = false;
+    assert(region->scroll_y == 250 && g_cur->in.scroll_y == -1);
+    Value bad = hajimu_number(NAN); fn_scroll_end(1, &bad);
+    dimensions[0] = bad; assert(fn_scroll_begin(2, dimensions).number == -1);
+    hjpCancelFrame(g_cur->vg);
+}
+
 static int event_callback_tag, event_guard_tag, event_callbacks, event_guards;
 static bool event_model_committed, event_overflow;
 static Value window_event_observe(Value *callback, int argc, Value *argv) {
@@ -851,6 +929,11 @@ int main(void) {
     Value app = fn_app_create(3, app_args);
     assert(app.type == VALUE_NUMBER);
     g_cur = &g_apps[(int)app.number];
+    hjp_window_set_size(g_cur->window, 620, 380);
+    int client_width, client_height;
+    hjp_window_get_size(g_cur->window, &client_width, &client_height);
+    assert(client_width == 620 && client_height == 380);
+    hjp_window_set_size(g_cur->window, 640, 400);
     check_ime_notifications();
     check_textarea_layout();
     check_text_selection();
@@ -863,6 +946,8 @@ int main(void) {
     check_window_routing();
     check_window_close_input();
     check_modal_stack();
+    check_modal_forms();
+    check_form_scrolling();
     char oversized[GUI_MAX_TEXT_BUF + 8];
     memset(oversized, 'a', GUI_MAX_TEXT_BUF - 2);
     memcpy(oversized + GUI_MAX_TEXT_BUF - 2, "日本", 7);

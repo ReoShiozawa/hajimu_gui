@@ -997,8 +997,9 @@ void hjp_window_set_title(HjpWindow *win, const char *title) {
     @autoreleasepool { [win->nswin setTitle:[NSString stringWithUTF8String:title]]; }
 }
 void hjp_window_set_size(HjpWindow *win, int w, int h) {
-    NSRect f = [win->nswin frame]; f.size = NSMakeSize(w, h);
-    [win->nswin setFrame:f display:YES];
+    if (!win || w <= 0 || h <= 0) return;
+    /* 作成/取得と同じく内容領域の寸法。外枠指定ではタイトルバー分が欠ける。 */
+    [win->nswin setContentSize:NSMakeSize(w, h)];
 }
 void hjp_window_get_size(HjpWindow *win, int *w, int *h) {
     NSRect f = [[win->nswin contentView] frame];

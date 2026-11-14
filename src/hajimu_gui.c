@@ -272,6 +272,7 @@ typedef struct {
 /* --- テキスト入力バッファ (Phase 3) --- */
 typedef struct {
     uint32_t id;                /* ウィジェット ID                  */
+    uint64_t modal_epoch;       /* 0は通常領域、その他は予約の世代 */
     char     buf[GUI_MAX_TEXT_BUF]; /* UTF-8 テキスト         */
     int      len;               /* バイト長                         */
     int      cursor;            /* カーソル位置 (バイトオフセット) */
@@ -338,9 +339,11 @@ typedef struct {
     struct {
         char title[256];
         uint32_t restore_nav, restore_text;
+        uint64_t epoch;
         bool drawn;
     } modals[GUI_MAX_MODALS];
     int modal_count;
+    uint64_t modal_epoch_counter;
     bool modal_focus_pending, modal_focus_validate;
     char composition[128];
     uint32_t text_drag;
@@ -739,6 +742,7 @@ static float g_min_w = 0, g_min_h = 0, g_max_w = 0, g_max_h = 0;
 typedef struct {
     float x, y, w, h;        /* 表示領域 */
     float scroll_y;           /* 現在のスクロール位置 */
+    float drag_offset;        /* つまみ内で押した位置を保持する */
     float content_h;          /* コンテンツ全高 */
     float saved_x, saved_y, saved_w;  /* レイアウト復元用 */
     int   saved_scope_depth;  /* 子領域内で外側の横並びを停止する */
@@ -905,6 +909,7 @@ typedef struct {
     GuiHorizontalGroup horizontal[GUI_MAX_PANELS];
     int saved_scope_depth[GUI_MAX_PANELS];
     int panel_depth, horizontal_depth, layout_depth, render_depth, modal_index;
+    uint64_t modal_epoch;
     GuiScrollRegion scrolls[GUI_MAX_SCROLL];
     GuiGrid grids[GUI_MAX_GRID];
     GuiGroup groups[GUI_MAX_GROUP];
@@ -2703,6 +2708,14 @@ static int utf8_next(const char *s, int pos, int len) {
 /* ID でバッファを検索、なければ新規作成 */
 static GuiTextBuf *gui_get_text_buf(uint32_t id, const char *init_val) {
     GuiApp *app = g_cur;
+    uint64_t epoch = 0;
+    int depth = g_dialog_depth[app - g_apps];
+    if (depth) {
+        epoch = g_dialog_scopes[app - g_apps][depth - 1].modal_epoch;
+        bool live = false;
+        for (int i = 0; i < app->modal_count; i++) if (app->modals[i].epoch == epoch) live = true;
+        if (!live) return NULL;
+    }
     for (int i = 0; i < app->text_buf_count; i++) {
         if (app->text_bufs[i].id == id) return &app->text_bufs[i];
     }
@@ -2711,6 +2724,7 @@ static GuiTextBuf *gui_get_text_buf(uint32_t id, const char *init_val) {
     GuiTextBuf *tb = &app->text_bufs[app->text_buf_count++];
     memset(tb, 0, sizeof(*tb));
     tb->id = id;
+    tb->modal_epoch = epoch;
     if (init_val && *init_val) {
         int length = (int)strnlen(init_val, GUI_MAX_TEXT_BUF + 4);
         int n = length < GUI_MAX_TEXT_BUF ? length :
@@ -4694,9 +4708,17 @@ static Value fn_modal_reserve(int argc, Value *argv) {
     int common = 0;
     while (common < count && common < g_cur->modal_count && !strcmp(titles[common], g_cur->modals[common].title)) common++;
     bool changed = common != count || common != g_cur->modal_count;
+    if ((uint64_t)(count - common) > UINT64_MAX - g_cur->modal_epoch_counter) return hajimu_bool(false);
     if (changed) {
         while (g_cur->modal_count > common) {
             int old = --g_cur->modal_count;
+            /* 覆われた親は保持し、閉じた段だけを消して次回の初期値を反映する。 */
+            int write = 0, previous = g_cur->text_buf_count;
+            for (int read = 0; read < previous; read++)
+                if (g_cur->text_bufs[read].modal_epoch != g_cur->modals[old].epoch)
+                    g_cur->text_bufs[write++] = g_cur->text_bufs[read];
+            memset(g_cur->text_bufs + write, 0, (size_t)(previous - write) * sizeof(GuiTextBuf));
+            g_cur->text_buf_count = write;
             g_cur->nav_focus = g_cur->modals[old].restore_nav;
             g_cur->focused = g_cur->modals[old].restore_text;
             memset(&g_cur->modals[old], 0, sizeof(g_cur->modals[old]));
@@ -4705,6 +4727,7 @@ static Value fn_modal_reserve(int argc, Value *argv) {
             int next = g_cur->modal_count++;
             g_cur->modals[next].restore_nav = g_cur->nav_focus;
             g_cur->modals[next].restore_text = g_cur->focused;
+            g_cur->modals[next].epoch = ++g_cur->modal_epoch_counter;
             snprintf(g_cur->modals[next].title, sizeof(g_cur->modals[next].title), "%s", titles[next]);
             memset(g_dialog_scrolls[g_cur - g_apps][next], 0, sizeof(g_dialog_scrolls[0][0]));
             g_cur->nav_focus = g_cur->focused = 0;
@@ -4739,6 +4762,25 @@ static Value fn_modal_reserve(int argc, Value *argv) {
     return hajimu_bool(true);
 }
 
+static bool gui_dialog_dimensions(int argc, Value *argv, float *width, float *height) {
+    *width = fmaxf(300, g_cur->win_w * 0.5f);
+    *height = fmaxf(200, g_cur->win_h * 0.5f);
+    if (argc == 3) {
+        if (argv[2].type != VALUE_DICT) return false;
+        for (int i = 0; i < argv[2].dict.length; i++) {
+            const char *key = argv[2].dict.keys[i];
+            Value value = argv[2].dict.values[i];
+            if (value.type != VALUE_NUMBER || !isfinite(value.number) || value.number <= 0) return false;
+            if (!strcmp(key, "幅")) *width = (float)fmin(value.number, g_cur->win_w);
+            else if (!strcmp(key, "高さ")) *height = (float)fmin(value.number, g_cur->win_h);
+            else return false;
+        }
+    }
+    *width = fminf(*width, fmaxf(0, g_cur->win_w - 32));
+    *height = fminf(*height, fmaxf(0, g_cur->win_h - 32));
+    return *width >= 80 && *height > 40;
+}
+
 static Value fn_dialog(int argc, Value *argv) {
     if (!g_cur || argc < 2 || argv[0].type != VALUE_STRING)
         return hajimu_bool(false);
@@ -4747,6 +4789,8 @@ static Value fn_dialog(int argc, Value *argv) {
     if (argv[1].type == VALUE_BOOL)   is_open = argv[1].boolean;
     else if (argv[1].type == VALUE_NUMBER) is_open = (argv[1].number != 0);
     if (!is_open) return hajimu_bool(false);
+    float dw, dh;
+    if (!gui_dialog_dimensions(argc, argv, &dw, &dh)) return hajimu_bool(false);
 
     if (g_cur->modal_title[0]) {
         int index = -1;
@@ -4769,9 +4813,6 @@ static Value fn_dialog(int argc, Value *argv) {
     hjpFillColor(vg, hjpRGBA(0, 0, 0, 140));
     hjpFill(vg);
 
-    float dw = ww * 0.5f, dh = wh * 0.5f;
-    if (dw < 300) dw = 300;
-    if (dh < 200) dh = 200;
     float dx = (ww - dw) * 0.5f, dy = (wh - dh) * 0.5f;
 
     hjpBeginPath(vg);
@@ -4802,9 +4843,11 @@ static Value fn_dialog(int argc, Value *argv) {
 /* 新しい範囲付きダイアログは独立したレイアウト/ID/クリップ領域を持つ。
  * 旧ダイアログの呼出規約は変えず、明示的な開始/終了を追加する。 */
 static Value fn_dialog_begin(int argc, Value *argv) {
-    if (!g_cur || g_cur->closing || argc != 2 || argv[0].type != VALUE_STRING ||
+    if (!g_cur || g_cur->closing || (argc != 2 && argc != 3) || argv[0].type != VALUE_STRING ||
         !((argv[1].type == VALUE_BOOL && argv[1].boolean) ||
           (argv[1].type == VALUE_NUMBER && argv[1].number != 0))) return hajimu_bool(false);
+    float width, height;
+    if (!gui_dialog_dimensions(argc, argv, &width, &height)) return hajimu_bool(false);
     int owner = (int)(g_cur - g_apps), index = -1;
     for (int i = 0; i < g_cur->modal_count; i++) if (!strcmp(g_cur->modals[i].title, argv[0].string.data)) index = i;
     if (index < 0 || g_cur->modals[index].drawn || g_dialog_depth[owner] >= GUI_MAX_MODALS) return hajimu_bool(false);
@@ -4813,6 +4856,7 @@ static Value fn_dialog_begin(int argc, Value *argv) {
     hjpSave(g_cur->vg);
     if (hjpStateDepth(g_cur->vg) != scope->render_depth + 1) return hajimu_bool(false);
     scope->modal_index = index;
+    scope->modal_epoch = g_cur->modals[index].epoch;
     scope->lay = g_cur->lay; scope->last = g_cur->last;
     scope->panel_depth = g_cur->panel_depth; scope->horizontal_depth = g_cur->horizontal_depth;
     scope->layout_depth = g_cur->layout_scope_depth;
@@ -4841,7 +4885,7 @@ static Value fn_dialog_begin(int argc, Value *argv) {
     hjpResetTransform(g_cur->vg); hjpResetScissor(g_cur->vg); hjpGlobalAlpha(g_cur->vg, 1);
     Value result = fn_dialog(argc, argv);
     scope->content_x = g_cur->lay.x; scope->content_y = g_cur->lay.y;
-    scope->content_w = g_cur->lay.w; scope->content_h = fmaxf(200, g_cur->win_h * 0.5f) - 40;
+    scope->content_w = g_cur->lay.w; scope->content_h = height - 40;
     hjpIntersectScissor(g_cur->vg, scope->content_x, scope->content_y, scope->content_w, scope->content_h);
     return result;
 }
@@ -4856,7 +4900,7 @@ static bool gui_dialog_scope_end(void) {
     for (int i = 0; i < GUI_MAX_SCROLL; i++) if (g_scrolls[i].active) balanced = false;
     for (int i = 0; i < GUI_MAX_GRID; i++) if (g_grids[i].active) balanced = false;
     for (int i = 0; i < GUI_MAX_GROUP; i++) if (g_groups[i].active) balanced = false;
-    if (scope->modal_index < g_cur->modal_count && !strcmp(g_cur->modals[scope->modal_index].title, scope->dialog_title)) {
+    if (scope->modal_index < g_cur->modal_count && g_cur->modals[scope->modal_index].epoch == scope->modal_epoch) {
         memcpy(g_dialog_scrolls[owner][scope->modal_index], g_scrolls, sizeof(g_scrolls));
         for (int i = 0; i < GUI_MAX_SCROLL; i++) g_dialog_scrolls[owner][scope->modal_index][i].active = false;
     }
@@ -7029,6 +7073,7 @@ static Value fn_scroll_begin(int argc, Value *argv) {
 
     float sw = (argv[0].type == VALUE_NUMBER) ? (float)argv[0].number : 200.0f;
     float sh = (argv[1].type == VALUE_NUMBER) ? (float)argv[1].number : 200.0f;
+    if (!isfinite(sw) || !isfinite(sh)) return hajimu_number(-1);
 
     /* 空きスロット探索 */
     int slot = -1;
@@ -7057,7 +7102,7 @@ static Value fn_scroll_begin(int argc, Value *argv) {
     /* クリッピング設定 */
     Hjpcontext *vg = g_cur->vg;
     hjpSave(vg);
-    hjpScissor(vg, x, y, sw - GUI_SCROLLBAR_W, sh);
+    hjpIntersectScissor(vg, x, y, fmaxf(0, sw - GUI_SCROLLBAR_W), sh);
 
     /* レイアウトをスクロール領域内に変更 */
     g_cur->lay.x = x + 2;
@@ -7075,7 +7120,8 @@ static Value fn_scroll_begin(int argc, Value *argv) {
 static Value fn_scroll_end(int argc, Value *argv) {
     if (!g_cur || argc < 1) return hajimu_null();
 
-    int slot = (argv[0].type == VALUE_NUMBER) ? (int)argv[0].number : -1;
+    int slot = argv[0].type == VALUE_NUMBER && isfinite(argv[0].number) && argv[0].number >= 0 &&
+        argv[0].number < GUI_MAX_SCROLL && floor(argv[0].number) == argv[0].number ? (int)argv[0].number : -1;
     if (slot < 0 || slot >= GUI_MAX_SCROLL || !g_scrolls[slot].active)
         return hajimu_null();
 
@@ -7092,30 +7138,47 @@ static Value fn_scroll_end(int argc, Value *argv) {
     hjpFillColor(vg, TH_TRACK);
     hjpFill(vg);
 
+    uint32_t sbid = gui_hash("__scroll__") + (uint32_t)slot;
     /* スクロールバーつまみ */
     if (sr->content_h > sr->h) {
         float ratio = sr->h / sr->content_h;
-        float thumb_h = sr->h * ratio;
-        if (thumb_h < 20) thumb_h = 20;
+        float thumb_h = fminf(sr->h, fmaxf(20, sr->h * ratio));
         float thumb_y = sr->y + (sr->scroll_y / (sr->content_h - sr->h)) * (sr->h - thumb_h);
 
-        uint32_t sbid = gui_hash("__scroll__") + (uint32_t)slot;
         bool hov = false, prs = false;
+        bool was_active = g_cur->active == sbid;
         gui_widget_logic(sbid, sbx, sr->y, GUI_SCROLLBAR_W, sr->h, &hov, &prs);
+        if (!was_active && g_cur->active == sbid) {
+            float offset = g_cur->in.my - thumb_y;
+            sr->drag_offset = offset >= 0 && offset <= thumb_h ? offset : thumb_h * 0.5f;
+        }
 
         /* マウスホイール対応（簡易） */
-        if (gui_hit((float)g_cur->in.mx, (float)g_cur->in.my, sr->x, sr->y, sr->w, sr->h) && g_cur->in.scroll_y != 0) {
+        float vx = sr->x, vy = sr->y, vw = sr->w, vh = sr->h;
+        bool interactive = !g_disabled && !g_cur->closing && (!g_cur->modal_title[0] || g_cur->modal_entered);
+        bool visible = gui_visible_rect(&vx, &vy, &vw, &vh);
+        float old_scroll = sr->scroll_y;
+        if (interactive && visible && gui_hit(g_cur->in.mx, g_cur->in.my, vx, vy, vw, vh) && g_cur->in.scroll_y != 0) {
             sr->scroll_y -= (float)g_cur->in.scroll_y * 30.0f;
         }
         if (sr->scroll_y < 0) sr->scroll_y = 0;
         float max_scroll = sr->content_h - sr->h;
         if (sr->scroll_y > max_scroll) sr->scroll_y = max_scroll;
+        if (interactive && g_cur->active == sbid && g_cur->in.down && sr->h > thumb_h) {
+            float ratio = (g_cur->in.my - sr->y - sr->drag_offset) / (sr->h - thumb_h);
+            sr->scroll_y = fmaxf(0, fminf(1, ratio)) * max_scroll;
+            g_cur->in.clicked = false;
+        }
+        if (old_scroll != sr->scroll_y) g_cur->in.scroll_y = 0;
         thumb_y = sr->y + (sr->scroll_y / max_scroll) * (sr->h - thumb_h);
 
         hjpBeginPath(vg);
         hjpRoundedRect(vg, sbx + 1, thumb_y, GUI_SCROLLBAR_W - 2, thumb_h, 4.0f);
         hjpFillColor(vg, hov ? TH_ACCENT_HOVER : TH_ACCENT);
         hjpFill(vg);
+    } else {
+        sr->scroll_y = 0;
+        if (g_cur->active == sbid) g_cur->active = 0;
     }
 
     /* 枠線 */
@@ -24325,7 +24388,7 @@ static HajimuPluginFunc gui_functions[] = {
     {"メニュー項目",         fn_menu_item,     1, 2},
     {"メニューセパレーター", fn_menu_separator_item, 0, 0},
     {"ダイアログ",           fn_dialog,        2, 2},
-    {"ダイアログ開始",       fn_dialog_begin,  2, 2},
+    {"ダイアログ開始",       fn_dialog_begin,  2, 3},
     {"ダイアログ終了",       fn_dialog_end,    0, 0},
     {"モーダル予約",         fn_modal_reserve, 1, 1},
     {"アクション登録",       fn_action_register, 2, 3},
@@ -25676,7 +25739,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.27.0",
+        .version        = "14.28.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,
