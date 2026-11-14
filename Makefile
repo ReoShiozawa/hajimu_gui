@@ -61,10 +61,13 @@ endif
 FONT_DIR  = fonts
 FONT_FILE = NotoSansCJKjp-Regular.otf
 
-.PHONY: all clean install uninstall help
+.PHONY: all clean install uninstall help audit-check
 
 all: $(OUT)
 	@echo "  ビルド完了: $(OUT)"
+
+audit-check:
+	node tests/audit-api-stubs.mjs --check
 
 $(OUT): $(SRC_C) $(SRC_PLATFORM) $(wildcard src/*.h) Makefile $(HAJIMU_INCLUDE)/hajimu_plugin.h $(HAJIMU_INCLUDE)/hajimu_abi.h
 	$(CC) $(CFLAGS) -o $@ $(SRC_C) $(SRC_PLATFORM) $(LDFLAGS)

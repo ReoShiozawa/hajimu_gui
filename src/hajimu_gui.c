@@ -23473,7 +23473,11 @@ HAJIMU_PLUGIN_EXPORT bool hajimu_plugin_borrows_arguments(Value (*fn)(int, Value
 }
 
 /* 関数テーブル */
+static Value fn_api_status(int argc, Value *argv);
+static Value fn_api_inventory(int argc, Value *argv);
 static HajimuPluginFunc gui_functions[] = {
+    {"API対応状態", fn_api_status, 1, 1},
+    {"API対応一覧", fn_api_inventory, 0, 0},
     {"利用可能幅", fn_available_width, 0, 0},
     {"制約幅", fn_constrained_widths, 2, 3},
     {"省略テキスト", fn_ellipsis_text, 1, 2},
@@ -24820,13 +24824,59 @@ static HajimuPluginFunc gui_functions[] = {
     {"DevToolsオプション",    fn_DevToolsオプション,    2, 2},
 };
 
+#include "hjp_api_audit.h"
+static Value fn_api_status(int argc, Value *argv) {
+    Value result = make_dict();
+    if (argc < 1 || argv[0].type != VALUE_STRING) return result;
+    HajimuPluginFunc *found = NULL;
+    for (size_t i = 0; i < sizeof(gui_functions) / sizeof(gui_functions[0]); i++)
+        if (strcmp(gui_functions[i].name, argv[0].string.data) == 0) { found = &gui_functions[i]; break; }
+    const char *state = found ? "未検証" : "未登録";
+    const char *reason = found ? "登録を確認。機能全体やOS別の動作を保証する判定ではありません" : "このバイナリには登録されていません";
+    if (found) {
+        for (size_t i = 0; i < sizeof(gui_constant_return_candidates) / sizeof(gui_constant_return_candidates[0]); i++)
+            if (strcmp(found->name, gui_constant_return_candidates[i]) == 0) {
+                state = "固定返却・要確認";
+                reason = "静的監査で固定返却だけの実装を検出。意図した定数関数か未実装かは個別確認が必要";
+                break;
+            }
+        if (found->fn == fn_ime_composition) {
+            state = "未実装"; reason = "コールバック引数を利用していません";
+        } else if (found->fn == fn_async_exec || found->fn == fn_task_progress || found->fn == fn_task_notify) {
+            state = "部分対応"; reason = "POSIXプロセスタスクのみ。任意クロージャの隔離実行・Windowsは未対応";
+        } else if (found->fn == fn_a11y_name || found->fn == fn_a11y_desc || found->fn == fn_a11y_role || found->fn == fn_sr_announce) {
+            state = "部分対応"; reason = "macOSの一部部品のみ。入力欄・他OS・実読み上げは未検証または未対応";
+        } else if (found->fn == fn_focus_traversal) {
+            state = "部分対応"; reason = "明示有効化する基本部品のフォーカス移動。全ウィジェットへの適用は未完了";
+        }
+    }
+    dict_set(&result, "名前", hajimu_string(argv[0].string.data));
+    dict_set(&result, "登録", hajimu_bool(found != NULL));
+    dict_set(&result, "状態", hajimu_string(state));
+    dict_set(&result, "理由", hajimu_string(reason));
+    if (found) {
+        dict_set(&result, "最小引数", hajimu_number(found->min_args));
+        dict_set(&result, "最大引数", hajimu_number(found->max_args));
+    }
+    return result;
+}
+static Value fn_api_inventory(int argc, Value *argv) {
+    (void)argc; (void)argv;
+    Value result = hajimu_array();
+    for (size_t i = 0; i < sizeof(gui_functions) / sizeof(gui_functions[0]); i++) {
+        Value name = {0}; name.type = VALUE_STRING; name.string.data = (char *)gui_functions[i].name;
+        hajimu_array_push(&result, fn_api_status(1, &name));
+    }
+    return result;
+}
+
 /* プラグイン初期化 */
 HAJIMU_PLUGIN_ABI_EXPORT()
 
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.13.0",
+        .version        = "14.14.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,
