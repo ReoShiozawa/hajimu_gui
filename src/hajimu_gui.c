@@ -312,6 +312,10 @@ typedef struct {
     uint32_t active;            /* 操作中ウィジェット ID            */
     uint32_t nav_focus;
     bool nav_enabled;
+    char modal_title[256];
+    bool modal_entered, modal_input_saved;
+    GuiInput modal_input;
+    uint32_t modal_restore_focus;
     uint32_t nav_previous[512], nav_current[512];
     int nav_previous_count, nav_current_count;
     /* 上限付きの一覧状態。別ウィンドウや剰余の一致で状態を共有しない。 */
@@ -937,6 +941,8 @@ static void gui_nav_move(int direction) {
 }
 
 static void gui_nav_begin(void) {
+    g_cur->modal_entered = false;
+    g_cur->modal_input_saved = false;
     g_cur->nav_current_count = 0;
     if (g_cur->nav_enabled && g_cur->in.key_tab &&
         (!g_cur->focused || g_cur->focused == g_cur->nav_focus)) {
@@ -962,7 +968,8 @@ static void gui_nav_end(void) {
 }
 
 static bool gui_nav_register(uint32_t id, float x, float y, float w, float h) {
-    if (!g_cur->nav_enabled || g_disabled || w <= 0 || h <= 0) return false;
+    if (!g_cur->nav_enabled || g_disabled || w <= 0 || h <= 0 ||
+        (g_cur->modal_title[0] && !g_cur->modal_entered)) return false;
     bool registered = false;
     for (int i = 0; i < g_cur->nav_current_count; i++)
         if (g_cur->nav_current[i] == id) registered = true;
@@ -3981,6 +3988,37 @@ static Value fn_menu_separator_item(int argc, Value *argv) {
 /* ---------------------------------------------------------------
  * ダイアログ(タイトル, 開閉) → 真偽
  * ---------------------------------------------------------------*/
+/* 描画より先に予約し、背後の独自入力処理にも空のフレーム入力を渡す。 */
+static Value fn_modal_reserve(int argc, Value *argv) {
+    if (!g_cur || argc < 1 || argv[0].type != VALUE_STRING ||
+        strlen(argv[0].string.data) >= sizeof(g_cur->modal_title)) return hajimu_bool(false);
+    const char *title = argv[0].string.data;
+    bool changed = strcmp(title, g_cur->modal_title) != 0;
+    if (changed) {
+        if (!g_cur->modal_title[0] && title[0]) g_cur->modal_restore_focus = g_cur->nav_focus;
+        g_cur->nav_focus = title[0] ? 0 : g_cur->modal_restore_focus;
+        g_cur->nav_previous_count = g_cur->nav_current_count = 0;
+        g_cur->focused = g_cur->active = 0;
+        hjp_stop_text_input();
+        snprintf(g_cur->modal_title, sizeof(g_cur->modal_title), "%s", title);
+    }
+    if (!title[0]) return hajimu_bool(true);
+    if (!g_cur->modal_input_saved) {
+        g_cur->modal_input = g_cur->in;
+        g_cur->modal_input_saved = true;
+    }
+    if (changed) {
+        /* 開いた操作の押下/キーをダイアログ内へ二重配送しない。 */
+        memset(&g_cur->modal_input, 0, sizeof(GuiInput));
+        g_cur->modal_input.mx = g_cur->in.mx;
+        g_cur->modal_input.my = g_cur->in.my;
+    }
+    memset(&g_cur->in, 0, sizeof(GuiInput));
+    g_cur->in.mx = g_cur->in.my = -100000;
+    g_cur->modal_entered = false;
+    return hajimu_bool(true);
+}
+
 static Value fn_dialog(int argc, Value *argv) {
     if (!g_cur || argc < 2 || argv[0].type != VALUE_STRING)
         return hajimu_bool(false);
@@ -3989,6 +4027,12 @@ static Value fn_dialog(int argc, Value *argv) {
     if (argv[1].type == VALUE_BOOL)   is_open = argv[1].boolean;
     else if (argv[1].type == VALUE_NUMBER) is_open = (argv[1].number != 0);
     if (!is_open) return hajimu_bool(false);
+
+    if (g_cur->modal_title[0]) {
+        if (strcmp(g_cur->modal_title, argv[0].string.data) != 0) return hajimu_bool(false);
+        if (!g_cur->modal_entered && g_cur->modal_input_saved) g_cur->in = g_cur->modal_input;
+        g_cur->modal_entered = true;
+    }
 
     Hjpcontext *vg = g_cur->vg;
     const char *title = argv[0].string.data;
@@ -23233,6 +23277,7 @@ static HajimuPluginFunc gui_functions[] = {
     {"メニュー項目",         fn_menu_item,     1, 2},
     {"メニューセパレーター", fn_menu_separator_item, 0, 0},
     {"ダイアログ",           fn_dialog,        2, 2},
+    {"モーダル予約",         fn_modal_reserve, 1, 1},
     {"ファイルダイアログ",   fn_file_dialog,   0, 2},
     {"ファイルコピー",       fn_file_copy,     2, 2},
     {"file_copy",             fn_file_copy,     2, 2},
@@ -24505,7 +24550,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.8.1",
+        .version        = "14.9.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,
