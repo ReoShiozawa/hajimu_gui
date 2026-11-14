@@ -930,11 +930,16 @@ static void gui_nav_move(int direction) {
     if (index < 0) index = direction < 0 ? 0 : -1;
     index = (index + (direction < 0 ? -1 : 1) + g_cur->nav_previous_count) % g_cur->nav_previous_count;
     g_cur->nav_focus = g_cur->nav_previous[index];
+    if (g_cur->focused) {
+        g_cur->focused = 0;
+        hjp_stop_text_input();
+    }
 }
 
 static void gui_nav_begin(void) {
     g_cur->nav_current_count = 0;
-    if (g_cur->nav_enabled && g_cur->in.key_tab && !g_cur->focused) {
+    if (g_cur->nav_enabled && g_cur->in.key_tab &&
+        (!g_cur->focused || g_cur->focused == g_cur->nav_focus)) {
         gui_nav_move(g_cur->in.mod_shift ? -1 : 1);
         g_cur->in.key_tab = false;
     }
@@ -944,22 +949,48 @@ static void gui_nav_end(void) {
     bool found = false;
     for (int i = 0; i < g_cur->nav_current_count; i++)
         if (g_cur->nav_current[i] == g_cur->nav_focus) found = true;
-    if (!found) g_cur->nav_focus = 0;
+    if (!found) {
+        if (g_cur->focused && g_cur->focused == g_cur->nav_focus) {
+            g_cur->focused = 0;
+            hjp_stop_text_input();
+        }
+        g_cur->nav_focus = 0;
+    }
     g_cur->nav_previous_count = g_cur->nav_current_count;
     memcpy(g_cur->nav_previous, g_cur->nav_current,
            (size_t)g_cur->nav_current_count * sizeof(uint32_t));
 }
 
-static bool gui_nav_control(uint32_t id, float x, float y, float w, float h) {
+static bool gui_nav_register(uint32_t id, float x, float y, float w, float h) {
     if (!g_cur->nav_enabled || g_disabled || w <= 0 || h <= 0) return false;
     bool registered = false;
     for (int i = 0; i < g_cur->nav_current_count; i++)
         if (g_cur->nav_current[i] == id) registered = true;
     if (!registered && g_cur->nav_current_count < 512)
         g_cur->nav_current[g_cur->nav_current_count++] = id;
-    if (g_cur->in.clicked && gui_hit(g_cur->in.mx, g_cur->in.my, x, y, w, h))
+    if (g_cur->in.clicked && gui_hit(g_cur->in.mx, g_cur->in.my, x, y, w, h)) {
+        if (g_cur->focused && g_cur->focused != id) {
+            g_cur->focused = 0;
+            hjp_stop_text_input();
+        }
         g_cur->nav_focus = id;
-    if (g_cur->nav_focus != id) return false;
+    }
+    return g_cur->nav_focus == id;
+}
+
+static void gui_nav_text(uint32_t id, float x, float y, float w, float h) {
+    if (gui_nav_register(id, x, y, w, h) && g_cur->focused != id) {
+        g_cur->focused = id;
+        hjp_start_text_input();
+    }
+    if (g_disabled && g_cur->focused == id) {
+        g_cur->focused = 0;
+        hjp_stop_text_input();
+    }
+}
+
+static bool gui_nav_control(uint32_t id, float x, float y, float w, float h) {
+    if (!gui_nav_register(id, x, y, w, h)) return false;
     Hjpcontext *vg = g_cur->vg;
     hjpBeginPath(vg); hjpRoundedRect(vg, x + 2, y + 2, fmaxf(0, w - 4), fmaxf(0, h - 4), 3);
     hjpStrokeColor(vg, TH_ACCENT); hjpStrokeWidth(vg, 2); hjpStroke(vg);
@@ -1932,6 +1963,7 @@ static Value fn_checkbox(int argc, Value *argv) {
 
     bool hov = false, pressed = false;
     bool clicked = gui_widget_logic(id, x, y, total_w, row_h, &hov, &pressed);
+    clicked = gui_nav_control(id, x, y, total_w, row_h) || clicked;
     if (clicked) checked = !checked;
 
     /* チェックボックス枠 */
@@ -2025,6 +2057,7 @@ static Value fn_radio(int argc, Value *argv) {
     hjpTextAlign(vg, HJP_ALIGN_LEFT | HJP_ALIGN_MIDDLE);
     hjpText(vg, cx + GUI_RADIO_RADIUS + 8.0f, cy, label, NULL);
 
+    clicked = gui_nav_control(id, x, y, total_w, row_h) || clicked;
     gui_advance(row_h);
     return clicked ? hajimu_string(label) : argv[2];
 }
@@ -2410,10 +2443,11 @@ static Value fn_text_input(int argc, Value *argv) {
     float fw = avail_w - label_w;
     if (fw < 80.0f) fw = 80.0f;
 
+    gui_nav_text(id, fx, y, fw, GUI_INPUT_H);
     bool focused = (g_cur->focused == id);
 
     /* クリックでフォーカス */
-    bool hov = gui_hit((float)g_cur->in.mx, (float)g_cur->in.my,
+    bool hov = !g_disabled && gui_hit((float)g_cur->in.mx, (float)g_cur->in.my,
                         fx, y, fw, GUI_INPUT_H);
     if (g_cur->in.clicked) {
         if (hov) {
@@ -2511,8 +2545,9 @@ static Value fn_password_input(int argc, Value *argv) {
     float fw = avail_w - GUI_LABEL_W;
     if (fw < 80.0f) fw = 80.0f;
 
+    gui_nav_text(id, fx, y, fw, GUI_INPUT_H);
     bool focused = (g_cur->focused == id);
-    bool hov = gui_hit((float)g_cur->in.mx, (float)g_cur->in.my,
+    bool hov = !g_disabled && gui_hit((float)g_cur->in.mx, (float)g_cur->in.my,
                         fx, y, fw, GUI_INPUT_H);
     if (g_cur->in.clicked) {
         if (hov) { g_cur->focused = id; focused = true; hjp_start_text_input(); }
@@ -2710,8 +2745,9 @@ static Value fn_textarea(int argc, Value *argv) {
     float fw = avail_w;
     float fh = GUI_FONT_SIZE * 1.4f * lines + GUI_INPUT_PAD * 2;
 
+    gui_nav_text(id, x, y, fw, fh);
     bool focused = (g_cur->focused == id);
-    bool hov = gui_hit((float)g_cur->in.mx, (float)g_cur->in.my,
+    bool hov = !g_disabled && gui_hit((float)g_cur->in.mx, (float)g_cur->in.my,
                         x, y, fw, fh);
     if (g_cur->in.clicked) {
         if (hov) { g_cur->focused = id; focused = true; hjp_start_text_input(); }
