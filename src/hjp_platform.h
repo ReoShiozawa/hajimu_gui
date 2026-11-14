@@ -144,6 +144,7 @@ typedef struct {
 typedef struct {
     int button;
     int x, y;
+    HjpKeymod mod;
 } HjpMouseButtonEvent;
 
 typedef struct {

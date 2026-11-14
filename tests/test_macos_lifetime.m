@@ -25,6 +25,22 @@ int main(int argc, char **argv) {
                 assert(win != NULL);
                 if (i == 0) {
                     HjpOpenGLView *view = win->glview;
+                    g_hjp.evHead = g_hjp.evTail = 0;
+                    NSEvent *mouse = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDown
+                        location:NSMakePoint(25, 50) modifierFlags:NSEventModifierFlagShift
+                        timestamp:0 windowNumber:win->nswin.windowNumber context:nil
+                        eventNumber:0 clickCount:1 pressure:1];
+                    [view mouseDown:mouse];
+                    HjpEvent press;
+                    assert(hjp__popEvent(&press) && press.type == HJP_EVENT_MOUSEBUTTONDOWN);
+                    assert(press.button.mod & HJP_KMOD_SHIFT);
+                    mouse = [NSEvent mouseEventWithType:NSEventTypeLeftMouseUp
+                        location:NSMakePoint(25, 50) modifierFlags:0
+                        timestamp:0 windowNumber:win->nswin.windowNumber context:nil
+                        eventNumber:0 clickCount:1 pressure:0];
+                    [view mouseUp:mouse];
+                    assert(hjp__popEvent(&press) && press.type == HJP_EVENT_MOUSEBUTTONUP);
+                    assert(!(press.button.mod & HJP_KMOD_SHIFT));
                     [view setMarkedText:@"にほん" selectedRange:NSMakeRange(1, 1) replacementRange:NSMakeRange(NSNotFound, 0)];
                     assert(view.hasMarkedText);
                     assert(view.markedRange.length == 3);

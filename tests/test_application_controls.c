@@ -195,6 +195,71 @@ static void check_text_selection(void) {
     g_cur->in = (GuiInput){0};
 }
 
+static void check_text_navigation(void) {
+    frame(false, false, 500);
+    Hjpcontext *vg = g_cur->vg;
+    hjpFontFaceId(vg, g_cur->font_id);
+    hjpFontSize(vg, GUI_FONT_SIZE);
+    const char *text = "a日本b";
+    float first = hjpTextBounds(vg, 0, 0, text, text + 1, NULL);
+    float second = hjpTextBounds(vg, 0, 0, text, text + 4, NULL);
+    assert(gui_text_hit_offset(vg, text, text + 8, -100, false) == 0);
+    assert(gui_text_hit_offset(vg, text, text + 8, first + (second - first) * 0.25f, false) == 1);
+    assert(gui_text_hit_offset(vg, text, text + 8, first + (second - first) * 0.75f, false) == 4);
+    assert(gui_text_hit_offset(vg, text, text + 8, 10000, false) == 8);
+    GuiTextBuf tb = {.len = 14, .cursor = 5};
+    memcpy(tb.buf, "abcde\nx\nabcde", 14);
+    tb.len = (int)strlen(tb.buf);
+    uint32_t id = 123456;
+    g_cur->focused = id;
+    g_cur->in = (GuiInput){.key_down = true};
+    gui_textarea_navigate(&tb, id, false, 0, 0, 300, 100);
+    assert(tb.cursor == 7 && tb.preferred_x_valid);
+    g_cur->in.key_down = true;
+    gui_textarea_navigate(&tb, id, false, 0, 0, 300, 100);
+    assert(tb.cursor == tb.len);
+    g_cur->in = (GuiInput){.key_up = true, .mod_shift = true};
+    gui_textarea_navigate(&tb, id, false, 0, 0, 300, 100);
+    assert(tb.cursor == 7 && tb.sel_start == tb.len && tb.sel_end == 7);
+    g_cur->in = (GuiInput){.clicked = true, .down = true};
+    gui_text_mouse(&tb, id, true, 1);
+    assert(g_cur->text_drag == id && tb.cursor == 1 && tb.sel_start == 1 && !g_cur->in.clicked);
+    g_cur->in = (GuiInput){.down = true};
+    gui_text_mouse(&tb, id, false, tb.len);
+    assert(tb.sel_start == 1 && tb.sel_end == tb.len);
+    g_cur->in = (GuiInput){.released = true};
+    gui_text_mouse(&tb, id, false, 6);
+    assert(g_cur->text_drag == 0 && tb.cursor == 6 && tb.sel_start == 1);
+    g_cur->in = (GuiInput){.clicked = true, .down = true};
+    g_disabled = true;
+    gui_text_mouse(&tb, id, true, 0);
+    assert(tb.cursor == 6 && g_cur->text_drag == 0);
+    g_disabled = false;
+    gui_text_collapse(&tb, 1);
+    g_cur->in = (GuiInput){.clicked = true, .down = true, .mod_shift = true};
+    gui_text_mouse(&tb, id, true, 5);
+    assert(tb.sel_start == 1 && tb.sel_end == 5);
+    g_cur->in = (GuiInput){.down = true, .mx = 500, .my = 200};
+    gui_textarea_navigate(&tb, id, false, 0, 0, 300, 30);
+    assert(tb.scroll_y > 0 && tb.cursor == tb.len);
+    g_cur->in = (GuiInput){.released = true};
+    gui_text_mouse(&tb, id, false, tb.cursor);
+    assert(g_cur->text_drag == 0);
+    g_cur->in = (GuiInput){.clicked = true, .down = true};
+    gui_text_mouse(&tb, id, true, 5);
+    g_cur->in = (GuiInput){.released = true};
+    gui_text_mouse(&tb, id, false, 1);
+    assert(tb.sel_start == 5 && tb.sel_end == 1 && tb.cursor == 1);
+    GuiInput modifiers = {0};
+    gui_input_modifiers(&modifiers, HJP_KMOD_SHIFT);
+    assert(modifiers.mod_shift);
+    gui_input_modifiers(&modifiers, 0);
+    assert(!modifiers.mod_shift && !modifiers.mod_ctrl);
+    g_cur->focused = 0;
+    g_cur->in = (GuiInput){0};
+    hjpCancelFrame(vg);
+}
+
 int main(void) {
     size_t function_count = sizeof(gui_functions) / sizeof(gui_functions[0]);
     for (size_t i = 0; i < function_count; i++) {
@@ -212,6 +277,7 @@ int main(void) {
     check_ime_notifications();
     check_textarea_layout();
     check_text_selection();
+    check_text_navigation();
     char oversized[GUI_MAX_TEXT_BUF + 8];
     memset(oversized, 'a', GUI_MAX_TEXT_BUF - 2);
     memcpy(oversized + GUI_MAX_TEXT_BUF - 2, "日本", 7);
@@ -570,6 +636,6 @@ int main(void) {
     fn_app_quit(1, &app);
     assert(g_histories[history_slot].id == 0);
     assert(waitpid(shutdown_pid, NULL, WNOHANG) == -1 && errno == ECHILD);
-    puts("application controls passed: registration, UTF-8, clicks, list isolation/LRU, visible rows, disabled wheel, shrink");
+    puts("application controls passed: registration, UTF-8, text selection/navigation, clicks, list isolation/LRU, visible rows, disabled wheel, shrink");
     return 0;
 }

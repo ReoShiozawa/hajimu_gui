@@ -275,6 +275,8 @@ typedef struct {
     int      sel_start;         /* 選択開始 (バイト)             */
     int      sel_end;           /* 選択終了 (バイト)             */
     float    scroll_y;          /* 複数行入力の表示位置 */
+    float    preferred_x;       /* 上下移動で短い行を経由しても列を保持 */
+    bool     preferred_x_valid;
 } GuiTextBuf;
 
 /* --- コンボボックス開閉状態 --- */
@@ -323,6 +325,7 @@ typedef struct {
     GuiInput modal_input;
     uint32_t modal_restore_focus;
     char composition[128];
+    uint32_t text_drag;
     uint64_t composition_version, composition_notified;
     uint32_t nav_previous[512], nav_current[512];
     int nav_previous_count, nav_current_count;
@@ -369,6 +372,14 @@ typedef struct {
 
 static GuiApp  g_apps[GUI_MAX_APPS];
 static GuiApp *g_cur  = NULL;           /* 描画中の現在アプリ        */
+static void gui_input_modifiers(GuiInput *input, HjpKeymod modifiers) {
+#ifdef __APPLE__
+    input->mod_ctrl = (modifiers & HJP_KMOD_GUI) != 0;
+#else
+    input->mod_ctrl = (modifiers & HJP_KMOD_CTRL) != 0;
+#endif
+    input->mod_shift = (modifiers & HJP_KMOD_SHIFT) != 0;
+}
 static void gui_ime_update(GuiApp *app, const char *text) {
     size_t length = strlen(text);
     if (length >= sizeof(app->composition)) {
@@ -1312,7 +1323,11 @@ static Value fn_draw_loop(int argc, Value *argv) {
                 app->in.my = ev.motion.y;
                 break;
             case HJP_EVENT_MOUSEBUTTONDOWN:
+                gui_input_modifiers(&app->in, ev.button.mod);
+                app->in.mx = ev.button.x;
+                app->in.my = ev.button.y;
                 if (ev.button.button == HJP_BUTTON_LEFT) {
+                    app->text_drag = 0;
                     app->in.down    = true;
                     app->in.clicked = true;
                 } else if (ev.button.button == HJP_BUTTON_RIGHT) {
@@ -1322,6 +1337,9 @@ static Value fn_draw_loop(int argc, Value *argv) {
                 }
                 break;
             case HJP_EVENT_MOUSEBUTTONUP:
+                gui_input_modifiers(&app->in, ev.button.mod);
+                app->in.mx = ev.button.x;
+                app->in.my = ev.button.y;
                 if (ev.button.button == HJP_BUTTON_LEFT) {
                     app->in.down     = false;
                     app->in.released = true;
@@ -1364,16 +1382,14 @@ static Value fn_draw_loop(int argc, Value *argv) {
                     }
                 }
                 break;
+            case HJP_EVENT_KEYUP:
+                gui_input_modifiers(&app->in, ev.key.mod);
+                break;
             case HJP_EVENT_KEYDOWN: {
                 HjpKeycode k = ev.key.sym;
                 HjpKeymod  m = ev.key.mod;
-#ifdef __APPLE__
-                bool ctrl = (m & HJP_KMOD_GUI) != 0;  /* Cmd on macOS */
-#else
-                bool ctrl = (m & HJP_KMOD_CTRL) != 0;
-#endif
-                app->in.mod_ctrl  = ctrl;
-                app->in.mod_shift = (m & HJP_KMOD_SHIFT) != 0;
+                gui_input_modifiers(&app->in, m);
+                bool ctrl = app->in.mod_ctrl;
 
                 if (k == HJPK_BACKSPACE) app->in.key_backspace = true;
                 else if (k == HJPK_DELETE)    app->in.key_delete = true;
@@ -1454,6 +1470,7 @@ static Value fn_draw_loop(int argc, Value *argv) {
         gui_nav_begin();
         g_frame_count++;
         hajimu_call(&callback, 0, NULL);
+        if (!app->in.down) app->text_drag = 0;
         gui_nav_end();
 
         /* コールバック内の終了要求ではリソースを即時解放しない。
@@ -2469,6 +2486,64 @@ static void gui_text_selection(GuiTextBuf *tb, int *start, int *end) {
 static void gui_text_collapse(GuiTextBuf *tb, int cursor) {
     tb->cursor = gui_text_boundary(tb, cursor);
     tb->sel_start = tb->sel_end = tb->cursor;
+    tb->preferred_x_valid = false;
+}
+
+static void gui_text_move(GuiTextBuf *tb, int cursor, bool extend) {
+    if (extend) {
+        if (tb->sel_start == tb->sel_end) tb->sel_start = tb->cursor;
+        tb->cursor = tb->sel_end = cursor;
+        tb->preferred_x_valid = false;
+    } else gui_text_collapse(tb, cursor);
+}
+
+/* 文字の中央を境に左右どちらの挿入位置か決める。UTF-8の途中は返さない。 */
+static int gui_text_hit_offset(Hjpcontext *vg, const char *start, const char *end,
+                               float x, bool masked) {
+    int offsets[GUI_MAX_TEXT_BUF + 1], count = 1;
+    int length = (int)(end - start);
+    offsets[0] = 0;
+    while (offsets[count - 1] < length && count < GUI_MAX_TEXT_BUF + 1) {
+        offsets[count] = utf8_next(start, offsets[count - 1], length);
+        count++;
+    }
+    float dot = masked ? hjpTextBounds(vg, 0, 0, "\xe2\x97\x8f", NULL, NULL) : 0;
+    int lo = 0, hi = count - 1;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        float width = masked ? dot * mid : hjpTextBounds(vg, 0, 0, start, start + offsets[mid], NULL);
+        if (width < x) lo = mid + 1; else hi = mid;
+    }
+    if (!lo) return 0;
+    float right = masked ? dot * lo : hjpTextBounds(vg, 0, 0, start, start + offsets[lo], NULL);
+    float left = masked ? dot * (lo - 1) : hjpTextBounds(vg, 0, 0, start, start + offsets[lo - 1], NULL);
+    return offsets[x < (left + right) * 0.5f ? lo - 1 : lo];
+}
+
+static bool gui_text_hover(float x, float y, float w, float h) {
+    return !g_disabled && !(g_cur->modal_title[0] && !g_cur->modal_entered) &&
+        gui_visible_rect(&x, &y, &w, &h) && gui_hit(g_cur->in.mx, g_cur->in.my, x, y, w, h);
+}
+
+static void gui_text_mouse(GuiTextBuf *tb, uint32_t id, bool hovered, int offset) {
+    if (g_disabled || g_cur->composition[0] || g_cur->focused != id ||
+        (g_cur->modal_title[0] && !g_cur->modal_entered)) {
+        if (g_cur->text_drag == id) g_cur->text_drag = 0;
+        return;
+    }
+    if (hovered && g_cur->in.clicked && !g_cur->text_drag) {
+        gui_text_move(tb, offset, g_cur->in.mod_shift);
+        g_cur->text_drag = id;
+        g_cur->active = 0;
+        g_cur->in.clicked = false;
+    }
+    if (g_cur->text_drag == id) {
+        if (g_cur->in.down || g_cur->in.released) {
+            tb->cursor = tb->sel_end = offset;
+            tb->preferred_x_valid = false;
+        }
+        if (g_cur->in.released || (!g_cur->in.down && !g_cur->in.clicked)) g_cur->text_drag = 0;
+    }
 }
 
 /* 容量は選択範囲を除いて算出し、挿入不能なら選択中の本文を保持する。 */
@@ -2489,8 +2564,12 @@ static bool gui_text_replace_selection(GuiTextBuf *tb, const char *text, int len
 /* テキストバッファにキー入力を反映（フォーカス中のみ呼ばれる）。 */
 static void gui_text_buf_edit(GuiTextBuf *tb, bool allow_copy) {
     GuiInput *in = &g_cur->in;
-    if (g_cur->composition[0]) return;
-    if (in->key_a) { tb->sel_start = 0; tb->sel_end = tb->cursor = tb->len; }
+    if (g_disabled || g_cur->composition[0] ||
+        (g_cur->modal_title[0] && !g_cur->modal_entered)) return;
+    if (in->key_a) {
+        tb->sel_start = 0; tb->sel_end = tb->cursor = tb->len;
+        tb->preferred_x_valid = false;
+    }
     int start, end;
     gui_text_selection(tb, &start, &end);
     if (allow_copy && (in->key_c || in->key_x) && start != end) {
@@ -2524,10 +2603,7 @@ static void gui_text_buf_edit(GuiTextBuf *tb, bool allow_copy) {
         if (in->key_right) cursor = !in->mod_shift && start != end ? end : utf8_next(tb->buf, cursor, tb->len);
         if (in->key_home) cursor = 0;
         if (in->key_end) cursor = tb->len;
-        if (in->mod_shift) {
-            if (start == end) tb->sel_start = tb->cursor;
-            tb->cursor = tb->sel_end = cursor;
-        } else gui_text_collapse(tb, cursor);
+        gui_text_move(tb, cursor, in->mod_shift);
     }
 }
 
@@ -2609,8 +2685,7 @@ static Value fn_text_input(int argc, Value *argv) {
     bool focused = (g_cur->focused == id);
 
     /* クリックでフォーカス */
-    bool hov = !g_disabled && gui_hit((float)g_cur->in.mx, (float)g_cur->in.my,
-                        fx, y, fw, GUI_INPUT_H);
+    bool hov = gui_text_hover(fx, y, fw, GUI_INPUT_H);
     if (g_cur->in.clicked) {
         if (hov) {
             g_cur->focused = id;
@@ -2623,6 +2698,11 @@ static Value fn_text_input(int argc, Value *argv) {
         }
     }
 
+    if (hov || g_cur->text_drag == id) {
+        int offset = gui_text_hit_offset(vg, tb->buf, tb->buf + tb->len,
+                                         g_cur->in.mx - fx - GUI_INPUT_PAD, false);
+        gui_text_mouse(tb, id, hov, offset);
+    }
     /* フォーカス中: 入力処理 */
     if (focused) gui_text_buf_process(tb);
 
@@ -2642,7 +2722,7 @@ static Value fn_text_input(int argc, Value *argv) {
 
     /* クリッピング (簡易: scissor) */
     hjpSave(vg);
-    hjpScissor(vg, fx + GUI_INPUT_PAD, y, fw - GUI_INPUT_PAD * 2, GUI_INPUT_H);
+    hjpIntersectScissor(vg, fx + GUI_INPUT_PAD, y, fw - GUI_INPUT_PAD * 2, GUI_INPUT_H);
 
     if (focused && !g_cur->composition[0]) {
         int a, b;
@@ -2741,11 +2821,15 @@ static Value fn_password_input(int argc, Value *argv) {
 
     gui_nav_text(id, fx, y, fw, GUI_INPUT_H);
     bool focused = (g_cur->focused == id);
-    bool hov = !g_disabled && gui_hit((float)g_cur->in.mx, (float)g_cur->in.my,
-                        fx, y, fw, GUI_INPUT_H);
+    bool hov = gui_text_hover(fx, y, fw, GUI_INPUT_H);
     if (g_cur->in.clicked) {
         if (hov) { g_cur->focused = id; focused = true; hjp_start_text_input(); }
         else if (focused) { g_cur->focused = 0; focused = false; hjp_stop_text_input(); }
+    }
+    if (hov || g_cur->text_drag == id) {
+        int offset = gui_text_hit_offset(vg, tb->buf, tb->buf + tb->len,
+                                         g_cur->in.mx - fx - GUI_INPUT_PAD, true);
+        gui_text_mouse(tb, id, hov, offset);
     }
     if (focused) gui_text_buf_edit(tb, false);
 
@@ -2939,6 +3023,45 @@ static int gui_textarea_caret_row(HjptextRow *rows, int count, const char *curso
     return count - 1;
 }
 
+static void gui_textarea_navigate(GuiTextBuf *tb, uint32_t id, bool hovered,
+                                  float x, float y, float width, float height) {
+    if (g_disabled || g_cur->composition[0] || g_cur->focused != id ||
+        (g_cur->modal_title[0] && !g_cur->modal_entered)) {
+        if (g_cur->text_drag == id) g_cur->text_drag = 0;
+        return;
+    }
+    Hjpcontext *vg = g_cur->vg;
+    HjptextRow rows[GUI_MAX_TEXT_BUF + 1];
+    int count = gui_textarea_rows(vg, tb->buf, width, rows, GUI_MAX_TEXT_BUF + 1);
+    float line_h = GUI_FONT_SIZE * 1.4f;
+    if (hovered || g_cur->text_drag == id) {
+        if (g_cur->text_drag == id && g_cur->in.down) {
+            if (g_cur->in.my < y) tb->scroll_y = fmaxf(0, tb->scroll_y - line_h);
+            if (g_cur->in.my > y + height)
+                tb->scroll_y = fminf(fmaxf(0, count * line_h - height), tb->scroll_y + line_h);
+        }
+        int row = (int)floorf((g_cur->in.my - y + tb->scroll_y) / line_h);
+        row = row < 0 ? 0 : row >= count ? count - 1 : row;
+        int offset = (int)(rows[row].start - tb->buf) +
+            gui_text_hit_offset(vg, rows[row].start, rows[row].end, g_cur->in.mx - x, false);
+        gui_text_mouse(tb, id, hovered, offset);
+    }
+    if (g_cur->in.key_up || g_cur->in.key_down) {
+        int row = gui_textarea_caret_row(rows, count, tb->buf + tb->cursor);
+        float preferred = tb->preferred_x_valid ? tb->preferred_x :
+            hjpTextBounds(vg, 0, 0, rows[row].start, tb->buf + tb->cursor, NULL);
+        int next = row + (g_cur->in.key_up ? -1 : 1);
+        if (next < 0) next = 0;
+        if (next >= count) next = count - 1;
+        int offset = (int)(rows[next].start - tb->buf) +
+            gui_text_hit_offset(vg, rows[next].start, rows[next].end, preferred, false);
+        gui_text_move(tb, offset, g_cur->in.mod_shift);
+        tb->preferred_x = preferred;
+        tb->preferred_x_valid = true;
+        g_cur->in.key_up = g_cur->in.key_down = false;
+    }
+}
+
 /* ---------------------------------------------------------------
  * テキストエリア(ラベル, 値 [, 行数]) → 文字列
  *   複数行テキスト入力。Enter で改行挿入。
@@ -2975,15 +3098,16 @@ static Value fn_textarea(int argc, Value *argv) {
 
     gui_nav_text(id, x, y, fw, fh);
     bool focused = (g_cur->focused == id);
-    bool hov = !g_disabled && gui_hit((float)g_cur->in.mx, (float)g_cur->in.my,
-                        x, y, fw, fh);
+    bool hov = gui_text_hover(x, y, fw, fh);
     if (g_cur->in.clicked) {
         if (hov) { g_cur->focused = id; focused = true; hjp_start_text_input(); }
         else if (focused) { g_cur->focused = 0; focused = false; hjp_stop_text_input(); }
     }
 
+    if (focused || g_cur->text_drag == id) gui_textarea_navigate(tb, id, hov, x + GUI_INPUT_PAD, y + GUI_INPUT_PAD,
+                                      fw - GUI_INPUT_PAD * 2, fh - GUI_INPUT_PAD * 2);
     /* Enter → 改行挿入 */
-    if (focused && !g_cur->composition[0] && g_cur->in.key_return) {
+    if (focused && !g_disabled && !g_cur->composition[0] && g_cur->in.key_return) {
         gui_text_replace_selection(tb, "\n", 1);
         g_cur->in.key_return = false;
     } else if (focused) {
@@ -4220,6 +4344,7 @@ static Value fn_modal_reserve(int argc, Value *argv) {
         g_cur->nav_focus = title[0] ? 0 : g_cur->modal_restore_focus;
         g_cur->nav_previous_count = g_cur->nav_current_count = 0;
         g_cur->focused = g_cur->active = 0;
+        g_cur->text_drag = 0;
         hjp_stop_text_input();
         snprintf(g_cur->modal_title, sizeof(g_cur->modal_title), "%s", title);
     }
@@ -24987,7 +25112,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.17.0",
+        .version        = "14.18.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,

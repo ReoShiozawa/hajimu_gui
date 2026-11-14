@@ -238,6 +238,7 @@ static LRESULT CALLBACK hjp_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
             break;
 
         case WM_LBUTTONDOWN:
+            ev.button.mod = get_modifiers();
             ev.type = HJP_EVENT_MOUSEBUTTONDOWN;
             ev.button.button = HJP_BUTTON_LEFT;
             ev.button.x = GET_X_LPARAM(lp);
@@ -247,6 +248,7 @@ static LRESULT CALLBACK hjp_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
             SetCapture(hwnd);
             break;
         case WM_LBUTTONUP:
+            ev.button.mod = get_modifiers();
             ev.type = HJP_EVENT_MOUSEBUTTONUP;
             ev.button.button = HJP_BUTTON_LEFT;
             ev.button.x = GET_X_LPARAM(lp);
@@ -257,6 +259,7 @@ static LRESULT CALLBACK hjp_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
             break;
 
         case WM_RBUTTONDOWN:
+            ev.button.mod = get_modifiers();
             ev.type = HJP_EVENT_MOUSEBUTTONDOWN;
             ev.button.button = HJP_BUTTON_RIGHT;
             ev.button.x = GET_X_LPARAM(lp);
@@ -265,6 +268,7 @@ static LRESULT CALLBACK hjp_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
             push_event(&ev);
             break;
         case WM_RBUTTONUP:
+            ev.button.mod = get_modifiers();
             ev.type = HJP_EVENT_MOUSEBUTTONUP;
             ev.button.button = HJP_BUTTON_RIGHT;
             ev.button.x = GET_X_LPARAM(lp);
@@ -274,6 +278,7 @@ static LRESULT CALLBACK hjp_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
             break;
 
         case WM_MBUTTONDOWN:
+            ev.button.mod = get_modifiers();
             ev.type = HJP_EVENT_MOUSEBUTTONDOWN;
             ev.button.button = HJP_BUTTON_MIDDLE;
             ev.button.x = GET_X_LPARAM(lp);
@@ -282,6 +287,7 @@ static LRESULT CALLBACK hjp_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
             push_event(&ev);
             break;
         case WM_MBUTTONUP:
+            ev.button.mod = get_modifiers();
             ev.type = HJP_EVENT_MOUSEBUTTONUP;
             ev.button.button = HJP_BUTTON_MIDDLE;
             ev.button.x = GET_X_LPARAM(lp);

@@ -570,6 +570,7 @@ bool hjp_poll_event(HjpEvent *event) {
                 } else {
                     ev.type = HJP_EVENT_MOUSEBUTTONDOWN;
                     ev.button.button = btn; /* X11: 1=left, 2=middle, 3=right */
+                    ev.button.mod = xstate_to_hjpmod(xe.xbutton.state);
                     ev.button.x = xe.xbutton.x;
                     ev.button.y = xe.xbutton.y;
                     if (btn >= 1 && btn <= 5)
@@ -583,6 +584,7 @@ bool hjp_poll_event(HjpEvent *event) {
                 if (btn != 4 && btn != 5) {
                     ev.type = HJP_EVENT_MOUSEBUTTONUP;
                     ev.button.button = btn;
+                    ev.button.mod = xstate_to_hjpmod(xe.xbutton.state);
                     ev.button.x = xe.xbutton.x;
                     ev.button.y = xe.xbutton.y;
                     if (btn >= 1 && btn <= 5)

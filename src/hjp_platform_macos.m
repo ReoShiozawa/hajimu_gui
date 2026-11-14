@@ -344,6 +344,7 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
     HjpEvent e = {0};
     e.type = down ? HJP_EVENT_MOUSEBUTTONDOWN : HJP_EVENT_MOUSEBUTTONUP;
     e.button.button = btn;
+    e.button.mod = hjp__macModToHjp(event.modifierFlags);
     e.button.x = (int)loc.x;
     e.button.y = (int)loc.y;
     hjp__pushEvent(&e);
