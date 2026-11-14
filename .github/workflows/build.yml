@@ -81,12 +81,22 @@ jobs:
         shell: msys2 {0}
         run: make HAJIMU_INCLUDE=include
 
+      - name: Unicode境界テスト (macOS / Linux)
+        if: runner.os != 'Windows'
+        run: GRAPHEME_SANITIZE=1 sh tests/check-grapheme.sh
+
+      - name: Unicode境界テスト (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: sh tests/check-grapheme.sh
+
       # ── アーティファクト整理 ────────────────────────────
       - name: アーティファクトをリネーム
         shell: bash
         run: |
           mkdir -p dist
           cp hajimu_gui.hjp dist/hajimu_gui-${{ matrix.suffix }}.hjp
+          cp vendor/utf8proc/LICENSE.md dist/hajimu_gui-${{ matrix.suffix }}.utf8proc-license.txt
 
       - name: チェックサム生成
         shell: bash

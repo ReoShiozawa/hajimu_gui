@@ -5,7 +5,8 @@
 
 PLUGIN_NAME = hajimu_gui
 SRC_C = src/hajimu_gui.c src/hjp_render.c \
-        src/hjp_vnode.c src/hjp_frame.c src/hjp_hotreload.c src/hjp_devtools.c
+        src/hjp_vnode.c src/hjp_frame.c src/hjp_hotreload.c src/hjp_devtools.c \
+        src/hjp_unicode.c
 OUT   = $(PLUGIN_NAME).hjp
 # CC ?= gcc だと GNU make 組み込みデフォルト(cc)が優先されるため = で上書き
 # コマンドラインから make CC=clang のように引き続きオーバーライド可能
@@ -69,7 +70,7 @@ all: $(OUT)
 audit-check:
 	node tests/audit-api-stubs.mjs --check
 
-$(OUT): $(SRC_C) $(SRC_PLATFORM) $(wildcard src/*.h) Makefile $(HAJIMU_INCLUDE)/hajimu_plugin.h $(HAJIMU_INCLUDE)/hajimu_abi.h
+$(OUT): $(SRC_C) $(SRC_PLATFORM) $(wildcard src/*.h vendor/utf8proc/*.h vendor/utf8proc/*.c) Makefile $(HAJIMU_INCLUDE)/hajimu_plugin.h $(HAJIMU_INCLUDE)/hajimu_abi.h
 	$(CC) $(CFLAGS) -o $@ $(SRC_C) $(SRC_PLATFORM) $(LDFLAGS)
 
 clean:
@@ -87,11 +88,15 @@ ifeq ($(OS),Windows_NT)
 	copy /Y $(OUT) "$(INSTALL_DIR)\$(PLUGIN_NAME)"
 	copy /Y hajimu.json "$(INSTALL_DIR)\$(PLUGIN_NAME)"
 	copy /Y $(FONT_DIR)\$(FONT_FILE) "$(INSTALL_DIR)\$(PLUGIN_NAME)\fonts"
+	copy /Y vendor\utf8proc\LICENSE.md "$(INSTALL_DIR)\$(PLUGIN_NAME)\UTF8PROC-LICENSE.md"
+	copy /Y THIRD_PARTY_LICENSES.md "$(INSTALL_DIR)\$(PLUGIN_NAME)"
 else
 	@mkdir -p $(INSTALL_DIR)/$(PLUGIN_NAME)/fonts
 	cp $(OUT) $(INSTALL_DIR)/$(PLUGIN_NAME)/
 	cp hajimu.json $(INSTALL_DIR)/$(PLUGIN_NAME)/
 	cp $(FONT_DIR)/$(FONT_FILE) $(INSTALL_DIR)/$(PLUGIN_NAME)/fonts/
+	cp vendor/utf8proc/LICENSE.md $(INSTALL_DIR)/$(PLUGIN_NAME)/UTF8PROC-LICENSE.md
+	cp THIRD_PARTY_LICENSES.md $(INSTALL_DIR)/$(PLUGIN_NAME)/
 endif
 	@echo "  インストール完了: $(INSTALL_DIR)/$(PLUGIN_NAME)/"
 
@@ -117,7 +122,7 @@ DIST       = dist
 HAJIMU_INC = $(abspath $(firstword $(wildcard ../../jp/include ../jp/include ./include)))
 WIN_CC     ?= x86_64-w64-mingw32-gcc
 SRC_ALL    = src/hajimu_gui.c src/hjp_render.c src/hjp_vnode.c src/hjp_frame.c \
-             src/hjp_hotreload.c src/hjp_devtools.c
+             src/hjp_hotreload.c src/hjp_devtools.c src/hjp_unicode.c
 NCPU       := $(shell sysctl -n hw.ncpu 2>/dev/null || echo 4)
 
 LINUX_CC   ?= x86_64-linux-musl-gcc
@@ -136,6 +141,7 @@ build-macos:
 	  -framework OpenGL -framework Cocoa -framework CoreText \
 	  -framework CoreGraphics -framework ImageIO -lpthread \
 	  -o $(DIST)/$(PLUGIN_NAME)-macos.hjp
+	cp vendor/utf8proc/LICENSE.md $(DIST)/$(PLUGIN_NAME)-macos.utf8proc-license.txt
 	@echo "  macOS: $(DIST)/$(PLUGIN_NAME)-macos.hjp"
 build-linux:
 	@mkdir -p $(DIST)
@@ -146,6 +152,7 @@ build-linux:
 	  $(SRC_ALL) src/hjp_platform_linux.c \
 	  -Wl,--allow-shlib-undefined \
 	  -o $(DIST)/$(PLUGIN_NAME)-linux-x64.hjp
+	cp vendor/utf8proc/LICENSE.md $(DIST)/$(PLUGIN_NAME)-linux-x64.utf8proc-license.txt
 	@echo "  Linux: $(DIST)/$(PLUGIN_NAME)-linux-x64.hjp"
 build-windows:
 	@mkdir -p $(DIST)
@@ -155,4 +162,5 @@ build-windows:
 	  $(SRC_ALL) src/hjp_platform_win32.c \
 	  -lopengl32 -lgdi32 -luser32 -lshell32 -lkernel32 -lpthread -static-libgcc \
 	  -o $(DIST)/$(PLUGIN_NAME)-windows-x64.hjp
+	cp vendor/utf8proc/LICENSE.md $(DIST)/$(PLUGIN_NAME)-windows-x64.utf8proc-license.txt
 	@echo "  Windows: $(DIST)/$(PLUGIN_NAME)-windows-x64.hjp"

@@ -224,6 +224,82 @@ static void check_text_selection(void) {
     g_cur->in = (GuiInput){0};
 }
 
+static void check_grapheme_editing(void) {
+    const char *clusters[] = {
+        "e\xcc\x81", "\xe3\x81\x8b\xe3\x82\x99",
+        "\xf0\x9f\x91\x8d\xf0\x9f\x8f\xbd",
+        "\xf0\x9f\x87\xaf\xf0\x9f\x87\xb5",
+        "\xf0\x9f\x91\xa8\xe2\x80\x8d\xf0\x9f\x91\xa9\xe2\x80\x8d\xf0\x9f\x91\xa7",
+        "\xe0\xa4\x95\xe0\xa5\x8d\xe0\xa4\xb7", "\r\n"
+    };
+    frame(false, false, 500);
+    Hjpcontext *vg = g_cur->vg;
+    for (size_t i = 0; i < sizeof(clusters) / sizeof(clusters[0]); i++) {
+        GuiTextBuf original = {0};
+        snprintf(original.buf, sizeof(original.buf), "A%sZ", clusters[i]);
+        original.len = (int)strlen(original.buf); original.cursor = original.len - 1;
+        GuiTextBuf tb = original;
+        g_cur->in = (GuiInput){.key_left = true}; gui_text_buf_process(&tb);
+        assert(tb.cursor == 1);
+        g_cur->in = (GuiInput){.key_right = true, .mod_shift = true}; gui_text_buf_process(&tb);
+        assert(tb.sel_start == 1 && tb.sel_end == original.len - 1);
+        assert(gui_text_replace_selection(&tb, "X", 1) && !strcmp(tb.buf, "AXZ"));
+        tb = original;
+        g_cur->in = (GuiInput){.key_backspace = true}; gui_text_buf_process(&tb);
+        assert(!strcmp(tb.buf, "AZ") && tb.cursor == 1);
+        tb = original; tb.cursor = 1;
+        g_cur->in = (GuiInput){.key_delete = true}; gui_text_buf_process(&tb);
+        assert(!strcmp(tb.buf, "AZ") && tb.cursor == 1);
+        /* 公開APIなどが結合列の内部へ位置指定した後の通常削除も分断しない。 */
+        for (int backward = 0; backward < 2; backward++) {
+            tb = original; tb.cursor = utf8_next(tb.buf, 1, tb.len);
+            g_cur->in = (GuiInput){.key_delete = !backward, .key_backspace = backward};
+            gui_text_buf_process(&tb);
+            assert(!strcmp(tb.buf, "AZ") && tb.cursor == 1);
+        }
+        for (int x = -10; x < 300; x++) {
+            for (int masked = 0; masked < 2; masked++) {
+                int hit = gui_text_hit_offset(vg, original.buf, original.buf + original.len, x, masked);
+                assert(hit == 0 || hit == 1 || hit == original.len - 1 || hit == original.len);
+            }
+        }
+        HjptextRow rows[64];
+        int count = gui_textarea_rows(vg, original.buf, 1, rows, 64);
+        assert(count >= 2);
+        for (int row = 0; row < count; row++) {
+            assert(hjp_grapheme_floor(original.buf, original.len, (int)(rows[row].start - original.buf)) == rows[row].start - original.buf);
+            assert(hjp_grapheme_floor(original.buf, original.len, (int)(rows[row].end - original.buf)) == rows[row].end - original.buf);
+            assert(hjp_grapheme_floor(original.buf, original.len, (int)(rows[row].next - original.buf)) == rows[row].next - original.buf);
+        }
+        if (!strcmp(clusters[i], "\r\n")) assert(rows[0].next == original.buf + 3);
+    }
+    Value label = hajimu_string("grapheme-codepoint-api");
+    GuiTextBuf *field = gui_get_text_buf(gui_hash(label.string.data), "e\xcc\x81Z");
+    Value pos[] = {label, hajimu_number(1)};
+    assert(fn_text_cursor_pos(2, pos).number == 1 && field->cursor == 1);
+    Value selection[] = {label, hajimu_number(1), hajimu_number(2)};
+    assert(fn_text_select_range(3, selection).boolean && field->sel_start == 1 && field->sel_end == 3);
+    GuiTextBuf full = {0};
+    memset(full.buf, 'a', GUI_MAX_TEXT_BUF - 2);
+    full.len = full.cursor = GUI_MAX_TEXT_BUF - 2;
+    assert(!gui_text_replace_selection(&full, "e\xcc\x81", 3));
+    assert(full.len == GUI_MAX_TEXT_BUF - 2);
+    full.sel_start = full.cursor - 1; full.sel_end = full.cursor;
+    assert(!gui_text_replace_selection(&full, "e\xcc\x81", 3));
+    assert(full.sel_end - full.sel_start == 1 && full.buf[full.sel_start] == 'a');
+    char initial[GUI_MAX_TEXT_BUF + 8];
+    memset(initial, 'a', GUI_MAX_TEXT_BUF - 2);
+    strcpy(initial + GUI_MAX_TEXT_BUF - 2, "e\xcc\x81Z");
+    GuiTextBuf *clipped = gui_get_text_buf(gui_hash("grapheme-capacity"), initial);
+    assert(clipped->len == GUI_MAX_TEXT_BUF - 2);
+    GuiTextBuf joined = {.buf = "e\xcc\x81", .len = 3, .cursor = 1};
+    g_cur->in = (GuiInput){.text_input_len = 1, .text_input = "a"};
+    gui_text_buf_process(&joined);
+    assert(!strcmp(joined.buf, "ea\xcc\x81") && joined.cursor == 4);
+    g_cur->in = (GuiInput){0};
+    hjpCancelFrame(vg);
+}
+
 static void check_text_navigation(void) {
     frame(false, false, 500);
     Hjpcontext *vg = g_cur->vg;
@@ -653,6 +729,7 @@ int main(void) {
     check_ime_notifications();
     check_textarea_layout();
     check_text_selection();
+    check_grapheme_editing();
     check_text_navigation();
     check_document_edits();
     check_accessible_text();

@@ -7,6 +7,21 @@ hajimu_gui は以下のオープンソースソフトウェアを使用してい
 
 ---
 
+## utf8proc
+
+- 用途: Unicode書記素境界の判定
+- バージョン: 2.12.0 / Unicode 18.0.0
+- 上流: https://github.com/JuliaStrings/utf8proc
+- ライセンス: MIT / 上流収録のUnicodeデータライセンス
+- 全文: [vendor/utf8proc/LICENSE.md](vendor/utf8proc/LICENSE.md)
+- 固定コミットと取り込み手順: [README.hajimu.md](vendor/utf8proc/README.hajimu.md)
+
+実装とデータは無改変で同梱し、プラグインへ内部リンクする。インストール先では `UTF8PROC-LICENSE.md`、配布ビルドでは各バイナリに対応する `*.utf8proc-license.txt` を併せて配布する。
+
+テスト用のUnicode公式GraphemeBreakTestは `tests/data/UNICODE-LICENSE.txt` の条件で収録する。
+
+---
+
 ## Noto Sans CJK JP
 
 - **著者**: Google

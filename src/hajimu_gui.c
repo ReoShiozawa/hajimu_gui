@@ -46,6 +46,7 @@
 #include <limits.h>
 #include "hjp_tasks.h"
 #include "hjp_event_queue.h"
+#include "hjp_grapheme.h"
 #include "hjp_layout.h"
 #include "hjp_history.h"
 #ifndef _WIN32
@@ -2629,14 +2630,6 @@ static int utf8_char_len(unsigned char c) {
     return 1;
 }
 
-/* pos の直前の文字の先頭バイト位置を返す */
-static int utf8_prev(const char *s, int pos) {
-    if (pos <= 0) return 0;
-    pos--;
-    while (pos > 0 && (s[pos] & 0xC0) == 0x80) pos--;
-    return pos;
-}
-
 /* pos の次の文字の先頭バイト位置を返す */
 static int utf8_next(const char *s, int pos, int len) {
     if (pos >= len) return len;
@@ -2659,9 +2652,9 @@ static GuiTextBuf *gui_get_text_buf(uint32_t id, const char *init_val) {
     memset(tb, 0, sizeof(*tb));
     tb->id = id;
     if (init_val && *init_val) {
-        int n = (int)strlen(init_val);
-        if (n >= GUI_MAX_TEXT_BUF) n = GUI_MAX_TEXT_BUF - 1;
-        while (n > 0 && ((unsigned char)init_val[n] & 0xc0) == 0x80) n--;
+        int length = (int)strnlen(init_val, GUI_MAX_TEXT_BUF + 4);
+        int n = length < GUI_MAX_TEXT_BUF ? length :
+            hjp_grapheme_floor(init_val, length, GUI_MAX_TEXT_BUF - 1);
         memcpy(tb->buf, init_val, n);
         tb->buf[n] = '\0';
         tb->len = n;
@@ -2700,14 +2693,14 @@ static void gui_text_move(GuiTextBuf *tb, int cursor, bool extend) {
     } else gui_text_collapse(tb, cursor);
 }
 
-/* 文字の中央を境に左右どちらの挿入位置か決める。UTF-8の途中は返さない。 */
+/* 見た目の1文字の中央を境に挿入位置を決め、結合列の途中は返さない。 */
 static int gui_text_hit_offset(Hjpcontext *vg, const char *start, const char *end,
                                float x, bool masked) {
     int offsets[GUI_MAX_TEXT_BUF + 1], count = 1;
     int length = (int)(end - start);
     offsets[0] = 0;
     while (offsets[count - 1] < length && count < GUI_MAX_TEXT_BUF + 1) {
-        offsets[count] = utf8_next(start, offsets[count - 1], length);
+        offsets[count] = hjp_grapheme_step(start, length, offsets[count - 1]);
         count++;
     }
     float dot = masked ? hjpTextBounds(vg, 0, 0, "\xe2\x97\x8f", NULL, NULL) : 0;
@@ -2755,7 +2748,11 @@ static bool gui_text_replace_selection(GuiTextBuf *tb, const char *text, int len
     gui_text_selection(tb, &start, &end);
     int available = GUI_MAX_TEXT_BUF - 1 - (tb->len - (end - start));
     int n = length < available ? length : available;
-    while (n > 0 && ((unsigned char)text[n] & 0xc0) == 0x80) n--;
+    if (n < length) {
+        /* 次の符号位置まで見れば、上限をまたぐ結合列を安全に除外できる。 */
+        int probe = length < n + 4 ? length : n + 4;
+        n = hjp_grapheme_floor(text, probe, n);
+    }
     if (length && !n) return false;
     memmove(tb->buf + start + n, tb->buf + end, tb->len - end + 1);
     if (n) memcpy(tb->buf + start, text, n);
@@ -2839,6 +2836,7 @@ static void gui_text_buf_edit(GuiTextBuf *tb, bool allow_copy) {
     GuiInput *in = &g_cur->in;
     if (g_cur->closing || g_disabled || g_cur->composition[0] ||
         (g_cur->modal_title[0] && !g_cur->modal_entered)) return;
+    bool changed = false;
     if (in->key_a) {
         tb->sel_start = 0; tb->sel_end = tb->cursor = tb->len;
         tb->preferred_x_valid = false;
@@ -2850,30 +2848,33 @@ static void gui_text_buf_edit(GuiTextBuf *tb, bool allow_copy) {
         memcpy(copied, tb->buf + start, end - start);
         copied[end - start] = '\0';
         hjp_set_clipboard_text(copied);
-        if (in->key_x) gui_text_replace_selection(tb, "", 0);
+        if (in->key_x) changed |= gui_text_replace_selection(tb, "", 0);
     }
     if (in->key_v) {
         char *clip = hjp_get_clipboard_text();
         if (clip) {
-            if (*clip) gui_text_replace_selection(tb, clip, (int)strlen(clip));
+            if (*clip) changed |= gui_text_replace_selection(tb, clip, (int)strnlen(clip, GUI_MAX_TEXT_BUF + 4));
             hjp_free(clip);
         }
     }
     if (in->text_input_len > 0)
-        gui_text_replace_selection(tb, in->text_input, in->text_input_len);
+        changed |= gui_text_replace_selection(tb, in->text_input, in->text_input_len);
     if (in->key_backspace || in->key_delete) {
         gui_text_selection(tb, &start, &end);
         if (start == end) {
-            tb->sel_start = in->key_backspace ? utf8_prev(tb->buf, start) : start;
-            tb->sel_end = in->key_delete ? utf8_next(tb->buf, end, tb->len) : end;
+            int floor = hjp_grapheme_floor(tb->buf, tb->len, start);
+            int ceil = hjp_grapheme_ceil(tb->buf, tb->len, end);
+            tb->sel_start = in->key_backspace ? hjp_grapheme_prev(tb->buf, tb->len, start) : floor;
+            tb->sel_end = in->key_delete ? hjp_grapheme_next(tb->buf, tb->len, end) : ceil;
         }
-        gui_text_replace_selection(tb, "", 0);
+        changed |= gui_text_replace_selection(tb, "", 0);
     }
+    if (changed) gui_text_collapse(tb, hjp_grapheme_ceil(tb->buf, tb->len, tb->cursor));
     if (in->key_left || in->key_right || in->key_home || in->key_end) {
         gui_text_selection(tb, &start, &end);
         int cursor = tb->cursor;
-        if (in->key_left) cursor = !in->mod_shift && start != end ? start : utf8_prev(tb->buf, cursor);
-        if (in->key_right) cursor = !in->mod_shift && start != end ? end : utf8_next(tb->buf, cursor, tb->len);
+        if (in->key_left) cursor = !in->mod_shift && start != end ? hjp_grapheme_floor(tb->buf, tb->len, start) : hjp_grapheme_prev(tb->buf, tb->len, cursor);
+        if (in->key_right) cursor = !in->mod_shift && start != end ? hjp_grapheme_ceil(tb->buf, tb->len, end) : hjp_grapheme_next(tb->buf, tb->len, cursor);
         if (in->key_home) cursor = 0;
         if (in->key_end) cursor = tb->len;
         gui_text_move(tb, cursor, in->mod_shift);
@@ -3123,8 +3124,9 @@ static Value fn_password_input(int argc, Value *argv) {
     if (focused) {
         int a, b, before = 0, selected = 0;
         gui_text_selection(tb, &a, &b);
-        for (int p = 0; p < a; p = utf8_next(tb->buf, p, tb->len)) before++;
-        for (int p = a; p < b; p = utf8_next(tb->buf, p, tb->len)) selected++;
+        int visual_start = hjp_grapheme_floor(tb->buf, tb->len, a);
+        for (int p = 0; p < visual_start; p = hjp_grapheme_step(tb->buf, tb->len, p)) before++;
+        for (int p = hjp_grapheme_floor(tb->buf, tb->len, a); p < b; p = hjp_grapheme_step(tb->buf, tb->len, p)) selected++;
         float advance = hjpTextBounds(vg, 0, 0, "\xe2\x97\x8f", NULL, NULL);
         if (selected) {
             hjpBeginPath(vg);
@@ -3137,7 +3139,7 @@ static Value fn_password_input(int argc, Value *argv) {
         /* UTF-8 文字数をカウント */
         int chars = 0;
         for (int p = 0; p < tb->len; ) {
-            p = utf8_next(tb->buf, p, tb->len);
+            p = hjp_grapheme_step(tb->buf, tb->len, p);
             chars++;
         }
         /* ● をバッファへ */
@@ -3164,7 +3166,7 @@ static Value fn_password_input(int argc, Value *argv) {
             /* マスク文字の幅からカーソル位置を概算 */
             int chars_before = 0;
             for (int p = 0; p < tb->cursor; ) {
-                p = utf8_next(tb->buf, p, tb->cursor);
+                p = hjp_grapheme_step(tb->buf, tb->len, p);
                 chars_before++;
             }
             char tmp[GUI_MAX_TEXT_BUF * 3]; int tp = 0;
@@ -3286,7 +3288,7 @@ static int gui_textarea_rows(Hjpcontext *vg, const char *text, float width,
     const char *end = text + strlen(text);
     int count = hjpTextBreakLines(vg, text, end, fmaxf(1, width), rows, capacity);
     /* 描画エンジンが省く、空文書と末尾改行の次の行も編集位置に含める。 */
-    if ((!count || (end > text && end[-1] == '\n')) && count < capacity) {
+    if ((!count || (end > text && (end[-1] == '\n' || end[-1] == '\r'))) && count < capacity) {
         rows[count++] = (HjptextRow){.start = end, .end = end, .next = end};
     }
     return count;
@@ -25436,7 +25438,9 @@ static Value fn_api_status(int argc, Value *argv) {
                 reason = "静的監査で固定返却だけの実装を検出。意図した定数関数か未実装かは個別確認が必要";
                 break;
             }
-        if (found->fn == fn_input_state) {
+        if (found->fn == fn_text_input || found->fn == fn_password_input || found->fn == fn_textarea) {
+            state = "部分対応"; reason = "Unicode書記素単位の移動/削除/クリック/折返し。字形合成・実IMEと全OS実操作・全入力部品への統一は未完了";
+        } else if (found->fn == fn_input_state) {
             state = "部分対応"; reason = "世代付き配送・共通/アプリ別キューの超過リセットと破棄数。全OS実操作・全画面同時描画・入力消費の全体統一は未完了";
         } else if (found->fn == fn_app_quit || found->fn == fn_request_close || found->fn == fn_close_state) {
             state = "部分対応"; reason = "描画ループ内の終了待機を非ブロッキング回収。ループ外の破棄は同期、他OS実機検査は未完了";
@@ -25479,7 +25483,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.25.0",
+        .version        = "14.26.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,

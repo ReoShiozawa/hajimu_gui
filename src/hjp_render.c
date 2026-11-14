@@ -22,6 +22,7 @@
  ***********************************************************************/
 
 #include "hjp_render.h"
+#include "hjp_grapheme.h"
 #include "hjp_platform.h"
 #include <stdlib.h>
 #include <stdio.h>
@@ -2217,11 +2218,14 @@ int hjpTextBreakLines(Hjpcontext *ctx, const char *str, const char *end, float b
     int nrows = 0;
     const char *lineStart = str;
     const char *p = str;
+    size_t length = end ? (size_t)(end - str) : strlen(str);
+    if (length > INT_MAX) return 0;
     float lineWidth = 0;
     while (*p && (!end || p < end) && nrows < maxRows) {
         const char *prev = p;
-        uint32_t cp = hjp__decodeUTF8(&p);
-        if (cp == '\n' || cp == '\r') {
+        const char *clusterEnd = str + hjp_grapheme_step(str, (int)length, (int)(p - str));
+        if (*p == '\n' || *p == '\r') {
+            p = clusterEnd;
             rows[nrows].start = lineStart;
             rows[nrows].end = prev;
             rows[nrows].next = p;
@@ -2231,11 +2235,18 @@ int hjpTextBreakLines(Hjpcontext *ctx, const char *str, const char *end, float b
             nrows++;
             lineStart = p;
             lineWidth = 0;
-            if (cp == '\r' && *p == '\n') { p++; lineStart = p; }
             continue;
         }
-        HjpGlyph *g = hjp__renderGlyph(ctx, cp, s->fontId, s->fontSize);
-        float adv = g ? g->advance + s->textLetterSpacing : s->fontSize * 0.5f;
+        /* 幅が不足しても結合列/ZWJ/国旗を途中で次行へ分けない。 */
+        float adv = 0;
+        while (p < clusterEnd) {
+            utf8proc_int32_t cp;
+            utf8proc_ssize_t size = utf8proc_iterate((const utf8proc_uint8_t *)p, clusterEnd - p, &cp);
+            if (size <= 0) { cp = 0xfffd; size = 1; }
+            HjpGlyph *g = hjp__renderGlyph(ctx, (uint32_t)cp, s->fontId, s->fontSize);
+            adv += g ? g->advance + s->textLetterSpacing : s->fontSize * 0.5f;
+            p += size;
+        }
         if (lineWidth + adv > breakRowWidth && lineWidth > 0) {
             /* Word wrap: break at previous position */
             rows[nrows].start = lineStart;
