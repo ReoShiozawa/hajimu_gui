@@ -314,6 +314,8 @@ typedef struct {
     int    close_frames, close_error;
     HjpEventQueue events;
     uint64_t rejected_events;
+    uint64_t native_dropped;
+    bool input_batch_pumped;
     bool os_close_pending;
     int    target_fps;
     GuiRGBA bg;
@@ -416,16 +418,21 @@ static bool gui_route_event(GuiApp *current, HjpEvent *event) {
         hjp_event_dispose(event);
         return false;
     }
-    if (target == current) return true;
+    if (event->type == HJP_EVENT_INPUT_RESET)
+        target->native_dropped = UINT64_MAX - target->native_dropped < event->reset.dropped ? UINT64_MAX :
+            target->native_dropped + event->reset.dropped;
     hjp_event_queue_push(&target->events, event);
     return false;
 }
 static bool gui_poll_event(GuiApp *app, HjpEvent *event) {
+    /* ネイティブのリセットを先に配送し、古い保留編集を適用してしまわない。 */
+    HjpEvent native;
+    if (!app->input_batch_pumped) { app->input_batch_pumped = true; hjp_pump_events(); }
+    while (hjp_poll_queued_event(&native)) gui_route_event(app, &native);
     while (hjp_event_queue_pop(&app->events, event)) {
         if (event->type == HJP_EVENT_INPUT_RESET || gui_event_target(app, event) == app) return true;
         hjp_event_dispose(event);
     }
-    while (hjp_poll_event(event)) if (gui_route_event(app, event)) return true;
     return false;
 }
 static bool gui_apply_document_event(GuiApp *app, const HjpEvent *event);
@@ -1407,6 +1414,7 @@ static Value fn_draw_loop(int argc, Value *argv) {
         app->in.key_tab        = false;
         app->in.last_key       = 0;
         g_drop_file_count      = 0;
+        app->input_batch_pumped = false;
 
         HjpEvent ev;
         while (gui_poll_event(app, &ev)) {
@@ -1427,9 +1435,7 @@ static Value fn_draw_loop(int argc, Value *argv) {
                 app->in = (GuiInput){0};
                 app->focused = app->nav_focus = app->active = app->text_drag = 0;
                 gui_ime_update(app, "");
-#ifdef __APPLE__
-                hjp_set_text_input_context(app->window, 0, "", 0, 0, 0);
-#endif
+                hjp_reset_input(app->window);
                 break;
             case HJP_EVENT_MOUSEMOTION:
                 app->in.mx = ev.motion.x;
@@ -1802,6 +1808,7 @@ static Value fn_input_state(int argc, Value *argv) {
     dict_set(&result, "保留数", hajimu_number(app ? app->events.count + app->events.has_quit + app->events.has_resize : 0));
     dict_set(&result, "破棄入力数", hajimu_number(app ? (double)app->events.dropped : 0));
     dict_set(&result, "共通キュー破棄数", hajimu_number(app ? (double)app->rejected_events : 0));
+    dict_set(&result, "OSキュー破棄入力数", hajimu_number(app ? (double)app->native_dropped : 0));
     dict_set(&result, "入力リセット待ち", hajimu_bool(app && app->events.blocked));
     return result;
 }
@@ -25430,7 +25437,7 @@ static Value fn_api_status(int argc, Value *argv) {
                 break;
             }
         if (found->fn == fn_input_state) {
-            state = "部分対応"; reason = "送信元/世代付き配送と上限付き保留。ネイティブ共通キュー上限・全OS実操作・全画面同時描画は未完了";
+            state = "部分対応"; reason = "世代付き配送・共通/アプリ別キューの超過リセットと破棄数。全OS実操作・全画面同時描画・入力消費の全体統一は未完了";
         } else if (found->fn == fn_app_quit || found->fn == fn_request_close || found->fn == fn_close_state) {
             state = "部分対応"; reason = "描画ループ内の終了待機を非ブロッキング回収。ループ外の破棄は同期、他OS実機検査は未完了";
         } else if (found->fn == fn_text_cursor_pos || found->fn == fn_text_select_range) {
@@ -25472,7 +25479,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.24.0",
+        .version        = "14.25.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,

@@ -4,7 +4,9 @@ static int control_kill(pid_t group, int signal);
 #define HJP_TASK_WAITPID control_waitpid
 #define HJP_TASK_KILL control_kill
 #include "../src/hajimu_gui.c"
+#include "../src/hjp_native_queue.h"
 #include <assert.h>
+void hjp_test_native_event(HjpEvent *event);
 
 static pid_t deferred_pid;
 static int deferred_polls;
@@ -527,6 +529,8 @@ static void check_window_routing(void) {
     Value other_id = fn_app_create(3, create);
     GuiApp *other = &g_apps[(int)other_id.number];
     HjpEvent event = source_event(other, HJP_EVENT_KEYDOWN), result;
+    /* ウィンドウ生成で発生した実OSのフォーカス通知と、注入する列を分ける。 */
+    while (hjp_poll_event(&result)) hjp_event_dispose(&result);
     event.key.sym = HJPK_TAB;
     assert(!gui_route_event(original, &event) && other->events.count == 1);
     event = source_event(other, HJP_EVENT_TEXTEDITING);
@@ -577,6 +581,7 @@ static Value window_event_observe(Value *callback, int argc, Value *argv) {
     Value text = fn_text_input(2, args);
     assert(!strcmp(text.string.data, event_overflow ? "before" : "beforeX"));
     if (!event_overflow) assert(!g_cur->in.down && !g_cur->active && !g_cur->text_drag);
+    else assert(!g_cur->in.down && !g_cur->active && !g_cur->text_drag && !g_cur->focused && !g_cur->composition[0]);
     event_callbacks++; event_model_committed = true;
     return hajimu_null();
 }
@@ -584,12 +589,14 @@ static void check_window_close_input(void) {
     GuiApp *original = g_cur;
     HajimuRuntime *previous = __hajimu_runtime;
     HajimuRuntime runtime = {.call = window_event_observe};
-    for (int overflow = 0; overflow < 2; overflow++) {
+    for (int overflow = 0; overflow < 3; overflow++) {
         event_overflow = overflow != 0;
         event_model_committed = false; event_callbacks = event_guards = 0;
         Value create[] = {hajimu_string("Input before close regression"), hajimu_number(400), hajimu_number(240)};
         Value app_id = fn_app_create(3, create);
         GuiApp *app = &g_apps[(int)app_id.number];
+        HjpEvent discarded;
+        while (hjp_poll_event(&discarded)) hjp_event_dispose(&discarded);
         g_cur = app;
         app->focused = gui_hash("event-field");
         gui_get_text_buf(app->focused, "before");
@@ -599,15 +606,27 @@ static void check_window_close_input(void) {
         event.window.event = HJP_WINDOWEVENT_FOCUS_LOST;
         if (!overflow) hjp_event_queue_push(&app->events, &event);
         event = source_event(app, HJP_EVENT_TEXTINPUT); strcpy(event.text.text, "X");
-        for (int i = 0; i < (overflow ? HJP_DEFERRED_EVENTS + 1 : 1); i++) hjp_event_queue_push(&app->events, &event);
-        event = source_event(app, HJP_EVENT_QUIT); hjp_event_queue_push(&app->events, &event);
+        if (overflow == 2) {
+            /* 古い別配送の編集も、OS側の破棄通知より先に適用してはならない。 */
+            HjpEvent old_edit = source_event(app, HJP_EVENT_TEXTREPLACE);
+            old_edit.edit.window = app->window; old_edit.edit.generation = hjp_window_get_id(app->window);
+            old_edit.edit.id = app->focused; old_edit.edit.end = 6;
+            strcpy(old_edit.edit.text, "BAD");
+            hjp_event_queue_push(&app->events, &old_edit);
+            for (int i = 0; i < HJP_NATIVE_EVENTS; i++) hjp_test_native_event(&event);
+            event = source_event(app, HJP_EVENT_QUIT); hjp_test_native_event(&event);
+        } else {
+            for (int i = 0; i < (overflow ? HJP_DEFERRED_EVENTS + 1 : 1); i++) hjp_event_queue_push(&app->events, &event);
+            event = source_event(app, HJP_EVENT_QUIT); hjp_event_queue_push(&app->events, &event);
+        }
         Value draw[] = {app_id, {.type = VALUE_FUNCTION, .function.definition = (struct ASTNode *)&event_callback_tag}};
         g_cur = NULL; __hajimu_runtime = &runtime;
         fn_draw_loop(2, draw);
         assert(event_callbacks == 1 && event_guards == 1 && !app->running);
         if (overflow) {
             Value state = fn_input_state(1, &app_id);
-            assert(gui_dict_lookup(state, "破棄入力数").number == HJP_DEFERRED_EVENTS + 1);
+            assert(gui_dict_lookup(state, "破棄入力数").number == (overflow == 2 ? 1 : HJP_DEFERRED_EVENTS + 1));
+            assert(gui_dict_lookup(state, "OSキュー破棄入力数").number == (overflow == 2 ? HJP_NATIVE_EVENTS : 0));
             assert(!gui_dict_lookup(state, "入力リセット待ち").boolean);
         }
         fn_app_quit(1, &app_id);

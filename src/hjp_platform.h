@@ -179,6 +179,7 @@ typedef struct {
     int type;     /* HjpEventType */
     struct { HjpWindow *window; int generation; } source;
     union {
+        struct { uint64_t dropped; } reset;
         HjpMouseMotionEvent  motion;
         HjpMouseButtonEvent  button;
         HjpMouseWheelEvent   wheel;
@@ -238,6 +239,8 @@ void         hjp_gl_get_drawable_size(HjpWindow *win, int *w, int *h);
 
 /* --- イベント --- */
 bool hjp_poll_event(HjpEvent *event);
+void hjp_pump_events(void);
+bool hjp_poll_queued_event(HjpEvent *event);
 
 /* --- タイマー --- */
 HjpTicks hjp_get_ticks(void);
@@ -250,6 +253,7 @@ void  hjp_set_clipboard_text(const char *text);
 /* --- テキスト入力 --- */
 void hjp_start_text_input(void);
 void hjp_stop_text_input(void);
+void hjp_reset_input(HjpWindow *window);
 #ifdef __APPLE__
 void hjp_set_text_input_rect(HjpWindow *window, float x, float y, float w, float h);
 void hjp_set_text_input_context(HjpWindow *window, uint32_t id, const char *text,

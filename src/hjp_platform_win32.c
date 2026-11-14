@@ -49,6 +49,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <limits.h>
+#include "hjp_native_queue.h"
 static int hjp_window_serial;
 
 /* MSVC: 自動リンク */
@@ -94,7 +95,7 @@ static int hjp_window_serial;
  * 内部構造体
  * ===================================================================*/
 
-#define HJP_MAX_EVENTS 256
+#define HJP_MAX_EVENTS HJP_NATIVE_EVENTS
 
 struct HjpWindow {
     HWND    hwnd;
@@ -111,8 +112,7 @@ struct HjpWindow {
 
 static struct {
     /* イベントリングバッファ */
-    HjpEvent    events[HJP_MAX_EVENTS];
-    int         ev_head, ev_tail;
+    HjpNativeQueue queue;
 
     /* キーボード/マウス状態 */
     uint8_t     keys[512];
@@ -144,17 +144,11 @@ static struct {
  * イベントキュー
  * ===================================================================*/
 static void push_event(const HjpEvent *ev) {
-    int next = (g_hjp.ev_head + 1) % HJP_MAX_EVENTS;
-    if (next == g_hjp.ev_tail) { if (ev->type == HJP_EVENT_DROPFILE) free(ev->drop.file); return; }
-    g_hjp.events[g_hjp.ev_head] = *ev;
-    g_hjp.ev_head = next;
+    hjp_native_push(&g_hjp.queue, ev);
 }
 
 static bool pop_event(HjpEvent *ev) {
-    if (g_hjp.ev_tail == g_hjp.ev_head) return false;
-    *ev = g_hjp.events[g_hjp.ev_tail];
-    g_hjp.ev_tail = (g_hjp.ev_tail + 1) % HJP_MAX_EVENTS;
-    return true;
+    return hjp_native_pop(&g_hjp.queue, ev);
 }
 
 /* =====================================================================
@@ -442,8 +436,7 @@ bool hjp_init(void) {
 
 void hjp_quit(void) {
     if (!g_hjp.inited) return;
-    HjpEvent pending;
-    while (pop_event(&pending)) if (pending.type == HJP_EVENT_DROPFILE) free(pending.drop.file);
+    hjp_native_clear(&g_hjp.queue);
     free(g_hjp.clipboard_text);
     memset(&g_hjp, 0, sizeof(g_hjp));
 }
@@ -550,6 +543,10 @@ HjpWindow *hjp_window_create(const char *title, int x, int y, int w, int h, uint
     win->fb_width  = w;
     win->fb_height = h;
     win->id = ++hjp_window_serial;
+    if (!hjp_native_register(&g_hjp.queue, win, win->id)) {
+        wglMakeCurrent(NULL, NULL);
+        wglDeleteContext(hrc); ReleaseDC(hwnd, hdc); DestroyWindow(hwnd); free(win); return NULL;
+    }
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)win);
     g_hjp.current_win = win;
 
@@ -558,6 +555,7 @@ HjpWindow *hjp_window_create(const char *title, int x, int y, int w, int h, uint
 
 void hjp_window_destroy(HjpWindow *win) {
     if (!win) return;
+    hjp_native_unregister(&g_hjp.queue, win);
     SetWindowLongPtrW(win->hwnd, GWLP_USERDATA, 0);
     wglMakeCurrent(NULL, NULL);
     if (win->hrc) wglDeleteContext(win->hrc);
@@ -716,14 +714,19 @@ void hjp_gl_get_drawable_size(HjpWindow *win, int *w, int *h) {
  * イベント
  * ===================================================================*/
 
-bool hjp_poll_event(HjpEvent *event) {
+void hjp_pump_events(void) {
     MSG msg;
-    while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
+    unsigned pumped = 0;
+    while (pumped++ < HJP_NATIVE_EVENTS && PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
+        if (msg.message == WM_QUIT) {
+            HjpEvent quit = {.type = HJP_EVENT_QUIT}; push_event(&quit); continue;
+        }
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
-    return pop_event(event);
 }
+bool hjp_poll_queued_event(HjpEvent *event) { return pop_event(event); }
+bool hjp_poll_event(HjpEvent *event) { hjp_pump_events(); return hjp_poll_queued_event(event); }
 
 /* =====================================================================
  * タイマー
@@ -793,6 +796,14 @@ void hjp_set_clipboard_text(const char *text) {
 
 void hjp_start_text_input(void) { g_hjp.text_input_active = true; }
 void hjp_stop_text_input(void)  { g_hjp.text_input_active = false; }
+void hjp_reset_input(HjpWindow *window) {
+    memset(g_hjp.keys, 0, sizeof(g_hjp.keys));
+    g_hjp.mouseButtons = 0;
+    if (window) {
+        window->surrogate_high = 0;
+        if (GetCapture() == window->hwnd) ReleaseCapture();
+    }
+}
 
 /* =====================================================================
  * キーボード/マウス状態

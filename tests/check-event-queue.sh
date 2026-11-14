@@ -9,3 +9,5 @@ if [ "${EVENT_SANITIZE:-0}" = 1 ]; then
 fi
 cc -std=c11 -Wall -Wextra -Werror "$@" "$ROOT/tests/test_event_queue.c" -o "$TMP/events"
 "$TMP/events"
+cc -std=c11 -Wall -Wextra -Werror "$@" "$ROOT/tests/test_native_queue.c" -o "$TMP/native-events"
+"$TMP/native-events"

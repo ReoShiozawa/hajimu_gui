@@ -2,6 +2,40 @@
 #include "../src/hjp_platform_macos.m"
 #include <assert.h>
 #include <malloc/malloc.h>
+#include <objc/runtime.h>
+
+static unsigned flood_delivered;
+@interface NSApplication (HjpPumpBudgetTest)
+- (void)hjp_testSendEvent:(NSEvent *)event;
+@end
+@implementation NSApplication (HjpPumpBudgetTest)
+- (void)hjp_testSendEvent:(NSEvent *)event {
+    if (event.type == NSEventTypeApplicationDefined && event.subtype == 23130) {
+        if (++flood_delivered < 1000) [self postEvent:event atStart:NO];
+        return;
+    }
+    [self hjp_testSendEvent:event];
+}
+@end
+
+static void check_pump_budget(void) {
+    Method original = class_getInstanceMethod(NSApplication.class, @selector(sendEvent:));
+    Method replacement = class_getInstanceMethod(NSApplication.class, @selector(hjp_testSendEvent:));
+    method_exchangeImplementations(original, replacement);
+    NSEvent *flood = [NSEvent otherEventWithType:NSEventTypeApplicationDefined location:NSZeroPoint
+        modifierFlags:0 timestamp:0 windowNumber:0 context:nil subtype:23130 data1:0 data2:0];
+    [NSApp postEvent:flood atStart:NO];
+    hjp_pump_events();
+    assert(flood_delivered > 0 && flood_delivered <= HJP_NATIVE_EVENTS);
+    unsigned pumps = 1;
+    while (flood_delivered < 1000 && pumps++ < 20) {
+        unsigned before = flood_delivered;
+        hjp_pump_events();
+        assert(flood_delivered - before <= HJP_NATIVE_EVENTS);
+    }
+    assert(flood_delivered == 1000 && pumps >= 4);
+    method_exchangeImplementations(original, replacement);
+}
 
 int main(int argc, char **argv) {
     assert(argc == 2);
@@ -26,7 +60,8 @@ int main(int argc, char **argv) {
                 assert(win != NULL);
                 if (i == 0) {
                     HjpOpenGLView *view = win->glview;
-                    g_hjp.evHead = g_hjp.evTail = 0;
+                    HjpEvent discarded;
+                    while (hjp__popEvent(&discarded)) hjp_native_dispose(&discarded);
                     NSEvent *mouse = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDown
                         location:NSMakePoint(25, 50) modifierFlags:NSEventModifierFlagShift
                         timestamp:0 windowNumber:win->nswin.windowNumber context:nil
@@ -53,7 +88,7 @@ int main(int argc, char **argv) {
                     hjp_set_text_input_rect(win, 25, 40, 1, 30);
                     NSRect candidate = [view firstRectForCharacterRange:NSMakeRange(0, 1) actualRange:&actual];
                     assert(candidate.size.height == 30 && isfinite(candidate.origin.x));
-                    g_hjp.evHead = g_hjp.evTail = 0;
+                    while (hjp__popEvent(&discarded)) hjp_native_dispose(&discarded);
                     NSMutableString *commit = [NSMutableString string];
                     for (int c = 0; c < 300; c++) [commit appendString:@"語"];
                     [view insertText:commit replacementRange:NSMakeRange(NSNotFound, 0)];
@@ -145,9 +180,9 @@ int main(int argc, char **argv) {
                     hjp_set_text_input_context(win, 902, "AB", 1, 1, 2048);
                     HjpEvent occupied = {0};
                     for (int q = 0; q < HJP_MAX_EVENTS - 1; q++) hjp__pushEvent(&occupied);
-                    int head = g_hjp.evHead;
+                    unsigned head = g_hjp.queue.head;
                     [view insertText:commit replacementRange:NSMakeRange(NSNotFound, 0)];
-                    assert(g_hjp.evHead == head && [view.inputDocument isEqualToString:@"AB"]);
+                    assert(g_hjp.queue.head == head && [view.inputDocument isEqualToString:@"AB"]);
                     while (hjp__popEvent(&e)) {}
                     hjp_set_text_input_context(win, 903, "日本", 0, 3, 8);
                     [view insertText:@"語語" replacementRange:NSMakeRange(NSNotFound, 0)];
@@ -173,9 +208,9 @@ int main(int argc, char **argv) {
                     [field setAccessibilityValue:overLimit];
                     assert(!hjp__popEvent(&e));
                     for (int q = 0; q < HJP_MAX_EVENTS - 1; q++) hjp__pushEvent(&occupied);
-                    head = g_hjp.evHead;
+                    head = g_hjp.queue.head;
                     [field setAccessibilityValue:commit];
-                    assert(g_hjp.evHead == head);
+                    assert(g_hjp.queue.head == head);
                     while (hjp__popEvent(&e)) {}
                     [field setAccessibilitySelectedTextRange:NSMakeRange(1, 2)];
                     assert(hjp__popEvent(&e) && e.type == HJP_EVENT_ACCESSIBILITY_FOCUS && e.edit.cursor == 1);
@@ -282,6 +317,20 @@ int main(int argc, char **argv) {
                     hjp_accessibility_end(win);
                     assert(view.accessibilityChildren.count == 0 && view.accessibleCache.count == 0);
                     assert(![button accessibilityPerformPress]);
+                    while (hjp__popEvent(&e)) hjp_native_dispose(&e);
+                    hjp_set_text_input_context(win, 901, "AB", 1, 1, 2048);
+                    [view setMarkedText:@"に" selectedRange:NSMakeRange(1, 0)
+                        replacementRange:NSMakeRange(NSNotFound, 0)];
+                    HjpEvent flood = {.type = HJP_EVENT_KEYDOWN};
+                    for (int q = 0; q < HJP_NATIVE_EVENTS - 1; q++) hjp__pushWindowEvent(win, &flood);
+                    assert(hjp__popEvent(&e) && e.type == HJP_EVENT_INPUT_RESET);
+                    assert(e.source.window == win && e.reset.dropped == HJP_NATIVE_EVENTS + 1);
+                    g_hjp.keys[40] = 1; g_hjp.mouseButtons = HJP_BUTTON(1);
+                    hjp_reset_input(win);
+                    assert(!g_hjp.keys[40] && !g_hjp.mouseButtons && !view.documentID && !view.hasMarkedText);
+                    while (hjp__popEvent(&e)) {
+                        assert(e.type == HJP_EVENT_TEXTEDITING && !e.text.text[0]);
+                    }
                 }
                 delegate = win->delegate;
                 assert(delegate != nil);
@@ -300,6 +349,7 @@ int main(int argc, char **argv) {
             assert(weakElement == nil && weakText == nil && weakView == nil);
         }
         HjpFont font = hjp_font_create_from_file(argv[1]);
+        check_pump_budget();
         assert(font != NULL);
         for (int i = 0; i < 100; i++) assert(hjp_font_text_width(font, 18, "文字幅の寿命検査", NULL) > 0);
         malloc_statistics_t before = {0}, after = {0};

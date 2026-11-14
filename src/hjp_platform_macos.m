@@ -20,6 +20,7 @@
 #endif
 
 #include "hjp_platform.h"
+#include "hjp_native_queue.h"
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
@@ -34,7 +35,7 @@
 @class HjpAppDelegate;
 @class HjpWindowDelegate;
 
-#define HJP_MAX_EVENTS 256
+#define HJP_MAX_EVENTS HJP_NATIVE_EVENTS
 #define HJP_MAX_KEYS   512
 
 struct HjpWindow {
@@ -55,8 +56,7 @@ static struct {
     uint64_t startTime;
 
     /* イベントキュー (リングバッファ) */
-    HjpEvent events[HJP_MAX_EVENTS];
-    int evHead, evTail;
+    HjpNativeQueue queue;
 
     /* キーボード状態 */
     uint8_t keys[HJP_MAX_KEYS];
@@ -68,20 +68,14 @@ static struct {
     HjpWindow *mainWindow;
 } g_hjp = {0};
 
-static void hjp__pushEvent(HjpEvent *e) {
+static bool hjp__pushEvent(HjpEvent *e) {
     if (!e->source.window && e->type == HJP_EVENT_ACCESSIBILITY_PRESS) {
         e->source.window = e->accessibility.window; e->source.generation = e->accessibility.generation;
     } else if (!e->source.window && (e->type == HJP_EVENT_TEXTREPLACE || e->type == HJP_EVENT_TEXTSELECTION ||
         e->type == HJP_EVENT_ACCESSIBILITY_FOCUS || e->type == HJP_EVENT_ACCESSIBILITY_TEXTREPLACE || e->type == HJP_EVENT_ACCESSIBILITY_TEXTSELECTION)) {
         e->source.window = e->edit.window; e->source.generation = e->edit.generation;
     }
-    int next = (g_hjp.evHead + 1) % HJP_MAX_EVENTS;
-    if (next == g_hjp.evTail) {
-        if (e->type == HJP_EVENT_DROPFILE) free(e->drop.file);
-        return;
-    }
-    g_hjp.events[g_hjp.evHead] = *e;
-    g_hjp.evHead = next;
+    return hjp_native_push(&g_hjp.queue, e);
 }
 static void hjp__pushWindowEvent(HjpWindow *window, HjpEvent *event) {
     if (!window) { if (event->type == HJP_EVENT_DROPFILE) free(event->drop.file); return; }
@@ -91,11 +85,12 @@ static void hjp__pushWindowEvent(HjpWindow *window, HjpEvent *event) {
 }
 
 static bool hjp__popEvent(HjpEvent *e) {
-    if (g_hjp.evHead == g_hjp.evTail) return false;
-    *e = g_hjp.events[g_hjp.evTail];
-    g_hjp.evTail = (g_hjp.evTail + 1) % HJP_MAX_EVENTS;
-    return true;
+    return hjp_native_pop(&g_hjp.queue, e);
 }
+#ifdef HJP_TEST_NATIVE_QUEUE
+/* 回帰試験専用。配布バイナリには入力注入経路を含めない。 */
+void hjp_test_native_event(HjpEvent *event) { hjp__pushEvent(event); }
+#endif
 
 /* =====================================================================
  * ネイティブメニューバー
@@ -316,8 +311,7 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
     e.accessibility.window = view.ownerWindow;
     e.accessibility.id = self.widgetID;
     e.accessibility.generation = view.ownerWindow->windowId;
-    hjp__pushEvent(&e);
-    return YES;
+    return hjp__pushEvent(&e);
 }
 @end
 
@@ -331,7 +325,7 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
     HjpOpenGLView *view = self.ownerView;
     if (!self.live || !self.accessibilityEnabled || !view.ownerWindow ||
         (view.hasMarkedText && view.documentID != self.widgetID)) return NO;
-    if ((g_hjp.evHead + 1) % HJP_MAX_EVENTS == g_hjp.evTail) return NO;
+    if (!hjp_native_free(&g_hjp.queue)) return NO;
     HjpEvent event = {0};
     event.type = HJP_EVENT_ACCESSIBILITY_FOCUS;
     event.edit.window = view.ownerWindow; event.edit.generation = view.ownerWindow->windowId;
@@ -353,7 +347,7 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
     if (focused) { [self queueFocus]; return; }
     HjpOpenGLView *view = self.ownerView;
     if (!self.live || !self.accessibilityEnabled || !view.ownerWindow || view.hasMarkedText ||
-        (g_hjp.evHead + 1) % HJP_MAX_EVENTS == g_hjp.evTail) return;
+        !hjp_native_free(&g_hjp.queue)) return;
     HjpEvent event = {0}; event.type = HJP_EVENT_ACCESSIBILITY_FOCUS;
     event.edit.window = view.ownerWindow; event.edit.generation = view.ownerWindow->windowId;
     event.edit.id = self.widgetID;
@@ -388,7 +382,7 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
         offset += n;
     }
     if (!chunks) chunks = 1;
-    int freeEvents = HJP_MAX_EVENTS - 1 - (g_hjp.evHead - g_hjp.evTail + HJP_MAX_EVENTS) % HJP_MAX_EVENTS;
+    int freeEvents = (int)hjp_native_free(&g_hjp.queue);
     if (chunks + 1 > (size_t)freeEvents || ![self queueFocus]) return;
     size_t offset = 0;
     do {
@@ -412,7 +406,7 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
     NSData *prefix = [[self.snapshotText substringToIndex:range.location] dataUsingEncoding:NSUTF8StringEncoding];
     NSData *selected = [[self.snapshotText substringWithRange:range] dataUsingEncoding:NSUTF8StringEncoding];
     if (!prefix || !selected) return;
-    int freeEvents = HJP_MAX_EVENTS - 1 - (g_hjp.evHead - g_hjp.evTail + HJP_MAX_EVENTS) % HJP_MAX_EVENTS;
+    int freeEvents = (int)hjp_native_free(&g_hjp.queue);
     if (freeEvents < 2 || ![self queueFocus]) return;
     HjpEvent event = {0};
     event.type = HJP_EVENT_ACCESSIBILITY_TEXTSELECTION;
@@ -611,8 +605,7 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
             position += n;
         }
     }
-    int freeEvents = HJP_MAX_EVENTS - 1 -
-        (g_hjp.evHead - g_hjp.evTail + HJP_MAX_EVENTS) % HJP_MAX_EVENTS;
+    int freeEvents = (int)hjp_native_free(&g_hjp.queue);
     /* 後続の未確定状態通知も含め、置換の一部だけを配送しない。 */
     if (required + 1 > (size_t)freeEvents) return NO;
     do {
@@ -706,8 +699,8 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
         if (!all && !extend) anchor = cursor;
         NSRange range = NSMakeRange(MIN(anchor, cursor), MAX(anchor, cursor) - MIN(anchor, cursor));
         if ([self emitDocumentEdit:range text:@"" selectionOnly:YES]) {
-            int latest = (g_hjp.evHead + HJP_MAX_EVENTS - 1) % HJP_MAX_EVENTS;
-            g_hjp.events[latest].edit.cursor = (int)[[self.inputDocument substringToIndex:cursor] lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+            unsigned latest = (g_hjp.queue.head + HJP_MAX_EVENTS - 1) % HJP_MAX_EVENTS;
+            g_hjp.queue.events[latest].edit.cursor = (int)[[self.inputDocument substringToIndex:cursor] lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
             self.documentSelection = range;
             self.documentAnchor = anchor; self.documentCursor = cursor;
         }
@@ -886,8 +879,7 @@ bool hjp_init(void) {
 }
 
 void hjp_quit(void) {
-    HjpEvent pending;
-    while (hjp__popEvent(&pending)) if (pending.type == HJP_EVENT_DROPFILE) free(pending.drop.file);
+    hjp_native_clear(&g_hjp.queue);
     g_hjp.initialized = false;
 }
 
@@ -900,6 +892,7 @@ HjpWindow *hjp_window_create(const char *title, int x, int y, int w, int h, uint
         HjpWindow *win = (HjpWindow*)calloc(1, sizeof(HjpWindow));
         if (!win) return NULL;
         win->windowId = ++g_hjp.nextWindowId;
+        if (!hjp_native_register(&g_hjp.queue, win, win->windowId)) { free(win); return NULL; }
 
         NSUInteger style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable;
         if (flags & HJP_WINDOW_RESIZABLE) style |= NSWindowStyleMaskResizable;
@@ -919,7 +912,7 @@ HjpWindow *hjp_window_create(const char *title, int x, int y, int w, int h, uint
             styleMask:style
             backing:NSBackingStoreBuffered
             defer:NO];
-        if (!win->nswin) { free(win); return NULL; }
+        if (!win->nswin) { hjp_native_unregister(&g_hjp.queue, win); free(win); return NULL; }
 
         win->delegate = [[HjpWindowDelegate alloc] init];
         win->delegate.ownerWindow = win;
@@ -980,6 +973,7 @@ HjpWindow *hjp_window_create(const char *title, int x, int y, int w, int h, uint
 
 void hjp_window_destroy(HjpWindow *win) {
     if (!win) return;
+    hjp_native_unregister(&g_hjp.queue, win);
     @autoreleasepool {
         for (HjpAccessibilityElement *element in win->glview.accessibleCache.allValues) element.live = NO;
         win->glview.ownerWindow = NULL;
@@ -1071,20 +1065,24 @@ void hjp_gl_get_drawable_size(HjpWindow *win, int *w, int *h) {
 /* =====================================================================
  * イベント
  * ===================================================================*/
-bool hjp_poll_event(HjpEvent *event) {
+void hjp_pump_events(void) {
     @autoreleasepool {
         /* まず Cocoa イベントをポンプ */
         NSEvent *nsev;
-        while ((nsev = [NSApp nextEventMatchingMask:NSEventMaskAny
+        unsigned pumped = 0;
+        while (pumped++ < HJP_NATIVE_EVENTS && (nsev = [NSApp nextEventMatchingMask:NSEventMaskAny
                                           untilDate:nil
                                              inMode:NSDefaultRunLoopMode
                                             dequeue:YES])) {
             [NSApp sendEvent:nsev];
             [NSApp updateWindows];
         }
-        /* キューからポップ */
-        return hjp__popEvent(event);
     }
+}
+bool hjp_poll_queued_event(HjpEvent *event) { return hjp__popEvent(event); }
+bool hjp_poll_event(HjpEvent *event) {
+    hjp_pump_events();
+    return hjp_poll_queued_event(event);
 }
 
 /* =====================================================================
@@ -1127,6 +1125,11 @@ void hjp_set_clipboard_text(const char *text) {
  * ===================================================================*/
 void hjp_start_text_input(void) {
     /* macOS では常にテキスト入力可能、特別な処理なし */
+}
+void hjp_reset_input(HjpWindow *window) {
+    memset(g_hjp.keys, 0, sizeof(g_hjp.keys));
+    g_hjp.mouseButtons = 0;
+    hjp_set_text_input_context(window, 0, "", 0, 0, 0);
 }
 void hjp_stop_text_input(void) {
     NSView *view = NSApp.keyWindow.contentView;

@@ -24,8 +24,16 @@ static void hjp_event_queue_clear(HjpEventQueue *queue) {
 static void hjp_event_queue_loss(HjpEventQueue *queue, unsigned count) {
     queue->dropped = UINT64_MAX - queue->dropped < count ? UINT64_MAX : queue->dropped + count;
 }
+static void hjp_event_queue_invalidate(HjpEventQueue *queue) {
+    hjp_event_queue_loss(queue, queue->count);
+    for (unsigned i = 0; i < queue->count; i++)
+        hjp_event_dispose(&queue->events[(queue->head + i) % HJP_DEFERRED_EVENTS]);
+    queue->head = queue->count = 0;
+    queue->blocked = true;
+}
 /* 所有権を受け取る。上限超過時は中途半端なキー/置換列を残さずリセットする。 */
 static bool hjp_event_queue_push(HjpEventQueue *queue, HjpEvent *event) {
+    if (event->type == HJP_EVENT_INPUT_RESET) { hjp_event_queue_invalidate(queue); return true; }
     if (event->type == HJP_EVENT_QUIT) { queue->quit = *event; queue->has_quit = true; return true; }
     if (event->type == HJP_EVENT_WINDOWEVENT && event->window.event == HJP_WINDOWEVENT_SIZE_CHANGED) {
         queue->resize = *event; queue->has_resize = true; return true;
@@ -36,11 +44,7 @@ static bool hjp_event_queue_push(HjpEventQueue *queue, HjpEvent *event) {
     }
     if (queue->blocked || queue->count == HJP_DEFERRED_EVENTS) {
         if (!queue->blocked) {
-            hjp_event_queue_loss(queue, queue->count);
-            for (unsigned i = 0; i < queue->count; i++)
-                hjp_event_dispose(&queue->events[(queue->head + i) % HJP_DEFERRED_EVENTS]);
-            queue->head = queue->count = 0;
-            queue->blocked = true;
+            hjp_event_queue_invalidate(queue);
         }
         hjp_event_queue_loss(queue, 1);
         hjp_event_dispose(event);
