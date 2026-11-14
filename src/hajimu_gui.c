@@ -46,6 +46,7 @@
 #include <limits.h>
 #include "hjp_tasks.h"
 #include "hjp_layout.h"
+#include "hjp_history.h"
 #ifndef _WIN32
 #include <sys/file.h>
 #endif
@@ -364,6 +365,14 @@ typedef struct {
 
 static GuiApp  g_apps[GUI_MAX_APPS];
 static GuiApp *g_cur  = NULL;           /* 描画中の現在アプリ        */
+static struct { int id; const void *owner; HjpHistory data; } g_histories[16];
+static int g_history_next_id = 1;
+static void gui_histories_close(const void *owner) {
+    for (size_t i = 0; i < 16; i++) if (g_histories[i].id && g_histories[i].owner == owner) {
+        hjp_history_destroy(&g_histories[i].data);
+        memset(&g_histories[i], 0, sizeof(g_histories[i]));
+    }
+}
 static bool gui_request_close(GuiApp *app) {
     if (app->close_guard.type == VALUE_FUNCTION) {
         Value allowed = hajimu_call(&app->close_guard, 0, NULL);
@@ -1505,6 +1514,7 @@ static Value fn_draw_loop(int argc, Value *argv) {
 #ifndef _WIN32
     hjp_tasks_close(app);
 #endif
+    gui_histories_close(app);
     return hajimu_null();
 }
 
@@ -1538,6 +1548,7 @@ static Value fn_app_quit(int argc, Value *argv) {
     /* 描画コールバック中は fn_draw_loop が現在のフレームを閉じる。
      * ここで vg/window を破棄すると、コールバック復帰後に解放済み領域へ触れてしまう。 */
     if (g_cur == app) return hajimu_null();
+    gui_histories_close(app);
 #ifndef _WIN32
     hjp_tasks_close(app);
 #endif
@@ -5380,6 +5391,7 @@ static Value fn_shortcut(int argc, Value *argv) {
  * カーソル設定(種類)
  * ---------------------------------------------------------------*/
 #include "hjp_actions.h"
+#include "hjp_history_api.h"
 
 static Value fn_cursor_set(int argc, Value *argv) {
     if (argc < 1 || argv[0].type != VALUE_STRING) return hajimu_null();
@@ -23376,6 +23388,9 @@ HAJIMU_PLUGIN_EXPORT bool hajimu_plugin_borrows_arguments(Value (*fn)(int, Value
         fn == fn_task_state || fn == fn_task_release || fn == fn_task_notify ||
         fn == fn_action_register || fn == fn_action_button || fn == fn_action_menu || fn == fn_action_take ||
         fn == fn_constrained_widths ||
+        fn == fn_history_create || fn == fn_history_push || fn == fn_history_undo ||
+        fn == fn_history_redo || fn == fn_history_current || fn == fn_history_state ||
+        fn == fn_history_clean || fn == fn_history_group_begin || fn == fn_history_group_end || fn == fn_history_destroy ||
         fn == fn_progress || fn == fn_text_input || fn == fn_combobox ||
         fn == fn_list || fn == fn_tab_bar || fn == fn_segment_control;
 }
@@ -23448,6 +23463,16 @@ static HajimuPluginFunc gui_functions[] = {
     {"アクションボタン",     fn_action_button, 1, 1},
     {"アクションメニュー",   fn_action_menu, 1, 1},
     {"アクション受取",       fn_action_take, 1, 1},
+    {"履歴作成", fn_history_create, 1, 3},
+    {"履歴追加", fn_history_push, 2, 4},
+    {"履歴戻す", fn_history_undo, 1, 1},
+    {"履歴やり直す", fn_history_redo, 1, 1},
+    {"履歴現在", fn_history_current, 1, 1},
+    {"履歴状態", fn_history_state, 1, 1},
+    {"履歴保存点", fn_history_clean, 1, 2},
+    {"履歴まとめ開始", fn_history_group_begin, 2, 2},
+    {"履歴まとめ終了", fn_history_group_end, 2, 2},
+    {"履歴破棄", fn_history_destroy, 1, 1},
     {"ファイルダイアログ",   fn_file_dialog,   0, 2},
     {"ファイルコピー",       fn_file_copy,     2, 2},
     {"file_copy",             fn_file_copy,     2, 2},
@@ -24724,7 +24749,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.11.0",
+        .version        = "14.12.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,

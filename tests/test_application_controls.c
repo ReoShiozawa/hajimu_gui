@@ -342,12 +342,17 @@ int main(void) {
     frame(false, false, 500); gui_nav_begin();
     assert(!fn_action_take(1, action).boolean);
     hjpCancelFrame(g_cur->vg);
+    Value history_start[] = {hajimu_string("owned history")};
+    Value history_id = fn_history_create(1, history_start);
+    int history_slot = gui_history_index(history_id);
+    assert(history_slot >= 0);
     char *shutdown_args[] = {"/bin/sleep", "10", NULL};
     int shutdown_task = hjp_task_start(g_cur, shutdown_args);
     assert(shutdown_task > 0);
     pid_t shutdown_pid = hjp_task_find(shutdown_task, g_cur)->pid;
     g_cur = NULL;
     fn_app_quit(1, &app);
+    assert(g_histories[history_slot].id == 0);
     assert(waitpid(shutdown_pid, NULL, WNOHANG) == -1 && errno == ECHILD);
     puts("application controls passed: registration, UTF-8, clicks, list isolation/LRU, visible rows, disabled wheel, shrink");
     return 0;
