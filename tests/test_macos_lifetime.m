@@ -19,6 +19,7 @@ int main(int argc, char **argv) {
         for (int i = 0; i < 20; i++) {
             __weak HjpWindowDelegate *delegate;
             __weak HjpAccessibilityElement *weakElement;
+            __weak HjpAccessibilityTextElement *weakText;
             __weak HjpOpenGLView *weakView;
             @autoreleasepool {
                 HjpWindow *win = hjp_window_create("寿命検査", 0, 0, 320, 200, i == 0 ? HJP_WINDOW_OPENGL : 0);
@@ -153,6 +154,89 @@ int main(int argc, char **argv) {
                     hjp_set_text_input_context(win, 0, "", 0, 0, 0);
                     assert(!view.documentID && view.inputDocument.length == 0);
                     hjp_accessibility_begin(win);
+                    assert(hjp_accessibility_text(win, 904, "本文", "編集する本文", "A😀日本", 5, 11,
+                        10, 10, 200, 30, true, false, false, false));
+                    hjp_accessibility_end(win);
+                    HjpAccessibilityTextElement *field = (HjpAccessibilityTextElement *)view.accessibilityChildren[0];
+                    weakText = field;
+                    assert([field.accessibilityRole isEqualToString:NSAccessibilityTextFieldRole]);
+                    assert([field.accessibilityValue isEqualToString:@"A😀日本"]);
+                    assert(field.accessibilityNumberOfCharacters == 5);
+                    assert([field.accessibilitySelectedText isEqualToString:@"日本"]);
+                    assert(NSEqualRanges(field.accessibilitySelectedTextRange, NSMakeRange(3, 2)));
+                    [field setAccessibilitySelectedTextRange:NSMakeRange(2, 0)];
+                    assert(!hjp__popEvent(&e));
+                    NSMutableString *overLimit = [NSMutableString string];
+                    for (int p = 0; p < 2048; p++) [overLimit appendString:@"x"];
+                    [field setAccessibilityValue:overLimit];
+                    assert(!hjp__popEvent(&e));
+                    for (int q = 0; q < HJP_MAX_EVENTS - 1; q++) hjp__pushEvent(&occupied);
+                    head = g_hjp.evHead;
+                    [field setAccessibilityValue:commit];
+                    assert(g_hjp.evHead == head);
+                    while (hjp__popEvent(&e)) {}
+                    [field setAccessibilitySelectedTextRange:NSMakeRange(1, 2)];
+                    assert(hjp__popEvent(&e) && e.type == HJP_EVENT_ACCESSIBILITY_FOCUS && e.edit.cursor == 1);
+                    assert(hjp__popEvent(&e) && e.type == HJP_EVENT_ACCESSIBILITY_TEXTSELECTION);
+                    assert(e.edit.id == 904 && e.edit.start == 1 && e.edit.end == 5);
+                    assert(!hjp__popEvent(&e));
+                    hjp_accessibility_begin(win);
+                    assert(hjp_accessibility_text(win, 904, "本文", "", "A😀日本", 1, 5,
+                        10, 10, 200, 30, true, true, false, false));
+                    hjp_accessibility_end(win);
+                    assert(view.accessibilityChildren[0] == field && [field.accessibilitySelectedText isEqualToString:@"😀"]);
+                    [field setAccessibilitySelectedText:@"語"];
+                    assert(hjp__popEvent(&e) && e.type == HJP_EVENT_ACCESSIBILITY_FOCUS);
+                    assert(hjp__popEvent(&e) && e.type == HJP_EVENT_ACCESSIBILITY_TEXTREPLACE);
+                    assert(e.edit.start == 0 && e.edit.end == -1 && !strcmp(e.edit.text, "A語日本"));
+                    assert(!hjp__popEvent(&e));
+                    [field setAccessibilityValue:@"stale-snapshot"];
+                    [field setAccessibilitySelectedTextRange:NSMakeRange(0, 1)];
+                    assert(!hjp__popEvent(&e));
+                    hjp_accessibility_begin(win);
+                    assert(hjp_accessibility_text(win, 904, "本文", "", "A語日本", 4, 4,
+                        10, 10, 200, 30, true, true, false, true));
+                    hjp_accessibility_end(win);
+                    assert([field.accessibilityRole isEqualToString:NSAccessibilityTextAreaRole]);
+                    [field setAccessibilityValue:commit];
+                    assert(hjp__popEvent(&e) && e.type == HJP_EVENT_ACCESSIBILITY_FOCUS);
+                    bytes = 0;
+                    while (hjp__popEvent(&e)) {
+                        assert(e.type == HJP_EVENT_ACCESSIBILITY_TEXTREPLACE);
+                        assert(e.edit.start == (int)bytes && e.edit.end == (bytes ? (int)bytes : -1));
+                        assert([[NSString alloc] initWithUTF8String:e.edit.text] != nil);
+                        bytes += strlen(e.edit.text);
+                    }
+                    assert(bytes == strlen(commit.UTF8String));
+                    hjp_accessibility_begin(win);
+                    assert(hjp_accessibility_text(win, 904, "無効入力", "", "AB", 0, 0,
+                        10, 10, 200, 30, false, false, false, false));
+                    hjp_accessibility_end(win);
+                    [field setAccessibilityValue:@"拒否"];
+                    [field setAccessibilityFocused:YES];
+                    assert(!hjp__popEvent(&e));
+                    assert(![field isAccessibilitySelectorAllowed:@selector(setAccessibilityValue:)]);
+                    hjp_accessibility_begin(win);
+                    assert(hjp_accessibility_text(win, 904, "秘密", "", "hidden-secret", 0, 0,
+                        10, 10, 200, 30, true, false, true, false));
+                    hjp_accessibility_end(win);
+                    assert(field.accessibilityValue == nil && field.accessibilitySelectedText == nil);
+                    assert(field.snapshotText.length == 0 && field.accessibilityNumberOfCharacters == 0);
+                    assert(field.accessibilitySelectedTextRange.location == NSNotFound);
+                    assert(field.accessibilityProtectedContent);
+                    assert([field.accessibilitySubrole isEqualToString:NSAccessibilitySecureTextFieldSubrole]);
+                    [field setAccessibilityValue:@"must-not-change"];
+                    assert(!hjp__popEvent(&e));
+                    [field setAccessibilityFocused:YES];
+                    assert(hjp__popEvent(&e) && e.type == HJP_EVENT_ACCESSIBILITY_FOCUS);
+                    assert(!view.documentID && view.inputDocument.length == 0);
+                    [field setAccessibilityFocused:NO];
+                    assert(hjp__popEvent(&e) && e.type == HJP_EVENT_ACCESSIBILITY_FOCUS && !e.edit.cursor);
+                    hjp_accessibility_begin(win);
+                    hjp_accessibility_end(win);
+                    [field setAccessibilityValue:@"hidden"];
+                    assert(field.accessibilityValue == nil && !hjp__popEvent(&e));
+                    hjp_accessibility_begin(win);
                     assert(hjp_accessibility_add(win, 801, "保存", "作品を保存", 0, 20, 30, 100, 40, true, false));
                     assert(hjp_accessibility_add(win, 802, "自動保存", "", 1, 20, 80, 100, 40, false, true));
                     hjp_accessibility_end(win);
@@ -211,7 +295,7 @@ int main(int argc, char **argv) {
                 hjp_window_destroy(win);
             }
             assert(delegate == nil);
-            assert(weakElement == nil && weakView == nil);
+            assert(weakElement == nil && weakText == nil && weakView == nil);
         }
         HjpFont font = hjp_font_create_from_file(argv[1]);
         assert(font != NULL);

@@ -286,6 +286,46 @@ static void check_document_edits(void) {
     assert(!gui_apply_document_event(g_cur, &event));
 }
 
+static void check_accessible_text(void) {
+    bool previous_navigation = g_cur->nav_enabled;
+    g_cur->nav_enabled = false;
+    frame(false, false, 500);
+    hjp_accessibility_begin(g_cur->window);
+    Value args[] = {hajimu_string("accessible-text"), hajimu_string("元の本文")};
+    fn_text_input(2, args);
+    hjp_accessibility_end(g_cur->window);
+    uint32_t id = gui_hash(args[0].string.data);
+    GuiTextBuf *tb = gui_get_text_buf(id, "");
+    assert(tb->ax_visible && tb->ax_enabled && !tb->ax_secure);
+    HjpEvent event = {.type = HJP_EVENT_ACCESSIBILITY_FOCUS};
+    event.edit.window = g_cur->window;
+    event.edit.generation = hjp_window_get_id(g_cur->window);
+    event.edit.id = id; event.edit.cursor = 1;
+    assert(gui_apply_accessibility_focus(g_cur, &event) && g_cur->focused == id);
+    frame(false, false, 500);
+    gui_nav_begin();
+    fn_text_input(2, args);
+    gui_nav_end();
+    assert(g_cur->focused == id);
+    event.type = HJP_EVENT_ACCESSIBILITY_TEXTREPLACE;
+    event.edit.start = 0; event.edit.end = -1;
+    snprintf(event.edit.text, sizeof(event.edit.text), "%s", "編集済み");
+    assert(gui_apply_document_event(g_cur, &event) && !strcmp(tb->buf, "編集済み"));
+    tb->ax_secure = true;
+    assert(!gui_apply_document_event(g_cur, &event));
+    tb->ax_secure = false;
+    tb->ax_enabled = false;
+    assert(!gui_apply_document_event(g_cur, &event));
+    event.type = HJP_EVENT_ACCESSIBILITY_FOCUS;
+    assert(!gui_apply_accessibility_focus(g_cur, &event));
+    tb->ax_enabled = true; tb->ax_visible = false;
+    assert(!gui_apply_accessibility_focus(g_cur, &event));
+    tb->ax_visible = true; event.edit.cursor = 0;
+    assert(gui_apply_accessibility_focus(g_cur, &event) && g_cur->focused == 0);
+    g_cur->nav_enabled = previous_navigation;
+    hjpCancelFrame(g_cur->vg);
+}
+
 int main(void) {
     size_t function_count = sizeof(gui_functions) / sizeof(gui_functions[0]);
     for (size_t i = 0; i < function_count; i++) {
@@ -305,6 +345,7 @@ int main(void) {
     check_text_selection();
     check_text_navigation();
     check_document_edits();
+    check_accessible_text();
     char oversized[GUI_MAX_TEXT_BUF + 8];
     memset(oversized, 'a', GUI_MAX_TEXT_BUF - 2);
     memcpy(oversized + GUI_MAX_TEXT_BUF - 2, "日本", 7);

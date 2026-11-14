@@ -69,6 +69,9 @@ enum HjpEventType {
     HJP_EVENT_ACCESSIBILITY_PRESS,
     HJP_EVENT_TEXTREPLACE,
     HJP_EVENT_TEXTSELECTION,
+    HJP_EVENT_ACCESSIBILITY_FOCUS,
+    HJP_EVENT_ACCESSIBILITY_TEXTREPLACE,
+    HJP_EVENT_ACCESSIBILITY_TEXTSELECTION,
 };
 
 /* --- ウィンドウイベントサブタイプ --- */
@@ -255,6 +258,9 @@ int hjp_accessibility_window_id(HjpWindow *window);
 bool hjp_accessibility_announce(HjpWindow *window, const char *text);
 bool hjp_accessibility_add(HjpWindow *window, uint32_t id, const char *name, const char *help,
     int role, float x, float y, float w, float h, bool enabled, bool selected);
+bool hjp_accessibility_text(HjpWindow *window, uint32_t id, const char *name, const char *help,
+    const char *text, int start, int end, float x, float y, float w, float h,
+    bool enabled, bool focused, bool secure, bool multiline);
 #endif
 
 /* --- キーボード状態 --- */

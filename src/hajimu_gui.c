@@ -277,6 +277,7 @@ typedef struct {
     float    scroll_y;          /* 複数行入力の表示位置 */
     float    preferred_x;       /* 上下移動で短い行を経由しても列を保持 */
     bool     preferred_x_valid;
+    bool     ax_visible, ax_enabled, ax_secure;
 } GuiTextBuf;
 
 /* --- コンボボックス開閉状態 --- */
@@ -375,6 +376,9 @@ typedef struct {
 static GuiApp  g_apps[GUI_MAX_APPS];
 static GuiApp *g_cur  = NULL;           /* 描画中の現在アプリ        */
 static bool gui_apply_document_event(GuiApp *app, const HjpEvent *event);
+static bool gui_apply_accessibility_focus(GuiApp *app, const HjpEvent *event);
+static void gui_accessible_text(GuiTextBuf *tb, uint32_t id, const char *name,
+    float x, float y, float w, float h, bool secure, bool multiline);
 static void gui_input_modifiers(GuiInput *input, HjpKeymod modifiers) {
 #ifdef __APPLE__
     input->mod_ctrl = (modifiers & HJP_KMOD_GUI) != 0;
@@ -1374,11 +1378,15 @@ static Value fn_draw_loop(int argc, Value *argv) {
                 break;
             case HJP_EVENT_TEXTREPLACE:
             case HJP_EVENT_TEXTSELECTION:
+            case HJP_EVENT_ACCESSIBILITY_TEXTREPLACE:
+            case HJP_EVENT_ACCESSIBILITY_TEXTSELECTION:
+            case HJP_EVENT_ACCESSIBILITY_FOCUS:
                 for (int i = 0; i < GUI_MAX_APPS; i++) {
                     GuiApp *target = &g_apps[i];
                     if (target->window == ev.edit.window && target->window &&
                         hjp_window_get_id(target->window) == ev.edit.generation) {
-                        gui_apply_document_event(target, &ev);
+                        if (ev.type == HJP_EVENT_ACCESSIBILITY_FOCUS) gui_apply_accessibility_focus(target, &ev);
+                        else gui_apply_document_event(target, &ev);
                         break;
                     }
                 }
@@ -1484,6 +1492,7 @@ static Value fn_draw_loop(int argc, Value *argv) {
         gui_nav_begin();
         g_frame_count++;
         app->text_context_published = false;
+        for (int i = 0; i < app->text_buf_count; i++) app->text_bufs[i].ax_visible = false;
         hajimu_call(&callback, 0, NULL);
 #ifdef __APPLE__
         if (!app->text_context_published) {
@@ -2589,12 +2598,15 @@ static bool gui_apply_document_event(GuiApp *app, const HjpEvent *event) {
     for (int i = 0; i < app->text_buf_count; i++) {
         GuiTextBuf *tb = &app->text_bufs[i];
         if (tb->id != event->edit.id) continue;
+        bool accessible = event->type == HJP_EVENT_ACCESSIBILITY_TEXTREPLACE || event->type == HJP_EVENT_ACCESSIBILITY_TEXTSELECTION;
+        if (accessible && (!tb->ax_visible || !tb->ax_enabled || tb->ax_secure || app->composition[0])) return false;
         int start = event->edit.start, end = event->edit.end;
+        if (event->type == HJP_EVENT_ACCESSIBILITY_TEXTREPLACE && end == -1 && start == 0) end = tb->len;
         if (start < 0 || end < start || end > tb->len ||
             gui_text_boundary(tb, start) != start || gui_text_boundary(tb, end) != end) return false;
         int previous_start = tb->sel_start, previous_end = tb->sel_end, previous_cursor = tb->cursor;
         tb->sel_start = start; tb->sel_end = tb->cursor = end;
-        if (event->type == HJP_EVENT_TEXTSELECTION) {
+        if (event->type == HJP_EVENT_TEXTSELECTION || event->type == HJP_EVENT_ACCESSIBILITY_TEXTSELECTION) {
             if (event->edit.cursor != start && event->edit.cursor != end) {
                 tb->sel_start = previous_start; tb->sel_end = previous_end; tb->cursor = previous_cursor;
                 return false;
@@ -2607,6 +2619,28 @@ static bool gui_apply_document_event(GuiApp *app, const HjpEvent *event) {
         if (gui_text_replace_selection(tb, event->edit.text, (int)strlen(event->edit.text))) return true;
         tb->sel_start = previous_start; tb->sel_end = previous_end; tb->cursor = previous_cursor;
         return false;
+    }
+    return false;
+}
+
+static bool gui_apply_accessibility_focus(GuiApp *app, const HjpEvent *event) {
+    if (event->edit.window != app->window || !app->window ||
+        event->edit.generation != hjp_window_get_id(app->window)) return false;
+    for (int i = 0; i < app->text_buf_count; i++) {
+        GuiTextBuf *tb = &app->text_bufs[i];
+        if (tb->id != event->edit.id || !tb->ax_visible || !tb->ax_enabled) continue;
+        if (!event->edit.cursor) {
+            if (app->composition[0] || app->focused != tb->id) return false;
+            app->focused = app->nav_focus = app->active = 0;
+            app->text_context_id = app->text_drag = 0;
+            return true;
+        }
+        if (app->composition[0] && app->focused != tb->id) return false;
+        app->focused = tb->id;
+        app->nav_focus = app->nav_enabled ? tb->id : 0;
+        app->text_context_id = tb->id;
+        app->text_drag = app->active = 0;
+        return true;
     }
     return false;
 }
@@ -2851,6 +2885,7 @@ static Value fn_text_input(int argc, Value *argv) {
 #endif
     hjpRestore(vg);
 
+    gui_accessible_text(tb, id, label, fx, y, fw, GUI_INPUT_H, false, false);
     g_cur->last = (GuiLastWidget){fx, y, fw, GUI_INPUT_H, hov};
     gui_advance(row_h);
     return hajimu_string(tb->buf);
@@ -2974,6 +3009,7 @@ static Value fn_password_input(int argc, Value *argv) {
     }
 
     hjpRestore(vg);
+    gui_accessible_text(tb, id, label, fx, y, fw, GUI_INPUT_H, true, false);
     g_cur->last = (GuiLastWidget){fx, y, fw, GUI_INPUT_H, hov};
     gui_advance(row_h);
     return hajimu_string(tb->buf);
@@ -3266,6 +3302,7 @@ static Value fn_textarea(int argc, Value *argv) {
 
     hjpRestore(vg);
 
+    gui_accessible_text(tb, id, label, x, y, fw, fh, false, true);
     float total_h = (y + fh + 4.0f) - (y - GUI_FONT_SIZE * 1.4f - 4.0f);
     g_cur->last = (GuiLastWidget){x, y - GUI_FONT_SIZE * 1.4f - 4.0f, fw, total_h, hov};
     gui_advance(fh + GUI_FONT_SIZE * 1.4f + 8.0f);
@@ -15129,6 +15166,27 @@ static void gui_accessible(uint32_t id, const char *name, int role, float x, flo
     memset(&g_a11y_current, 0, sizeof(g_a11y_current));
 }
 
+static void gui_accessible_text(GuiTextBuf *tb, uint32_t id, const char *name,
+    float x, float y, float w, float h, bool secure, bool multiline) {
+    tb->ax_visible = false;
+    tb->ax_enabled = !g_disabled;
+    tb->ax_secure = secure;
+#ifdef __APPLE__
+    if (g_cur && (!g_cur->modal_title[0] || g_cur->modal_entered) &&
+        gui_visible_rect(&x, &y, &w, &h)) {
+        int start, end;
+        gui_text_selection(tb, &start, &end);
+        const char *label = g_a11y_current.name[0] ? g_a11y_current.name : name;
+        tb->ax_visible = hjp_accessibility_text(g_cur->window, id, label, g_a11y_current.desc,
+            secure ? "" : tb->buf, secure ? 0 : start, secure ? 0 : end,
+            x, y, w, h, !g_disabled, !g_disabled && g_cur->focused == id, secure, multiline);
+    }
+#else
+    (void)id; (void)name; (void)x; (void)y; (void)w; (void)h; (void)multiline;
+#endif
+    memset(&g_a11y_current, 0, sizeof(g_a11y_current));
+}
+
 static struct {
     char msg[256];
     int  mode;  /* 0=off, 1=polite, 2=assertive */
@@ -25150,7 +25208,7 @@ static Value fn_api_status(int argc, Value *argv) {
         } else if (found->fn == fn_async_exec || found->fn == fn_task_progress || found->fn == fn_task_notify) {
             state = "部分対応"; reason = "POSIXプロセスタスクのみ。任意クロージャの隔離実行・Windowsは未対応";
         } else if (found->fn == fn_a11y_name || found->fn == fn_a11y_desc || found->fn == fn_a11y_role || found->fn == fn_sr_announce) {
-            state = "部分対応"; reason = "macOSの一部部品のみ。入力欄・他OS・実読み上げは未検証または未対応";
+            state = "部分対応"; reason = "macOSの基本部品と通常入力欄の編集/選択/フォーカス。外部AX・実読み上げ・テーブル/ツリー・他OSは未完了";
         } else if (found->fn == fn_focus_traversal) {
             state = "部分対応"; reason = "明示有効化する基本部品のフォーカス移動。全ウィジェットへの適用は未完了";
         }
@@ -25181,7 +25239,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.19.0",
+        .version        = "14.20.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,

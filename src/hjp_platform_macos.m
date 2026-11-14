@@ -278,6 +278,13 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
 @property(nonatomic) uint32_t widgetID;
 @property(nonatomic) BOOL live;
 @end
+
+@interface HjpAccessibilityTextElement : HjpAccessibilityElement
+@property(nonatomic, copy) NSString *snapshotText;
+@property(nonatomic) NSRange snapshotSelection;
+@property(nonatomic) BOOL snapshotFocused;
+@property(nonatomic) BOOL secure;
+@end
 @implementation HjpAccessibilityElement
 - (id)accessibilityParent { return self.ownerView; }
 - (NSRect)accessibilityFrame {
@@ -298,11 +305,126 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
 }
 @end
 
+@implementation HjpAccessibilityTextElement
+- (BOOL)editableSnapshot {
+    HjpOpenGLView *view = self.ownerView;
+    return self.live && self.accessibilityEnabled && !self.secure && view.ownerWindow &&
+        !view.hasMarkedText && (view.documentID != self.widgetID || [view.inputDocument isEqualToString:self.snapshotText]);
+}
+- (BOOL)queueFocus {
+    HjpOpenGLView *view = self.ownerView;
+    if (!self.live || !self.accessibilityEnabled || !view.ownerWindow ||
+        (view.hasMarkedText && view.documentID != self.widgetID)) return NO;
+    if ((g_hjp.evHead + 1) % HJP_MAX_EVENTS == g_hjp.evTail) return NO;
+    HjpEvent event = {0};
+    event.type = HJP_EVENT_ACCESSIBILITY_FOCUS;
+    event.edit.window = view.ownerWindow; event.edit.generation = view.ownerWindow->windowId;
+    event.edit.id = self.widgetID;
+    event.edit.cursor = 1;
+    hjp__pushEvent(&event);
+    if (self.secure && view.documentID) hjp_set_text_input_context(view.ownerWindow, 0, "", 0, 0, 0);
+    else if (!self.secure && view.documentID != self.widgetID) {
+        int start = (int)[[self.snapshotText substringToIndex:self.snapshotSelection.location] lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+        int end = start + (int)[[self.snapshotText substringWithRange:self.snapshotSelection] lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+        hjp_set_text_input_context(view.ownerWindow, self.widgetID, self.snapshotText.UTF8String, start, end, 2048);
+    }
+    [view.window makeKeyWindow];
+    [view.window makeFirstResponder:view];
+    return YES;
+}
+- (BOOL)isAccessibilityFocused { return self.live && self.accessibilityEnabled && self.snapshotFocused && self.ownerView.window.isKeyWindow; }
+- (void)setAccessibilityFocused:(BOOL)focused {
+    if (focused) { [self queueFocus]; return; }
+    HjpOpenGLView *view = self.ownerView;
+    if (!self.live || !self.accessibilityEnabled || !view.ownerWindow || view.hasMarkedText ||
+        (g_hjp.evHead + 1) % HJP_MAX_EVENTS == g_hjp.evTail) return;
+    HjpEvent event = {0}; event.type = HJP_EVENT_ACCESSIBILITY_FOCUS;
+    event.edit.window = view.ownerWindow; event.edit.generation = view.ownerWindow->windowId;
+    event.edit.id = self.widgetID;
+    hjp__pushEvent(&event);
+    if (view.documentID == self.widgetID) hjp_set_text_input_context(view.ownerWindow, 0, "", 0, 0, 0);
+}
+- (BOOL)accessibilityPerformPress { return NO; }
+- (id)accessibilityValue { return self.live && !self.secure ? self.snapshotText : nil; }
+- (NSInteger)accessibilityNumberOfCharacters { return self.live && !self.secure ? (NSInteger)self.snapshotText.length : 0; }
+- (NSRange)accessibilitySelectedTextRange {
+    return self.live && !self.secure ? self.snapshotSelection : NSMakeRange(NSNotFound, 0);
+}
+- (NSString *)accessibilitySelectedText {
+    return self.live && !self.secure ? [self.snapshotText substringWithRange:self.snapshotSelection] : nil;
+}
+- (BOOL)isAccessibilitySelectorAllowed:(SEL)selector {
+    if (selector == @selector(setAccessibilityValue:) || selector == @selector(setAccessibilitySelectedTextRange:) ||
+        selector == @selector(setAccessibilitySelectedText:)) return [self editableSnapshot];
+    if (selector == @selector(setAccessibilityFocused:)) return self.live && self.accessibilityEnabled;
+    if (selector == @selector(accessibilityPerformPress)) return NO;
+    return [super isAccessibilitySelectorAllowed:selector];
+}
+- (void)setAccessibilityValue:(id)value {
+    if (![self editableSnapshot] || ![value isKindOfClass:NSString.class]) return;
+    NSData *data = [value dataUsingEncoding:NSUTF8StringEncoding];
+    if (!data || data.length >= 2048) return;
+    const unsigned char *bytes = data.bytes;
+    size_t chunks = 0;
+    for (size_t offset = 0; offset < data.length; chunks++) {
+        size_t n = MIN(data.length - offset, (size_t)127);
+        while (n && offset + n < data.length && (bytes[offset + n] & 0xc0) == 0x80) n--;
+        offset += n;
+    }
+    if (!chunks) chunks = 1;
+    int freeEvents = HJP_MAX_EVENTS - 1 - (g_hjp.evHead - g_hjp.evTail + HJP_MAX_EVENTS) % HJP_MAX_EVENTS;
+    if (chunks + 1 > (size_t)freeEvents || ![self queueFocus]) return;
+    size_t offset = 0;
+    do {
+        HjpEvent event = {0};
+        event.type = HJP_EVENT_ACCESSIBILITY_TEXTREPLACE;
+        event.edit.window = self.ownerView.ownerWindow;
+        event.edit.generation = self.ownerView.ownerWindow->windowId;
+        event.edit.id = self.widgetID;
+        event.edit.start = (int)offset; event.edit.end = offset ? (int)offset : -1;
+        size_t n = MIN(data.length - offset, sizeof(event.edit.text) - 1);
+        while (n && offset + n < data.length && (bytes[offset + n] & 0xc0) == 0x80) n--;
+        if (n) memcpy(event.edit.text, bytes + offset, n);
+        hjp__pushEvent(&event);
+        offset += n;
+    } while (offset < data.length);
+    hjp_set_text_input_context(self.ownerView.ownerWindow, self.widgetID, [value UTF8String], (int)data.length, (int)data.length, 2048);
+}
+- (void)setAccessibilitySelectedTextRange:(NSRange)range {
+    if (![self editableSnapshot] || range.location > self.snapshotText.length ||
+        range.length > self.snapshotText.length - range.location) return;
+    NSData *prefix = [[self.snapshotText substringToIndex:range.location] dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *selected = [[self.snapshotText substringWithRange:range] dataUsingEncoding:NSUTF8StringEncoding];
+    if (!prefix || !selected) return;
+    int freeEvents = HJP_MAX_EVENTS - 1 - (g_hjp.evHead - g_hjp.evTail + HJP_MAX_EVENTS) % HJP_MAX_EVENTS;
+    if (freeEvents < 2 || ![self queueFocus]) return;
+    HjpEvent event = {0};
+    event.type = HJP_EVENT_ACCESSIBILITY_TEXTSELECTION;
+    event.edit.window = self.ownerView.ownerWindow; event.edit.generation = self.ownerView.ownerWindow->windowId;
+    event.edit.id = self.widgetID;
+    event.edit.start = (int)prefix.length;
+    event.edit.end = event.edit.cursor = (int)(prefix.length + selected.length);
+    hjp__pushEvent(&event);
+    hjp_set_text_input_context(self.ownerView.ownerWindow, self.widgetID, self.snapshotText.UTF8String,
+                               event.edit.start, event.edit.end, 2048);
+}
+- (void)setAccessibilitySelectedText:(NSString *)text {
+    if (![self editableSnapshot] || ![text isKindOfClass:NSString.class]) return;
+    NSString *next = [self.snapshotText stringByReplacingCharactersInRange:self.snapshotSelection withString:text];
+    [self setAccessibilityValue:next];
+}
+@end
+
 @implementation HjpOpenGLView
 
 - (BOOL)isAccessibilityElement { return YES; }
 - (NSString *)accessibilityRole { return NSAccessibilityGroupRole; }
 - (NSArray *)accessibilityChildren { return self.accessiblePublished ?: @[]; }
+- (id)accessibilityFocusedUIElement {
+    for (HjpAccessibilityElement *element in self.accessiblePublished)
+        if ([element isKindOfClass:HjpAccessibilityTextElement.class] && [(HjpAccessibilityTextElement *)element isAccessibilityFocused]) return element;
+    return self;
+}
 - (id)accessibilityHitTest:(NSPoint)point {
     for (HjpAccessibilityElement *element in [self.accessiblePublished reverseObjectEnumerator])
         if (element.live && NSPointInRect(point, element.accessibilityFrame)) return element;
@@ -1056,6 +1178,12 @@ bool hjp_accessibility_add(HjpWindow *window, uint32_t id, const char *name, con
     if (!view || !view.accessibleCache || w <= 0 || h <= 0 || !isfinite(x) || !isfinite(y) || !isfinite(w) || !isfinite(h)) return false;
     NSNumber *key = @(id);
     HjpAccessibilityElement *element = view.accessibleCache[key];
+    if (element && ((role >= 3) != [element isKindOfClass:HjpAccessibilityTextElement.class])) {
+        element.live = NO;
+        [view.accessibleCache removeObjectForKey:key];
+        [view.accessibleFrame removeObject:element];
+        element = nil;
+    }
     if (!element) {
         if (view.accessibleCache.count >= 512) {
             for (NSNumber *old in view.accessibleCache.allKeys) if (!view.accessibleCache[old].live) {
@@ -1063,7 +1191,7 @@ bool hjp_accessibility_add(HjpWindow *window, uint32_t id, const char *name, con
             }
         }
         if (view.accessibleCache.count >= 512) return false;
-        element = [[HjpAccessibilityElement alloc] init];
+        element = role >= 3 ? [[HjpAccessibilityTextElement alloc] init] : [[HjpAccessibilityElement alloc] init];
         element.widgetID = id;
         element.ownerView = view;
         view.accessibleCache[key] = element;
@@ -1071,12 +1199,38 @@ bool hjp_accessibility_add(HjpWindow *window, uint32_t id, const char *name, con
     if (!element.live) [view.accessibleFrame addObject:element];
     element.live = YES;
     element.accessibilityElement = YES;
-    element.accessibilityRole = role == 1 ? NSAccessibilityCheckBoxRole : role == 2 ? NSAccessibilityRadioButtonRole : NSAccessibilityButtonRole;
+    element.accessibilityRole = role == 1 ? NSAccessibilityCheckBoxRole : role == 2 ? NSAccessibilityRadioButtonRole :
+        role == 4 ? NSAccessibilityTextAreaRole : role >= 3 ? NSAccessibilityTextFieldRole : NSAccessibilityButtonRole;
     element.accessibilityLabel = (name ? [NSString stringWithUTF8String:name] : nil) ?: @"";
     element.accessibilityHelp = (help ? [NSString stringWithUTF8String:help] : nil) ?: @"";
     element.accessibilityEnabled = enabled;
-    element.accessibilityValue = role == 1 || role == 2 ? @(selected) : nil;
+    if (role < 3) element.accessibilityValue = role == 1 || role == 2 ? @(selected) : nil;
     element.accessibilityFrameInParentSpace = NSMakeRect(x, view.isFlipped ? y : view.bounds.size.height - y - h, w, h);
+    return true;
+}
+bool hjp_accessibility_text(HjpWindow *window, uint32_t id, const char *name, const char *help,
+    const char *text, int start, int end, float x, float y, float w, float h,
+    bool enabled, bool focused, bool secure, bool multiline) {
+    NSString *value = secure ? @"" : (text ? [NSString stringWithUTF8String:text] : nil);
+    if (!value || start < 0 || end < start || (size_t)end > strlen(text ? text : "")) return false;
+    NSString *prefix = secure ? @"" : [[NSString alloc] initWithBytes:text length:start encoding:NSUTF8StringEncoding];
+    NSString *selection = secure ? @"" : [[NSString alloc] initWithBytes:text + start length:end - start encoding:NSUTF8StringEncoding];
+    if (!prefix || !selection) return false;
+    if (!hjp_accessibility_add(window, id, name, help, multiline ? 4 : 3, x, y, w, h, enabled, false)) return false;
+    HjpAccessibilityTextElement *element = (HjpAccessibilityTextElement *)window->glview.accessibleCache[@(id)];
+    BOOL changedFocus = element.snapshotFocused != focused;
+    BOOL changedValue = element.snapshotText && ![element.snapshotText isEqualToString:value];
+    NSRange range = NSMakeRange(prefix.length, selection.length);
+    BOOL changedSelection = !NSEqualRanges(element.snapshotSelection, range);
+    element.secure = secure;
+    element.accessibilitySubrole = secure ? NSAccessibilitySecureTextFieldSubrole : nil;
+    element.accessibilityProtectedContent = secure;
+    element.snapshotText = value;
+    element.snapshotSelection = range;
+    element.snapshotFocused = focused;
+    if (changedFocus) NSAccessibilityPostNotification(element, NSAccessibilityFocusedUIElementChangedNotification);
+    if (changedValue && !secure) NSAccessibilityPostNotification(element, NSAccessibilityValueChangedNotification);
+    if (changedSelection && !secure) NSAccessibilityPostNotification(element, NSAccessibilitySelectedTextChangedNotification);
     return true;
 }
 void hjp_accessibility_end(HjpWindow *window) {
