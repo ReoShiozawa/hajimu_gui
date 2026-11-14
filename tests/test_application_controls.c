@@ -821,6 +821,77 @@ static void check_text_block_layout(void) {
     hjpCancelFrame(g_cur->vg);
 }
 
+static void check_responsive_fields(void) {
+    float original_font = g_custom_font_size;
+    bool original_nav = g_cur->nav_enabled;
+    g_cur->nav_enabled = false;
+    Value choices = modal_list("A", "B");
+    const float widths[] = {40, 120, 300, 600};
+    const float sizes[] = {16, 28, 48};
+    for (int font = 0; font < 3; font++) for (int width = 0; width < 4; width++) {
+        g_custom_font_size = sizes[font];
+        for (int control = 0; control < 4; control++) {
+            frame(false, false, 800); g_cur->lay.w = widths[width];
+            Value label = hajimu_string("幅に合わせて折り返す長いラベル");
+            Value text[] = {label, hajimu_string("値")};
+            Value number[] = {label, hajimu_number(1)};
+            Value combo[] = {label, choices, hajimu_string("A")};
+            if (control == 0) fn_text_input(2, text);
+            if (control == 1) fn_password_input(2, text);
+            if (control == 2) fn_number_input(2, number);
+            if (control == 3) fn_combobox(3, combo);
+            assert(g_cur->last.x >= 0 && g_cur->last.w > 0);
+            assert(g_cur->last.x + g_cur->last.w <= widths[width] + 0.01f);
+            assert(g_cur->last.h >= sizes[font] * 1.4f);
+            assert(g_cur->lay.y >= g_cur->last.y + g_cur->last.h);
+            hjpCancelFrame(g_cur->vg);
+        }
+    }
+    g_custom_font_size = 0;
+    Value number[] = {hajimu_string("count"), hajimu_number(1), hajimu_number(0), hajimu_number(10), hajimu_number(1)};
+    frame(false, false, 140); g_cur->in.scroll_y = 2; g_disabled = true;
+    assert(fn_number_input(5, number).number == 1 && g_cur->in.scroll_y == 2); g_disabled = false;
+    frame(false, false, 140); g_cur->in.scroll_y = 2;
+    assert(fn_number_input(5, number).number == 3 && !g_cur->in.scroll_y);
+    frame(false, false, 800); g_cur->nav_enabled = true;
+    g_cur->nav_focus = gui_hash("count") ^ 0xC3D4; g_cur->focused = 0; g_cur->in.key_return = true;
+    assert(fn_number_input(5, number).number == 2 && !g_cur->in.key_return);
+    g_cur->nav_enabled = false;
+    frame(false, false, 800); number[1] = hajimu_number(NAN);
+    assert(isnan(fn_number_input(5, number).number) && g_cur->lay.y == 0);
+    number[1] = hajimu_number(1); number[4] = hajimu_number(0);
+    assert(fn_number_input(5, number).number == 1 && g_cur->lay.y == 0);
+
+    Value combo[] = {hajimu_string("choice"), choices, hajimu_string("A")};
+    frame(true, false, 140); fn_combobox(3, combo);
+    assert(g_cur->combo_open == gui_hash("choice") && !g_cur->in.clicked);
+    GuiApp *original_app = g_cur;
+    Value app_args[] = {hajimu_string("Separate choice window"), hajimu_number(320), hajimu_number(240)};
+    Value other = fn_app_create(3, app_args);
+    assert(other.type == VALUE_NUMBER);
+    g_cur = &g_apps[(int)other.number];
+    hjp_gl_make_current(g_cur->window, g_cur->gl);
+    frame(false, false, 800); fn_combobox(3, combo); assert(!g_cur->combo_open);
+    hjpCancelFrame(g_cur->vg);
+    fn_app_quit(1, &other);
+    g_cur = original_app;
+    hjp_gl_make_current(g_cur->window, g_cur->gl);
+    assert(g_cur->combo_open == gui_hash("choice"));
+    frame(false, false, 140); g_disabled = true; fn_combobox(3, combo); g_disabled = false;
+    assert(!g_cur->combo_open);
+    frame(true, false, 140); gui_nav_begin(); fn_combobox(3, combo); gui_nav_end();
+    assert(g_cur->combo_open == gui_hash("choice"));
+    frame(false, false, 800); gui_nav_begin(); gui_nav_end(); assert(!g_cur->combo_open);
+    frame(true, false, 140); fn_combobox(3, combo);
+    Value modal = modal_list("new-modal", NULL), none = modal_list(NULL, NULL);
+    fn_modal_reserve(1, &modal); assert(!g_cur->combo_open); fn_modal_reserve(1, &none);
+    Value valid_font = hajimu_number(28), invalid_font = hajimu_number(INFINITY);
+    fn_font_size_set(1, &valid_font); fn_font_size_set(1, &invalid_font);
+    assert(g_custom_font_size == 28);
+    g_custom_font_size = original_font; g_cur->nav_enabled = original_nav;
+    hjpCancelFrame(g_cur->vg);
+}
+
 static void check_modal_forms(void) {
     frame(false, false, 500); gui_nav_begin();
     Value parent = modal_list("form", NULL), none = modal_list(NULL, NULL);
@@ -1017,6 +1088,7 @@ int main(void) {
     check_window_close_input();
     check_modal_stack();
     check_modal_forms();
+    check_responsive_fields();
     check_text_block_layout();
     check_form_scrolling();
     char oversized[GUI_MAX_TEXT_BUF + 8];
