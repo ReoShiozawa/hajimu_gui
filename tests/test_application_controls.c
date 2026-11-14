@@ -470,6 +470,7 @@ static void check_closing_loop(void) {
         __hajimu_runtime = &runtime;
         Value draw[] = {closing_app, {.type = VALUE_FUNCTION, .function.definition = (struct ASTNode *)&close_callback_tag}};
         g_cur = NULL;
+        hjp_gl_make_current(original->window, original->gl);
         fn_draw_loop(2, draw);
         assert(!app->loop_active && !app->running && !app->closing && app->valid);
         assert(app->close_frames >= 5 && closing_callbacks == (failure ? 2 : 1));
@@ -513,6 +514,109 @@ static void check_closing_loop(void) {
     hjp_gl_make_current(original->window, original->gl);
 }
 
+static HjpEvent source_event(GuiApp *app, int type) {
+    HjpEvent event = {.type = type};
+    event.source.window = app->window;
+    event.source.generation = hjp_window_get_id(app->window);
+    return event;
+}
+static void check_window_routing(void) {
+    GuiApp *original = g_cur;
+    hjp_event_queue_clear(&original->events);
+    Value create[] = {hajimu_string("Routing regression"), hajimu_number(400), hajimu_number(240)};
+    Value other_id = fn_app_create(3, create);
+    GuiApp *other = &g_apps[(int)other_id.number];
+    HjpEvent event = source_event(other, HJP_EVENT_KEYDOWN), result;
+    event.key.sym = HJPK_TAB;
+    assert(!gui_route_event(original, &event) && other->events.count == 1);
+    event = source_event(other, HJP_EVENT_TEXTEDITING);
+    strcpy(event.text.text, "に");
+    assert(!gui_route_event(original, &event));
+    event = source_event(other, HJP_EVENT_DROPFILE); event.drop.file = strdup("owned-route.jp");
+    assert(!gui_route_event(original, &event));
+    event = source_event(other, HJP_EVENT_QUIT);
+    assert(!gui_route_event(original, &event) && original->running && !original->os_close_pending);
+    assert(gui_poll_event(other, &result) && result.type == HJP_EVENT_KEYDOWN && result.key.sym == HJPK_TAB);
+    assert(gui_poll_event(other, &result) && result.type == HJP_EVENT_TEXTEDITING && !strcmp(result.text.text, "に"));
+    assert(gui_poll_event(other, &result) && result.type == HJP_EVENT_DROPFILE);
+    hjp_event_dispose(&result);
+    assert(gui_poll_event(other, &result) && result.type == HJP_EVENT_QUIT);
+    uint64_t rejected = original->rejected_events;
+    event = source_event(other, HJP_EVENT_DROPFILE); event.source.generation++;
+    event.drop.file = strdup("stale-route.jp");
+    assert(!gui_route_event(original, &event) && !event.drop.file);
+    assert(original->rejected_events == rejected + 1);
+    event = source_event(other, HJP_EVENT_TEXTREPLACE);
+    event.edit.window = original->window; event.edit.generation = hjp_window_get_id(original->window);
+    assert(!gui_route_event(original, &event) && other->events.count == 0);
+    event = (HjpEvent){.type = HJP_EVENT_KEYDOWN};
+    assert(!gui_route_event(original, &event));
+    HjpEvent stale = source_event(other, HJP_EVENT_KEYDOWN);
+    event = source_event(other, HJP_EVENT_DROPFILE); event.drop.file = strdup("clear-on-destroy.jp");
+    assert(!gui_route_event(original, &event));
+    fn_app_quit(1, &other_id);
+    assert(!other->events.count);
+    other_id = fn_app_create(3, create);
+    other = &g_apps[(int)other_id.number];
+    assert(!gui_route_event(original, &stale));
+    fn_app_quit(1, &other_id);
+    g_cur = original;
+    hjp_gl_make_current(original->window, original->gl);
+}
+
+static int event_callback_tag, event_guard_tag, event_callbacks, event_guards;
+static bool event_model_committed, event_overflow;
+static Value window_event_observe(Value *callback, int argc, Value *argv) {
+    (void)argv; assert(argc == 0);
+    if (callback->function.definition == (struct ASTNode *)&event_guard_tag) {
+        assert(event_model_committed);
+        event_guards++; return hajimu_bool(true);
+    }
+    assert(callback->function.definition == (struct ASTNode *)&event_callback_tag);
+    Value args[] = {hajimu_string("event-field"), hajimu_string("before")};
+    Value text = fn_text_input(2, args);
+    assert(!strcmp(text.string.data, event_overflow ? "before" : "beforeX"));
+    if (!event_overflow) assert(!g_cur->in.down && !g_cur->active && !g_cur->text_drag);
+    event_callbacks++; event_model_committed = true;
+    return hajimu_null();
+}
+static void check_window_close_input(void) {
+    GuiApp *original = g_cur;
+    HajimuRuntime *previous = __hajimu_runtime;
+    HajimuRuntime runtime = {.call = window_event_observe};
+    for (int overflow = 0; overflow < 2; overflow++) {
+        event_overflow = overflow != 0;
+        event_model_committed = false; event_callbacks = event_guards = 0;
+        Value create[] = {hajimu_string("Input before close regression"), hajimu_number(400), hajimu_number(240)};
+        Value app_id = fn_app_create(3, create);
+        GuiApp *app = &g_apps[(int)app_id.number];
+        g_cur = app;
+        app->focused = gui_hash("event-field");
+        gui_get_text_buf(app->focused, "before");
+        app->in.down = true; app->active = 77; app->text_drag = 88;
+        app->close_guard = (Value){.type = VALUE_FUNCTION, .function.definition = (struct ASTNode *)&event_guard_tag};
+        HjpEvent event = source_event(app, HJP_EVENT_WINDOWEVENT);
+        event.window.event = HJP_WINDOWEVENT_FOCUS_LOST;
+        if (!overflow) hjp_event_queue_push(&app->events, &event);
+        event = source_event(app, HJP_EVENT_TEXTINPUT); strcpy(event.text.text, "X");
+        for (int i = 0; i < (overflow ? HJP_DEFERRED_EVENTS + 1 : 1); i++) hjp_event_queue_push(&app->events, &event);
+        event = source_event(app, HJP_EVENT_QUIT); hjp_event_queue_push(&app->events, &event);
+        Value draw[] = {app_id, {.type = VALUE_FUNCTION, .function.definition = (struct ASTNode *)&event_callback_tag}};
+        g_cur = NULL; __hajimu_runtime = &runtime;
+        fn_draw_loop(2, draw);
+        assert(event_callbacks == 1 && event_guards == 1 && !app->running);
+        if (overflow) {
+            Value state = fn_input_state(1, &app_id);
+            assert(gui_dict_lookup(state, "破棄入力数").number == HJP_DEFERRED_EVENTS + 1);
+            assert(!gui_dict_lookup(state, "入力リセット待ち").boolean);
+        }
+        fn_app_quit(1, &app_id);
+    }
+    __hajimu_runtime = previous;
+    g_cur = original;
+    hjp_gl_make_current(original->window, original->gl);
+}
+
 int main(void) {
     size_t function_count = sizeof(gui_functions) / sizeof(gui_functions[0]);
     for (size_t i = 0; i < function_count; i++) {
@@ -535,6 +639,8 @@ int main(void) {
     check_accessible_text();
     check_task_cancellation();
     check_closing_loop();
+    check_window_routing();
+    check_window_close_input();
     char oversized[GUI_MAX_TEXT_BUF + 8];
     memset(oversized, 'a', GUI_MAX_TEXT_BUF - 2);
     memcpy(oversized + GUI_MAX_TEXT_BUF - 2, "日本", 7);

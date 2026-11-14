@@ -34,6 +34,7 @@ int main(int argc, char **argv) {
                     [view mouseDown:mouse];
                     HjpEvent press;
                     assert(hjp__popEvent(&press) && press.type == HJP_EVENT_MOUSEBUTTONDOWN);
+                    assert(press.source.window == win && press.source.generation == win->windowId);
                     assert(press.button.mod & HJP_KMOD_SHIFT);
                     mouse = [NSEvent mouseEventWithType:NSEventTypeLeftMouseUp
                         location:NSMakePoint(25, 50) modifierFlags:0
@@ -63,6 +64,7 @@ int main(int argc, char **argv) {
                     while (hjp__popEvent(&e)) {
                         if (e.type == HJP_EVENT_TEXTEDITING) cleared = e.text.text[0] == '\0';
                         if (e.type == HJP_EVENT_TEXTINPUT) {
+                            assert(e.source.window == win && e.source.generation == win->windowId);
                             assert([[NSString alloc] initWithUTF8String:e.text.text] != nil);
                             bytes += strlen(e.text.text);
                         }
@@ -289,7 +291,7 @@ int main(int argc, char **argv) {
                 HjpEvent event;
                 bool close_received = false;
                 while (hjp_poll_event(&event)) {
-                    if (event.type == HJP_EVENT_QUIT) close_received = true;
+                    if (event.type == HJP_EVENT_QUIT && event.source.window == win && event.source.generation == win->windowId) close_received = true;
                 }
                 assert(close_received);
                 hjp_window_destroy(win);

@@ -48,6 +48,8 @@
 #include <string.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <limits.h>
+static int hjp_window_serial;
 
 /* MSVC: 自動リンク */
 #ifdef _MSC_VER
@@ -101,6 +103,7 @@ struct HjpWindow {
     int     width, height;
     int     fb_width, fb_height;
     int     id;
+    WCHAR   surrogate_high; /* ウィンドウ単位のUTF-16未完ペア */
     bool    fullscreen;
     RECT     pre_fullscreen_rect;  /* フルスクリーン前のウィンドウ位置 */
     LONG_PTR pre_fullscreen_style;  /* Win64: LONG_PTR で GWL_STYLE を保持 */
@@ -119,8 +122,6 @@ static struct {
     /* テキスト入力 */
     bool        text_input_active;
 
-    /* WM_CHAR サロゲートペア蓄積 (Win64でも WM_CHAR は2回来る) */
-    WCHAR       surrogate_high;
 
     /* クリップボード */
     char       *clipboard_text;
@@ -134,7 +135,6 @@ static struct {
     WNDCLASSEXW wc;
 
     bool        inited;
-    int         next_window_id;
 
     /* 現在のウィンドウ (イベントコールバック用) */
     struct HjpWindow *current_win;
@@ -145,7 +145,7 @@ static struct {
  * ===================================================================*/
 static void push_event(const HjpEvent *ev) {
     int next = (g_hjp.ev_head + 1) % HJP_MAX_EVENTS;
-    if (next == g_hjp.ev_tail) return;
+    if (next == g_hjp.ev_tail) { if (ev->type == HJP_EVENT_DROPFILE) free(ev->drop.file); return; }
     g_hjp.events[g_hjp.ev_head] = *ev;
     g_hjp.ev_head = next;
 }
@@ -195,6 +195,9 @@ static HjpKeymod get_modifiers(void) {
 static LRESULT CALLBACK hjp_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     HjpEvent ev;
     memset(&ev, 0, sizeof(ev));
+    HjpWindow *owner = (HjpWindow *)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    ev.source.window = owner;
+    ev.source.generation = owner ? owner->id : -1;
 
     switch (msg) {
         case WM_CLOSE:
@@ -208,11 +211,11 @@ static LRESULT CALLBACK hjp_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
             ev.window.data1 = LOWORD(lp);
             ev.window.data2 = HIWORD(lp);
             push_event(&ev);
-            if (g_hjp.current_win) {
-                g_hjp.current_win->width = LOWORD(lp);
-                g_hjp.current_win->height = HIWORD(lp);
-                g_hjp.current_win->fb_width = LOWORD(lp);
-                g_hjp.current_win->fb_height = HIWORD(lp);
+            if (owner) {
+                owner->width = LOWORD(lp);
+                owner->height = HIWORD(lp);
+                owner->fb_width = LOWORD(lp);
+                owner->fb_height = HIWORD(lp);
             }
             break;
 
@@ -223,6 +226,7 @@ static LRESULT CALLBACK hjp_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
             break;
 
         case WM_KILLFOCUS:
+            if (owner) owner->surrogate_high = 0;
             ev.type = HJP_EVENT_WINDOWEVENT;
             ev.window.event = HJP_WINDOWEVENT_FOCUS_LOST;
             push_event(&ev);
@@ -326,23 +330,24 @@ static LRESULT CALLBACK hjp_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
              * BMP外文字 (U+10000〜) はサロゲートペア 2回の WM_CHAR になる。
              * Win64 でも WPARAM は下位16bit に値を持つ。 */
             WCHAR ch = (WCHAR)(wp & 0xFFFF);
+            if (!owner) return 0;
 
             /* 上位サロゲート (D800–DBFF) を蓄積 */
             if (ch >= 0xD800 && ch <= 0xDBFF) {
-                g_hjp.surrogate_high = ch;
+                owner->surrogate_high = ch;
                 return 0;
             }
 
             uint32_t codepoint;
-            if (ch >= 0xDC00 && ch <= 0xDFFF && g_hjp.surrogate_high) {
+            if (ch >= 0xDC00 && ch <= 0xDFFF && owner->surrogate_high) {
                 /* 下位サロゲート — ペアを結合して U+10000〜 を復元 */
                 codepoint = 0x10000u +
-                    ((uint32_t)(g_hjp.surrogate_high - 0xD800u) << 10) +
+                    ((uint32_t)(owner->surrogate_high - 0xD800u) << 10) +
                     (uint32_t)(ch - 0xDC00u);
-                g_hjp.surrogate_high = 0;
+                owner->surrogate_high = 0;
             } else {
-                g_hjp.surrogate_high = 0;
-                codepoint = (uint32_t)ch;
+                owner->surrogate_high = 0;
+                codepoint = ch >= 0xdc00 && ch <= 0xdfff ? 0xfffd : (uint32_t)ch;
             }
 
             if (g_hjp.text_input_active && codepoint >= 32 && codepoint != 127) {
@@ -437,6 +442,8 @@ bool hjp_init(void) {
 
 void hjp_quit(void) {
     if (!g_hjp.inited) return;
+    HjpEvent pending;
+    while (pop_event(&pending)) if (pending.type == HJP_EVENT_DROPFILE) free(pending.drop.file);
     free(g_hjp.clipboard_text);
     memset(&g_hjp, 0, sizeof(g_hjp));
 }
@@ -446,6 +453,7 @@ void hjp_quit(void) {
  * ===================================================================*/
 
 HjpWindow *hjp_window_create(const char *title, int x, int y, int w, int h, uint32_t flags) {
+    if (hjp_window_serial == INT_MAX) return NULL;
     /* タイトル UTF-8→UTF-16 (title が NULL の場合も安全に処理) */
     WCHAR *wtitle = NULL;
     if (title) {
@@ -541,7 +549,8 @@ HjpWindow *hjp_window_create(const char *title, int x, int y, int w, int h, uint
     win->height   = h;
     win->fb_width  = w;
     win->fb_height = h;
-    win->id = ++g_hjp.next_window_id;
+    win->id = ++hjp_window_serial;
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)win);
     g_hjp.current_win = win;
 
     return win;
@@ -549,6 +558,7 @@ HjpWindow *hjp_window_create(const char *title, int x, int y, int w, int h, uint
 
 void hjp_window_destroy(HjpWindow *win) {
     if (!win) return;
+    SetWindowLongPtrW(win->hwnd, GWLP_USERDATA, 0);
     wglMakeCurrent(NULL, NULL);
     if (win->hrc) wglDeleteContext(win->hrc);
     if (win->hdc) ReleaseDC(win->hwnd, win->hdc);

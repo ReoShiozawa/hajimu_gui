@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <limits.h>
 
 /* =====================================================================
  * 内部型
@@ -68,10 +69,25 @@ static struct {
 } g_hjp = {0};
 
 static void hjp__pushEvent(HjpEvent *e) {
+    if (!e->source.window && e->type == HJP_EVENT_ACCESSIBILITY_PRESS) {
+        e->source.window = e->accessibility.window; e->source.generation = e->accessibility.generation;
+    } else if (!e->source.window && (e->type == HJP_EVENT_TEXTREPLACE || e->type == HJP_EVENT_TEXTSELECTION ||
+        e->type == HJP_EVENT_ACCESSIBILITY_FOCUS || e->type == HJP_EVENT_ACCESSIBILITY_TEXTREPLACE || e->type == HJP_EVENT_ACCESSIBILITY_TEXTSELECTION)) {
+        e->source.window = e->edit.window; e->source.generation = e->edit.generation;
+    }
     int next = (g_hjp.evHead + 1) % HJP_MAX_EVENTS;
-    if (next == g_hjp.evTail) return; /* full */
+    if (next == g_hjp.evTail) {
+        if (e->type == HJP_EVENT_DROPFILE) free(e->drop.file);
+        return;
+    }
     g_hjp.events[g_hjp.evHead] = *e;
     g_hjp.evHead = next;
+}
+static void hjp__pushWindowEvent(HjpWindow *window, HjpEvent *event) {
+    if (!window) { if (event->type == HJP_EVENT_DROPFILE) free(event->drop.file); return; }
+    event->source.window = window;
+    event->source.generation = window->windowId;
+    hjp__pushEvent(event);
 }
 
 static bool hjp__popEvent(HjpEvent *e) {
@@ -459,7 +475,7 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
     e.type = HJP_EVENT_MOUSEMOTION;
     e.motion.x = (int)loc.x;
     e.motion.y = (int)loc.y;
-    hjp__pushEvent(&e);
+    hjp__pushWindowEvent(self.ownerWindow, &e);
 }
 
 - (void)mouseDown:(NSEvent *)event { [self handleMouseBtn:event btn:HJP_BUTTON_LEFT down:YES]; }
@@ -478,7 +494,7 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
     e.button.mod = hjp__macModToHjp(event.modifierFlags);
     e.button.x = (int)loc.x;
     e.button.y = (int)loc.y;
-    hjp__pushEvent(&e);
+    hjp__pushWindowEvent(self.ownerWindow, &e);
     if (down) g_hjp.mouseButtons |= HJP_BUTTON(btn);
     else g_hjp.mouseButtons &= ~HJP_BUTTON(btn);
 }
@@ -493,7 +509,7 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
         e.wheel.x = (int)[event deltaX];
         e.wheel.y = (int)[event deltaY];
     }
-    hjp__pushEvent(&e);
+    hjp__pushWindowEvent(self.ownerWindow, &e);
 }
 
 /* --- キーイベント --- */
@@ -535,7 +551,7 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
     }
     /* テキスト入力 (interpretKeyEvents を通す)。変換中の操作を二重配送しない。 */
     if (!self.handledTextCommand) [self interpretKeyEvents:@[event]];
-    if (!wasMarked && !self.handledTextCommand) hjp__pushEvent(&e);
+    if (!wasMarked && !self.handledTextCommand) hjp__pushWindowEvent(self.ownerWindow, &e);
 }
 - (void)keyUp:(NSEvent *)event {
     HjpKeycode sym = hjp__macKeyToHjp([event keyCode]);
@@ -550,7 +566,7 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
     e.type = HJP_EVENT_KEYUP;
     e.key.sym = sym;
     e.key.mod = hjp__macModToHjp([event modifierFlags]);
-    hjp__pushEvent(&e);
+    hjp__pushWindowEvent(self.ownerWindow, &e);
 }
 
 /* --- NSTextInputClient --- */
@@ -654,7 +670,7 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
             while (n && ((unsigned char)utf8[n] & 0xc0) == 0x80) n--;
         }
         memcpy(e.text.text, utf8, n);
-        hjp__pushEvent(&e);
+        hjp__pushWindowEvent(self.ownerWindow, &e);
         utf8 += n;
     }
 }
@@ -723,14 +739,14 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
         while (n && ((unsigned char)utf8[n] & 0xc0) == 0x80) n--;
     }
     if (n) memcpy(e.text.text, utf8, n);
-    hjp__pushEvent(&e);
+    hjp__pushWindowEvent(self.ownerWindow, &e);
 }
 - (void)clearComposition {
     BOOL hadComposition = self.hasMarkedText;
     self.composition = @"";
     self.compositionSelection = NSMakeRange(0, 0);
     if (hadComposition) {
-        HjpEvent e = {0}; e.type = HJP_EVENT_TEXTEDITING; hjp__pushEvent(&e);
+        HjpEvent e = {0}; e.type = HJP_EVENT_TEXTEDITING; hjp__pushWindowEvent(self.ownerWindow, &e);
     }
 }
 - (void)unmarkText {
@@ -774,6 +790,7 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
  * NSWindowDelegate
  * ===================================================================*/
 @interface HjpWindowDelegate : NSObject <NSWindowDelegate>
+@property(nonatomic, assign) HjpWindow *ownerWindow;
 @end
 
 @implementation HjpWindowDelegate
@@ -782,29 +799,31 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
     (void)sender;
     HjpEvent e = {0};
     e.type = HJP_EVENT_QUIT;
-    hjp__pushEvent(&e);
+    hjp__pushWindowEvent(self.ownerWindow, &e);
     return NO;
 }
 - (void)windowDidResize:(NSNotification *)notification {
-    (void)notification;
     HjpEvent e = {0};
     e.type = HJP_EVENT_WINDOWEVENT;
     e.window.event = HJP_WINDOWEVENT_SIZE_CHANGED;
-    hjp__pushEvent(&e);
+    NSView *view = [(NSWindow *)notification.object contentView];
+    e.window.data1 = (int)view.bounds.size.width;
+    e.window.data2 = (int)view.bounds.size.height;
+    hjp__pushWindowEvent(self.ownerWindow, &e);
 }
 - (void)windowDidBecomeKey:(NSNotification *)notification {
     (void)notification;
     HjpEvent e = {0};
     e.type = HJP_EVENT_WINDOWEVENT;
     e.window.event = HJP_WINDOWEVENT_FOCUS_GAINED;
-    hjp__pushEvent(&e);
+    hjp__pushWindowEvent(self.ownerWindow, &e);
 }
 - (void)windowDidResignKey:(NSNotification *)notification {
     (void)notification;
     HjpEvent e = {0};
     e.type = HJP_EVENT_WINDOWEVENT;
     e.window.event = HJP_WINDOWEVENT_FOCUS_LOST;
-    hjp__pushEvent(&e);
+    hjp__pushWindowEvent(self.ownerWindow, &e);
 }
 @end
 
@@ -867,6 +886,8 @@ bool hjp_init(void) {
 }
 
 void hjp_quit(void) {
+    HjpEvent pending;
+    while (hjp__popEvent(&pending)) if (pending.type == HJP_EVENT_DROPFILE) free(pending.drop.file);
     g_hjp.initialized = false;
 }
 
@@ -875,6 +896,7 @@ void hjp_quit(void) {
  * ===================================================================*/
 HjpWindow *hjp_window_create(const char *title, int x, int y, int w, int h, uint32_t flags) {
     @autoreleasepool {
+        if (g_hjp.nextWindowId == INT_MAX) return NULL;
         HjpWindow *win = (HjpWindow*)calloc(1, sizeof(HjpWindow));
         if (!win) return NULL;
         win->windowId = ++g_hjp.nextWindowId;
@@ -900,6 +922,7 @@ HjpWindow *hjp_window_create(const char *title, int x, int y, int w, int h, uint
         if (!win->nswin) { free(win); return NULL; }
 
         win->delegate = [[HjpWindowDelegate alloc] init];
+        win->delegate.ownerWindow = win;
         [win->nswin setDelegate:win->delegate];
         [win->nswin setReleasedWhenClosed:NO];
         [win->nswin setTitle:[NSString stringWithUTF8String:title ? title : ""]];
@@ -969,6 +992,7 @@ void hjp_window_destroy(HjpWindow *win) {
         win->glctx = nil;
         win->glview = nil;
         win->nswin = nil;
+        win->delegate.ownerWindow = NULL;
         win->delegate = nil;
     }
     if (g_hjp.mainWindow == win) g_hjp.mainWindow = NULL;

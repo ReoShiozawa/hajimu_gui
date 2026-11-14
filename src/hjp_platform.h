@@ -72,6 +72,7 @@ enum HjpEventType {
     HJP_EVENT_ACCESSIBILITY_FOCUS,
     HJP_EVENT_ACCESSIBILITY_TEXTREPLACE,
     HJP_EVENT_ACCESSIBILITY_TEXTSELECTION,
+    HJP_EVENT_INPUT_RESET,
 };
 
 /* --- ウィンドウイベントサブタイプ --- */
@@ -176,6 +177,7 @@ typedef struct {
 
 typedef struct {
     int type;     /* HjpEventType */
+    struct { HjpWindow *window; int generation; } source;
     union {
         HjpMouseMotionEvent  motion;
         HjpMouseButtonEvent  button;

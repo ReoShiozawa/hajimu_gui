@@ -35,6 +35,8 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <dlfcn.h>
+#include <limits.h>
+static int hjp_window_serial;
 
 /* =====================================================================
  * 内部構造体
@@ -43,8 +45,10 @@
 #define HJP_MAX_EVENTS 256
 
 struct HjpWindow {
+    struct HjpWindow *next;
     Window      xwin;
     GLXContext   glctx;
+    XIC          xic;
     Display     *dpy;       /* 共有ディスプレイのコピー */
     int          width, height;
     int          fb_width, fb_height;
@@ -55,11 +59,11 @@ struct HjpWindow {
 
 /* グローバル状態 */
 static struct {
+    HjpWindow *windows;
     Display    *dpy;
     int         screen;
     Window      root;
     XIM         xim;
-    XIC         xic;
     Atom        clipboard;
     Atom        utf8_string;
     Atom        targets;
@@ -93,7 +97,6 @@ static struct {
 
     /* 初期化済み */
     bool        inited;
-    int         next_window_id;
 } g_hjp;
 
 /* =====================================================================
@@ -101,7 +104,7 @@ static struct {
  * ===================================================================*/
 static void push_event(const HjpEvent *ev) {
     int next = (g_hjp.ev_head + 1) % HJP_MAX_EVENTS;
-    if (next == g_hjp.ev_tail) return; /* full */
+    if (next == g_hjp.ev_tail) { if (ev->type == HJP_EVENT_DROPFILE) free(ev->drop.file); return; }
     g_hjp.events[g_hjp.ev_head] = *ev;
     g_hjp.ev_head = next;
 }
@@ -190,9 +193,13 @@ bool hjp_init(void) {
 
 void hjp_quit(void) {
     if (!g_hjp.inited) return;
+    HjpEvent pending;
+    while (pop_event(&pending)) if (pending.type == HJP_EVENT_DROPFILE) free(pending.drop.file);
     if (g_hjp.ft_init) FT_Done_FreeType(g_hjp.ft_lib);
     if (g_hjp.clipboard_text) free(g_hjp.clipboard_text);
-    if (g_hjp.xic) XDestroyIC(g_hjp.xic);
+    for (HjpWindow *window = g_hjp.windows; window; window = window->next) if (window->xic) {
+        XDestroyIC(window->xic); window->xic = NULL;
+    }
     if (g_hjp.xim) XCloseIM(g_hjp.xim);
     if (g_hjp.dpy) XCloseDisplay(g_hjp.dpy);
     memset(&g_hjp, 0, sizeof(g_hjp));
@@ -203,6 +210,7 @@ void hjp_quit(void) {
  * ===================================================================*/
 
 HjpWindow *hjp_window_create(const char *title, int x, int y, int w, int h, uint32_t flags) {
+    if (hjp_window_serial == INT_MAX) return NULL;
     (void)flags;
     Display *dpy = g_hjp.dpy;
 
@@ -295,16 +303,17 @@ HjpWindow *hjp_window_create(const char *title, int x, int y, int w, int h, uint
         return NULL;
     }
 
-    /* Input Context */
-    if (g_hjp.xim && !g_hjp.xic) {
-        g_hjp.xic = XCreateIC(g_hjp.xim,
+    HjpWindow *win = (HjpWindow *)calloc(1, sizeof(HjpWindow));
+    if (!win) { glXDestroyContext(dpy, glctx); XDestroyWindow(dpy, xwin); return NULL; }
+    /* 入力コンテキストを別ウィンドウと共有しない。 */
+    if (g_hjp.xim) {
+        win->xic = XCreateIC(g_hjp.xim,
                                XNInputStyle, XIMPreeditNothing | XIMStatusNothing,
                                XNClientWindow, xwin,
                                XNFocusWindow, xwin,
                                NULL);
     }
 
-    HjpWindow *win = (HjpWindow *)calloc(1, sizeof(HjpWindow));
     win->xwin = xwin;
     win->glctx = glctx;
     win->dpy = dpy;
@@ -313,13 +322,19 @@ HjpWindow *hjp_window_create(const char *title, int x, int y, int w, int h, uint
     win->fb_width = w;
     win->fb_height = h;
     win->wm_delete = wm_delete;
-    win->id = ++g_hjp.next_window_id;
+    win->id = ++hjp_window_serial;
+    win->next = g_hjp.windows;
+    g_hjp.windows = win;
 
     return win;
 }
 
 void hjp_window_destroy(HjpWindow *win) {
     if (!win) return;
+    HjpWindow **link = &g_hjp.windows;
+    while (*link && *link != win) link = &(*link)->next;
+    if (*link) *link = win->next;
+    if (win->xic) XDestroyIC(win->xic);
     if (win->glctx) {
         glXMakeCurrent(win->dpy, None, NULL);
         glXDestroyContext(win->dpy, win->glctx);
@@ -497,22 +512,28 @@ bool hjp_poll_event(HjpEvent *event) {
         XNextEvent(dpy, &xe);
 
         /* XFilterEvent for IME */
-        if (g_hjp.xic && XFilterEvent(&xe, None)) continue;
+        if (g_hjp.xim && XFilterEvent(&xe, None)) continue;
 
         HjpEvent ev;
         memset(&ev, 0, sizeof(ev));
+        HjpWindow *owner = g_hjp.windows;
+        while (owner && owner->xwin != xe.xany.window) owner = owner->next;
+        ev.source.window = owner;
+        ev.source.generation = owner ? owner->id : -1;
 
         switch (xe.type) {
             case KeyPress: {
-                KeySym ks;
+                KeySym ks = NoSymbol;
                 char buf[128] = {0};
                 int len = 0;
-                if (g_hjp.xic) {
+                if (owner && owner->xic) {
                     Status status;
-                    len = Xutf8LookupString(g_hjp.xic, &xe.xkey, buf, sizeof(buf)-1, &ks, &status);
+                    len = Xutf8LookupString(owner->xic, &xe.xkey, buf, sizeof(buf)-1, &ks, &status);
+                    if (status == XBufferOverflow) { len = 0; ks = XLookupKeysym(&xe.xkey, 0); }
                 } else {
                     len = XLookupString(&xe.xkey, buf, sizeof(buf)-1, &ks, NULL);
                 }
+                if (len < 0 || len >= (int)sizeof(buf)) len = 0;
                 buf[len] = '\0';
 
                 /* KEYDOWN */
@@ -525,6 +546,7 @@ bool hjp_poll_event(HjpEvent *event) {
                 if (g_hjp.text_input_active && len > 0 && (unsigned char)buf[0] >= 32) {
                     HjpEvent tev;
                     memset(&tev, 0, sizeof(tev));
+                    tev.source = ev.source;
                     tev.type = HJP_EVENT_TEXTINPUT;
                     strncpy(tev.text.text, buf, sizeof(tev.text.text) - 1);
                     push_event(&tev);
@@ -604,12 +626,14 @@ bool hjp_poll_event(HjpEvent *event) {
                 break;
             }
             case FocusIn:
+                if (owner && owner->xic) XSetICFocus(owner->xic);
                 ev.type = HJP_EVENT_WINDOWEVENT;
                 ev.window.event = HJP_WINDOWEVENT_FOCUS_GAINED;
                 push_event(&ev);
                 break;
 
             case FocusOut:
+                if (owner && owner->xic) XUnsetICFocus(owner->xic);
                 ev.type = HJP_EVENT_WINDOWEVENT;
                 ev.window.event = HJP_WINDOWEVENT_FOCUS_LOST;
                 push_event(&ev);
