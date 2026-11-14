@@ -19,4 +19,15 @@ cc "$@" -O1 -gline-tables-only -fobjc-arc -DGL_SILENCE_DEPRECATION -DHJP_TEST_NA
   -framework Cocoa -framework OpenGL -framework CoreText -framework CoreGraphics \
   -framework ImageIO -lpthread -o "$TMP/controls"
 cd "$ROOT"
+set +e
 "$TMP/controls"
+status=$?
+set -e
+if [ "$status" = 77 ] && [ "${CONTROL_ALLOW_UNSUPPORTED_GL:-0}" = 1 ]; then
+  echo "::notice::Native GUI controls NOT TESTED: runner only provides OpenGL below 3.2"
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    printf '%s\n' 'Native GUI controls: **NOT TESTED**. The runner only provides OpenGL below 3.2. Run the native ASan/UBSan suite on a graphics-capable macOS host.' >> "$GITHUB_STEP_SUMMARY"
+  fi
+  exit 0
+fi
+exit "$status"

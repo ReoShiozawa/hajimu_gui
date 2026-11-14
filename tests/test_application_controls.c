@@ -916,6 +916,24 @@ static void check_window_close_input(void) {
 }
 
 int main(void) {
+    /* 仮想macOSのソフトウェアGLは2.1止まりの場合がある。実装失敗と区別する。 */
+    if (getenv("CONTROL_ALLOW_UNSUPPORTED_GL")) {
+        if (!hjp_init()) return 1;
+        HjpWindow *probe = hjp_window_create("GL capability", 0, 0, 64, 64, HJP_WINDOW_OPENGL);
+        if (!probe) return 1;
+        HjpGLContext context = hjp_gl_create_context(probe);
+        if (!context) { hjp_window_destroy(probe); return 1; }
+        const char *version = (const char *)glGetString(GL_VERSION);
+        int major = 0, minor = 0;
+        bool parsed = version && sscanf(version, "%d.%d", &major, &minor) == 2;
+        bool unsupported = parsed && (major < 3 || (major == 3 && minor < 2));
+        fprintf(stderr, "native control GL capability: %s\n", version ? version : "unavailable");
+        hjp_gl_delete_context(context);
+        hjp_window_destroy(probe);
+        hjp_quit();
+        if (!parsed) return 1;
+        if (unsupported) return 77;
+    }
     size_t function_count = sizeof(gui_functions) / sizeof(gui_functions[0]);
     for (size_t i = 0; i < function_count; i++) {
         for (size_t j = i + 1; j < function_count; j++)

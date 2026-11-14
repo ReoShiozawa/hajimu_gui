@@ -92,7 +92,7 @@ jobs:
 
       - name: macOSネイティブ操作の回帰検査
         if: runner.os == 'macOS'
-        run: CONTROL_SANITIZE=1 HAJIMU_INCLUDE=include sh tests/check-application-controls.sh
+        run: CONTROL_SANITIZE=1 CONTROL_ALLOW_UNSUPPORTED_GL=1 HAJIMU_INCLUDE=include sh tests/check-application-controls.sh
 
       # ── アーティファクト整理 ────────────────────────────
       - name: アーティファクトをリネーム
