@@ -27,6 +27,8 @@ jobs:
         include:
           - os: macos-latest
             suffix: macos
+          - os: macos-15-intel
+            suffix: macos-x64
           - os: ubuntu-latest
             suffix: linux-x64
           - os: windows-latest
