@@ -28,6 +28,25 @@ int main(void) {
     Value app = fn_app_create(3, app_args);
     assert(app.type == VALUE_NUMBER);
     g_cur = &g_apps[(int)app.number];
+    *gui_list_scroll(1) = 80;
+    assert(*gui_list_scroll(65) == 0);
+    *gui_list_scroll(65) = 160;
+    assert(*gui_list_scroll(1) == 80);
+    GuiApp *original = g_cur;
+    GuiApp *other = calloc(1, sizeof(*other));
+    assert(other);
+    g_cur = other;
+    assert(*gui_list_scroll(1) == 0);
+    *gui_list_scroll(1) = 10;
+    g_cur = original;
+    assert(*gui_list_scroll(1) == 80);
+    free(other);
+    for (uint32_t id = 1000; id < 1300; id++) {
+        assert(*gui_list_scroll(id) == 0);
+        *gui_list_scroll(id) = (float)id;
+    }
+    assert(*gui_list_scroll(1299) == 1299);
+    assert(*gui_list_scroll(1000) == 0);
     frame(false, false, 30);
     g_next_widget_w = 123;
     assert(fn_available_width(0, NULL).number == 123);
@@ -90,6 +109,17 @@ int main(void) {
     g_cur->in.my = 50;
     g_cur->in.scroll_y = -100;
     fn_list(3, list);
+    float before_disabled = *gui_list_scroll(gui_hash("list-shrink"));
+    frame(true, false, 30);
+    g_cur->in.my = 50;
+    assert(fn_list(3, list).number == 20);
+    frame(false, false, 30);
+    g_cur->in.my = 50;
+    g_cur->in.scroll_y = 1;
+    g_disabled = true;
+    fn_list(3, list);
+    assert(*gui_list_scroll(gui_hash("list-shrink")) == before_disabled);
+    g_disabled = false;
     list[1].array.length = 1;
     frame(true, false, 30);
     g_cur->in.my = 50;
@@ -107,6 +137,6 @@ int main(void) {
     assert(!hovered);
     hjpCancelFrame(g_cur->vg);
     fn_app_quit(1, &app);
-    puts("application controls passed: registration, UTF-8, width peek, clicks, disabled, zero width, list shrink");
+    puts("application controls passed: registration, UTF-8, clicks, list isolation/LRU, visible rows, disabled wheel, shrink");
     return 0;
 }

@@ -310,6 +310,13 @@ typedef struct {
     /* 即時モード追跡 */
     uint32_t hot;               /* ホバー中ウィジェット ID          */
     uint32_t active;            /* 操作中ウィジェット ID            */
+    /* 上限付きの一覧状態。別ウィンドウや剰余の一致で状態を共有しない。 */
+    struct {
+        uint32_t id;
+        float scroll;
+        uint64_t used;
+    } list_states[256];
+    uint64_t list_state_clock;
 
     /* ツールチップ */
     char  tooltip[512];
@@ -3086,6 +3093,21 @@ static const char *gui_value_to_str(Value v, char *buf, int sz) {
 /* ---------------------------------------------------------------
  * リスト(ID, 項目 [, 選択]) → 選択値
  * ---------------------------------------------------------------*/
+static float *gui_list_scroll(uint32_t id) {
+    size_t oldest = 0;
+    for (size_t i = 0; i < 256; i++) {
+        if (g_cur->list_states[i].used && g_cur->list_states[i].id == id) {
+            g_cur->list_states[i].used = ++g_cur->list_state_clock;
+            return &g_cur->list_states[i].scroll;
+        }
+        if (g_cur->list_states[i].used < g_cur->list_states[oldest].used) oldest = i;
+    }
+    g_cur->list_states[oldest].id = id;
+    g_cur->list_states[oldest].scroll = 0;
+    g_cur->list_states[oldest].used = ++g_cur->list_state_clock;
+    return &g_cur->list_states[oldest].scroll;
+}
+
 static Value fn_list(int argc, Value *argv) {
     if (!g_cur || argc < 2 || argv[0].type != VALUE_STRING ||
         argv[1].type != VALUE_ARRAY)
@@ -3120,21 +3142,24 @@ static Value fn_list(int argc, Value *argv) {
     hjpStrokeWidth(vg, 1.0f);
     hjpStroke(vg);
 
-    static float s_list_scroll[64];
-    int slot = gui_hash(label) % 64;
+    float *saved_scroll = gui_list_scroll(gui_hash(label));
     bool list_hov = gui_hit((float)g_cur->in.mx, (float)g_cur->in.my,
                              x, y, avail_w, list_h);
-    if (list_hov && g_cur->in.scroll_y != 0) {
-        s_list_scroll[slot] -= g_cur->in.scroll_y * item_h;
+    if (!g_disabled && list_hov && g_cur->in.scroll_y != 0) {
+        *saved_scroll -= g_cur->in.scroll_y * item_h;
     }
     /* 検索や削除で項目数が減ったフレームにもスクロール範囲を補正する。 */
     float max_s = fmaxf(0, (n - visible) * item_h);
-    s_list_scroll[slot] = fmaxf(0, fminf(s_list_scroll[slot], max_s));
-    float scroll = s_list_scroll[slot];
+    *saved_scroll = fmaxf(0, fminf(*saved_scroll, max_s));
+    float scroll = *saved_scroll;
 
     hjpSave(vg);
     hjpIntersectScissor(vg, x, y, avail_w, list_h);
-    for (int i = 0; i < n; i++) {
+    /* 表示外の行は走査せず、大きいシナリオでも描画量を一定に保つ。 */
+    int first = (int)(scroll / item_h);
+    int last = first + visible + 1;
+    if (last > n) last = n;
+    for (int i = first; i < last; i++) {
         float iy = y + item_h * i - scroll;
         if (iy + item_h < y || iy > y + list_h) continue;
         bool is_sel = (i == selected);
@@ -24377,7 +24402,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.8.0",
+        .version        = "14.8.1",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,
