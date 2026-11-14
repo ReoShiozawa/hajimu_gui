@@ -310,6 +310,10 @@ typedef struct {
     /* 即時モード追跡 */
     uint32_t hot;               /* ホバー中ウィジェット ID          */
     uint32_t active;            /* 操作中ウィジェット ID            */
+    uint32_t nav_focus;
+    bool nav_enabled;
+    uint32_t nav_previous[512], nav_current[512];
+    int nav_previous_count, nav_current_count;
     /* 上限付きの一覧状態。別ウィンドウや剰余の一致で状態を共有しない。 */
     struct {
         uint32_t id;
@@ -917,6 +921,56 @@ static inline void gui_pos(float *x, float *y, float *w) {
     }
 }
 
+/* 前フレームの描画順を使う。入力欄編集中のキーはここで奪わない。 */
+static void gui_nav_move(int direction) {
+    if (!g_cur || g_cur->nav_previous_count == 0) return;
+    int index = -1;
+    for (int i = 0; i < g_cur->nav_previous_count; i++)
+        if (g_cur->nav_previous[i] == g_cur->nav_focus) index = i;
+    if (index < 0) index = direction < 0 ? 0 : -1;
+    index = (index + (direction < 0 ? -1 : 1) + g_cur->nav_previous_count) % g_cur->nav_previous_count;
+    g_cur->nav_focus = g_cur->nav_previous[index];
+}
+
+static void gui_nav_begin(void) {
+    g_cur->nav_current_count = 0;
+    if (g_cur->nav_enabled && g_cur->in.key_tab && !g_cur->focused) {
+        gui_nav_move(g_cur->in.mod_shift ? -1 : 1);
+        g_cur->in.key_tab = false;
+    }
+}
+
+static void gui_nav_end(void) {
+    bool found = false;
+    for (int i = 0; i < g_cur->nav_current_count; i++)
+        if (g_cur->nav_current[i] == g_cur->nav_focus) found = true;
+    if (!found) g_cur->nav_focus = 0;
+    g_cur->nav_previous_count = g_cur->nav_current_count;
+    memcpy(g_cur->nav_previous, g_cur->nav_current,
+           (size_t)g_cur->nav_current_count * sizeof(uint32_t));
+}
+
+static bool gui_nav_control(uint32_t id, float x, float y, float w, float h) {
+    if (!g_cur->nav_enabled || g_disabled || w <= 0 || h <= 0) return false;
+    bool registered = false;
+    for (int i = 0; i < g_cur->nav_current_count; i++)
+        if (g_cur->nav_current[i] == id) registered = true;
+    if (!registered && g_cur->nav_current_count < 512)
+        g_cur->nav_current[g_cur->nav_current_count++] = id;
+    if (g_cur->in.clicked && gui_hit(g_cur->in.mx, g_cur->in.my, x, y, w, h))
+        g_cur->nav_focus = id;
+    if (g_cur->nav_focus != id) return false;
+    Hjpcontext *vg = g_cur->vg;
+    hjpBeginPath(vg); hjpRoundedRect(vg, x + 2, y + 2, fmaxf(0, w - 4), fmaxf(0, h - 4), 3);
+    hjpStrokeColor(vg, TH_ACCENT); hjpStrokeWidth(vg, 2); hjpStroke(vg);
+    if (!g_cur->focused && (g_cur->in.key_return || g_cur->in.last_key == ' ')) {
+        g_cur->in.key_return = false;
+        g_cur->in.last_key = 0;
+        return true;
+    }
+    return false;
+}
+
 /* --- ウィジェットのホバー・アクティブ判定 --- */
 static bool gui_widget_logic(uint32_t id,
                               float x, float y, float w, float h,
@@ -1271,8 +1325,10 @@ static Value fn_draw_loop(int argc, Value *argv) {
 
         /* ── ユーザーコールバック実行 ── */
         g_cur = app;
+        gui_nav_begin();
         g_frame_count++;
         hajimu_call(&callback, 0, NULL);
+        gui_nav_end();
 
         /* コールバック内の終了要求ではリソースを即時解放しない。
          * 開始済みフレームだけを閉じ、呼び出し元へ安全に制御を戻す。 */
@@ -1649,6 +1705,7 @@ static Value fn_detail_row(int argc, Value *argv) {
         gui_single_line(vg, argv[2].string.data, x + 12, y + 10 + GUI_FONT_SIZE * 1.4f,
                         w - 24, GUI_FONT_SIZE * 1.4f, false);
     }
+    clicked = gui_nav_control(gui_hash(argv[0].string.data), x, y, w, h) || clicked;
     gui_advance(h);
     return hajimu_bool(clicked);
 }
@@ -1840,6 +1897,9 @@ static Value fn_button(int argc, Value *argv) {
     hjpFillColor(vg, button_text);
     gui_single_line(vg, label, x + 8, y, btn_w - 16, btn_h, true);
 
+    g_disabled = disabled;
+    clicked = gui_nav_control(id, x, y, btn_w, btn_h) || clicked;
+    g_disabled = previous_disabled;
     gui_advance(btn_h);
     return hajimu_bool(clicked);
 }
@@ -6002,6 +6062,7 @@ static Value fn_small_button(int argc, Value *argv) {
     hjpFillColor(vg, g_disabled ? TH_TEXT_DIM : (hov ? TH_ACCENT : TH_TEXT));
     gui_single_line(vg, label, x + 8, y, btn_w - 16, btn_h, true);
 
+    clicked = gui_nav_control(id, x, y, btn_w, btn_h) || clicked;
     gui_advance(btn_h);
     return hajimu_bool(clicked);
 }
@@ -20463,7 +20524,13 @@ static Value fn_recording_indicator(int argc, Value *argv) {
 static Value fn_dropdown_breadcrumb(int argc, Value *argv) { (void)argc; (void)argv; return hajimu_null(); }
 
 /* Phase 94 */
-static Value fn_focus_traversal(int argc, Value *argv) { (void)argc; (void)argv; return hajimu_null(); }
+/* 既存アプリのキー処理を変えないよう、明示的に有効化する。 */
+static Value fn_focus_traversal(int argc, Value *argv) {
+    if (!g_cur) return hajimu_bool(false);
+    g_cur->nav_enabled = argc == 0 || argv[0].type != VALUE_BOOL || argv[0].boolean;
+    if (!g_cur->nav_enabled) g_cur->nav_focus = 0;
+    return hajimu_bool(g_cur->nav_enabled);
+}
 static Value fn_custom_gesture(int argc, Value *argv) { (void)argc; (void)argv; return hajimu_null(); }
 static Value fn_skip_link(int argc, Value *argv) { (void)argc; (void)argv; return hajimu_null(); }
 static Value fn_color_blindness_sim(int argc, Value *argv) { (void)argc; (void)argv; return hajimu_null(); }
