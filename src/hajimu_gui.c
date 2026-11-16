@@ -114,9 +114,9 @@ static float g_custom_font_size = 0;
 #define GUI_FONT_SIZE       (g_custom_font_size > 0 ? g_custom_font_size : GUI_FONT_SIZE_DEFAULT)
 #define GUI_FONT_NAME       "noto-cjk"
 #define GUI_LABEL_W        130.0f    /* ラベル幅 (スライダー等) */
-#define GUI_INPUT_H         32.0f    /* テキスト入力高さ */
+#define GUI_INPUT_H         fmaxf(32.0f, GUI_FONT_SIZE * 1.4f + 8.0f)
 #define GUI_INPUT_PAD        8.0f    /* 入力フィールド内余白 */
-#define GUI_COMBO_ITEM_H    28.0f    /* コンボボックス項目高さ */
+#define GUI_COMBO_ITEM_H    fmaxf(28.0f, GUI_FONT_SIZE * 1.4f + 4.0f)
 #define GUI_MAX_TEXT_BUF   2048      /* テキストバッファ最大長 */
 #define GUI_MAX_TEXT_SLOTS   64      /* 同時テキスト入力数 */
 #define GUI_TEXTAREA_LINES   10      /* テキストエリア行数デフォルト */
@@ -284,9 +284,6 @@ typedef struct {
     bool     ax_visible, ax_enabled, ax_secure;
 } GuiTextBuf;
 
-/* --- コンボボックス開閉状態 --- */
-static uint32_t g_combo_open = 0;  /* 開いているコンボ ID (0=なし) */
-
 /* --- パネルスタック (Phase 4) --- */
 typedef struct {
     float x, y, w, h;          /* パネル領域                       */
@@ -330,6 +327,8 @@ typedef struct {
     /* 即時モード追跡 */
     uint32_t hot;               /* ホバー中ウィジェット ID          */
     uint32_t active;            /* 操作中ウィジェット ID            */
+    uint32_t combo_open;        /* 選択肢の開閉はウィンドウごとに保持 */
+    bool combo_seen;
     uint32_t nav_focus;
     bool nav_enabled;
     char modal_title[256];
@@ -486,7 +485,7 @@ static void gui_begin_close(GuiApp *app) {
     app->running = false;
     app->closing = true;
     app->close_error = 0;
-    app->focused = app->nav_focus = app->active = app->text_drag = 0;
+    app->focused = app->nav_focus = app->active = app->text_drag = app->combo_open = 0;
     gui_ime_update(app, "");
 #ifdef __APPLE__
     hjp_set_text_input_context(app->window, 0, "", 0, 0, 0);
@@ -1150,6 +1149,7 @@ static void gui_nav_begin(void) {
     hjp_accessibility_begin(g_cur->window);
 #endif
     g_cur->action_count = 0;
+    g_cur->combo_seen = false;
     g_cur->modal_entered = false;
     g_cur->modal_input_saved = false;
     g_cur->modal_input_delivered = false;
@@ -1166,6 +1166,7 @@ static void gui_nav_begin(void) {
 static void gui_nav_end(void) {
     /* 旧来のフレーム末尾まで続く描画とも共存し、閉じ忘れは持ち越さない。 */
     while (g_dialog_depth[g_cur - g_apps] > 0) gui_dialog_scope_end();
+    if (!g_cur->combo_seen) g_cur->combo_open = 0;
 #ifdef __APPLE__
     hjp_accessibility_end(g_cur->window);
 #endif
@@ -1499,7 +1500,7 @@ static Value fn_draw_loop(int argc, Value *argv) {
                 break;
             case HJP_EVENT_INPUT_RESET:
                 app->in = (GuiInput){0};
-                app->focused = app->nav_focus = app->active = app->text_drag = 0;
+                app->focused = app->nav_focus = app->active = app->text_drag = app->combo_open = 0;
                 gui_ime_update(app, "");
                 hjp_reset_input(app->window);
                 break;
@@ -1543,7 +1544,7 @@ static Value fn_draw_loop(int argc, Value *argv) {
                 if (ev.window.event == HJP_WINDOWEVENT_FOCUS_LOST) {
                     app->in.down = false;
                     app->in.mod_ctrl = app->in.mod_shift = false;
-                    app->active = app->text_drag = 0;
+                    app->active = app->text_drag = app->combo_open = 0;
                 }
                 break;
             case HJP_EVENT_TEXTINPUT: {
@@ -3034,6 +3035,50 @@ static Value gui_owned_control_value(Value value) {
     return hajimu_null();
 }
 
+typedef struct {
+    float x, y, width, height;
+} GuiFieldGeometry;
+
+/* ラベルの実幅と入力の最低希望幅が収まらなければ、ラベルを上へ折り返す。 */
+static bool gui_form_field(const char *label, float minimum, GuiFieldGeometry *field) {
+    float x, y, available;
+    gui_pos(&x, &y, &available);
+    if (!isfinite(available) || available <= 0) return false;
+    Hjpcontext *vg = g_cur->vg;
+    hjpFontFaceId(vg, g_cur->font_id);
+    hjpFontSize(vg, GUI_FONT_SIZE);
+    float label_width = *label ? fmaxf(GUI_LABEL_W, hjpTextBounds(vg, 0, 0, label, NULL, NULL) + 12) : 0;
+    float offset = 0;
+    bool stacked = label_width + minimum > available || strpbrk(label, "\r\n") != NULL;
+    GuiTextBlock block = {GUI_FONT_SIZE, available, GUI_FONT_SIZE * 1.4f, g_disabled ? TH_TEXT_DIM : TH_TEXT};
+    if (stacked && *label) {
+        float measured;
+        int lines;
+        if (!gui_text_block_layout(label, &block, false, x, y, &measured, &lines)) return false;
+        offset = (float)lines * block.line_height + 4;
+        label_width = 0;
+    }
+    int depth = hjpStateDepth(vg);
+    hjpSave(vg);
+    if (hjpStateDepth(vg) != depth + 1) return false;
+    hjpFillColor(vg, block.color);
+    hjpIntersectScissor(vg, x, y, available, stacked ? fmaxf(0, offset - 4) : GUI_INPUT_H);
+    if (stacked && *label) {
+        float measured;
+        int lines;
+        hjpTextAlign(vg, HJP_ALIGN_LEFT | HJP_ALIGN_TOP);
+        gui_text_block_layout(label, &block, true, x, y, &measured, &lines);
+    } else {
+        hjpTextAlign(vg, HJP_ALIGN_LEFT | HJP_ALIGN_MIDDLE);
+        hjpText(vg, x, y + GUI_INPUT_H * 0.5f, label, NULL);
+    }
+    hjpRestore(vg);
+    hjpTextAlign(vg, HJP_ALIGN_LEFT | HJP_ALIGN_MIDDLE);
+    *field = (GuiFieldGeometry){x + label_width, y + offset, available - label_width,
+                            offset + GUI_INPUT_H + 4};
+    return true;
+}
+
 static Value fn_text_input(int argc, Value *argv) {
     if (!g_cur || argc < 2 || argv[0].type != VALUE_STRING)
         return (argc >= 2) ? gui_owned_control_value(argv[1]) : hajimu_string("");
@@ -3057,30 +3102,9 @@ static Value fn_text_input(int argc, Value *argv) {
     GuiTextBuf *tb = gui_get_text_buf(id, val);
     if (!tb) return hajimu_string(val);
 
-    float x, y, avail_w;
-    gui_pos(&x, &y, &avail_w);
-    float row_h = GUI_INPUT_H + 4.0f;
-
-    /* ラベル描画 */
-    hjpFontFaceId(vg, g_cur->font_id);
-    hjpFontSize(vg, GUI_FONT_SIZE);
-    hjpFillColor(vg, TH_TEXT);
-    hjpTextAlign(vg, HJP_ALIGN_LEFT | HJP_ALIGN_MIDDLE);
-    hjpText(vg, x, y + row_h * 0.5f, label, NULL);
-
-    /* 大きな文字や長いラベルでも入力欄へ重ならないよう実幅を使う。 */
-    float label_w = fmaxf(GUI_LABEL_W,
-        hjpTextBounds(vg, 0, 0, label, NULL, NULL) + 12.0f);
-    if (label_w > avail_w - 80.0f) {
-        float label_h = GUI_FONT_SIZE + 12.0f;
-        y += label_h;
-        row_h += label_h;
-        label_w = 0.0f;
-    }
-    /* 入力フィールド */
-    float fx = x + label_w;
-    float fw = avail_w - label_w;
-    if (fw < 80.0f) fw = 80.0f;
+    GuiFieldGeometry field;
+    if (!gui_form_field(label, 80, &field)) return hajimu_string(tb->buf);
+    float fx = field.x, y = field.y, fw = field.width, row_h = field.height;
 
     gui_nav_text(id, fx, y, fw, GUI_INPUT_H);
     bool focused = (g_cur->focused == id);
@@ -3208,19 +3232,9 @@ static Value fn_password_input(int argc, Value *argv) {
     GuiTextBuf *tb = gui_get_text_buf(id, val);
     if (!tb) return hajimu_string(val);
 
-    float x, y, avail_w;
-    gui_pos(&x, &y, &avail_w);
-    float row_h = GUI_INPUT_H + 4.0f;
-
-    hjpFontFaceId(vg, g_cur->font_id);
-    hjpFontSize(vg, GUI_FONT_SIZE);
-    hjpFillColor(vg, TH_TEXT);
-    hjpTextAlign(vg, HJP_ALIGN_LEFT | HJP_ALIGN_MIDDLE);
-    hjpText(vg, x, y + row_h * 0.5f, label, NULL);
-
-    float fx = x + GUI_LABEL_W;
-    float fw = avail_w - GUI_LABEL_W;
-    if (fw < 80.0f) fw = 80.0f;
+    GuiFieldGeometry field;
+    if (!gui_form_field(label, 80, &field)) return hajimu_string(tb->buf);
+    float fx = field.x, y = field.y, fw = field.width, row_h = field.height;
 
     gui_nav_text(id, fx, y, fw, GUI_INPUT_H);
     bool focused = (g_cur->focused == id);
@@ -3324,30 +3338,22 @@ static Value fn_number_input(int argc, Value *argv) {
     if (!g_cur || argc < 2 || argv[0].type != VALUE_STRING)
         return (argc >= 2) ? argv[1] : hajimu_number(0);
 
+    for (int i = 1; i < argc; i++)
+        if (argv[i].type != VALUE_NUMBER || !isfinite(argv[i].number)) return argv[1];
     Hjpcontext *vg = g_cur->vg;
     const char *label = argv[0].string.data;
     double val = argv[1].number;
     double vmin = (argc >= 3) ? argv[2].number : -1e15;
     double vmax = (argc >= 4) ? argv[3].number :  1e15;
     double step = (argc >= 5) ? argv[4].number :  1.0;
+    if (vmin > vmax || step <= 0) return argv[1];
 
     uint32_t id = gui_hash(label);
 
-    float x, y, avail_w;
-    gui_pos(&x, &y, &avail_w);
-    float row_h = GUI_INPUT_H + 4.0f;
-
-    /* ラベル */
-    hjpFontFaceId(vg, g_cur->font_id);
-    hjpFontSize(vg, GUI_FONT_SIZE);
-    hjpFillColor(vg, TH_TEXT);
-    hjpTextAlign(vg, HJP_ALIGN_LEFT | HJP_ALIGN_MIDDLE);
-    hjpText(vg, x, y + row_h * 0.5f, label, NULL);
-
-    float fx = x + GUI_LABEL_W;
-    float fw = avail_w - GUI_LABEL_W;
-    if (fw < 100.0f) fw = 100.0f;
-    float btn_w = GUI_INPUT_H;
+    GuiFieldGeometry field;
+    if (!gui_form_field(label, 100, &field)) return argv[1];
+    float fx = field.x, y = field.y, fw = field.width, row_h = field.height;
+    float btn_w = fminf(GUI_INPUT_H, fw * 0.25f);
 
     /* − ボタン */
     uint32_t id_minus = gui_hash(label) ^ 0xA1B2;
@@ -3360,22 +3366,22 @@ static Value fn_number_input(int argc, Value *argv) {
     hjpFill(vg);
     hjpFillColor(vg, TH_TEXT);
     hjpTextAlign(vg, HJP_ALIGN_CENTER | HJP_ALIGN_MIDDLE);
-    hjpText(vg, fx + btn_w * 0.5f, y + GUI_INPUT_H * 0.5f, "−", NULL);
+    gui_single_line(vg, "−", fx, y, btn_w, GUI_INPUT_H, true);
 
     /* 値表示 */
-    float vx = fx + btn_w + 2.0f;
-    float vw = fw - btn_w * 2 - 4.0f;
+    float gap = fminf(2, fw * 0.05f);
+    float vx = fx + btn_w + gap;
+    float vw = fw - btn_w * 2 - gap * 2;
     hjpBeginPath(vg);
     hjpRoundedRect(vg, vx, y, vw, GUI_INPUT_H, 0);
     hjpFillColor(vg, TH_WIDGET_BG);
     hjpFill(vg);
 
     char vbuf[64];
-    if (val == (int)val) snprintf(vbuf, sizeof(vbuf), "%d", (int)val);
-    else snprintf(vbuf, sizeof(vbuf), "%.2f", val);
+    snprintf(vbuf, sizeof(vbuf), "%.15g", val);
     hjpFillColor(vg, TH_TEXT);
     hjpTextAlign(vg, HJP_ALIGN_CENTER | HJP_ALIGN_MIDDLE);
-    hjpText(vg, vx + vw * 0.5f, y + GUI_INPUT_H * 0.5f, vbuf, NULL);
+    gui_single_line(vg, vbuf, vx, y, vw, GUI_INPUT_H, true);
 
     /* + ボタン */
     float px = fx + fw - btn_w;
@@ -3389,16 +3395,18 @@ static Value fn_number_input(int argc, Value *argv) {
     hjpFill(vg);
     hjpFillColor(vg, TH_TEXT);
     hjpTextAlign(vg, HJP_ALIGN_CENTER | HJP_ALIGN_MIDDLE);
-    hjpText(vg, px + btn_w * 0.5f, y + GUI_INPUT_H * 0.5f, "+", NULL);
+    gui_single_line(vg, "+", px, y, btn_w, GUI_INPUT_H, true);
 
+    click_minus = gui_nav_control(id_minus, fx, y, btn_w, GUI_INPUT_H) || click_minus;
+    click_plus = gui_nav_control(id_plus, px, y, btn_w, GUI_INPUT_H) || click_plus;
     if (click_minus) val -= step;
-    if (click_plus)  val += step;
+    if (click_plus) val += step;
 
     /* スクロール */
-    bool hov_all = gui_hit((float)g_cur->in.mx, (float)g_cur->in.my,
-                            fx, y, fw, GUI_INPUT_H);
-    if (hov_all && g_cur->in.scroll_y != 0) {
+    bool hov_all = gui_text_hover(fx, y, fw, GUI_INPUT_H);
+    if (hov_all && !g_cur->composition[0] && g_cur->in.scroll_y != 0) {
         val += step * g_cur->in.scroll_y;
+        g_cur->in.scroll_y = 0;
     }
 
     if (val < vmin) val = vmin;
@@ -3627,41 +3635,37 @@ static Value fn_combobox(int argc, Value *argv) {
     Value current = argv[2];
     uint32_t id = gui_hash(label);
 
-    float x, y, avail_w;
-    gui_pos(&x, &y, &avail_w);
-    float row_h = GUI_INPUT_H + 4.0f;
-
-    /* ラベル */
-    hjpFontFaceId(vg, g_cur->font_id);
-    hjpFontSize(vg, GUI_FONT_SIZE);
-    hjpFillColor(vg, TH_TEXT);
-    hjpTextAlign(vg, HJP_ALIGN_LEFT | HJP_ALIGN_MIDDLE);
-    hjpText(vg, x, y + row_h * 0.5f, label, NULL);
-
-    float fx = x + GUI_LABEL_W;
-    float fw = avail_w - GUI_LABEL_W;
-    if (fw < 100.0f) fw = 100.0f;
+    GuiFieldGeometry field;
+    if (!gui_form_field(label, 100, &field)) return gui_owned_control_value(current);
+    float fx = field.x, y = field.y, fw = field.width, row_h = field.height;
 
     /* 現在値の表示テキスト */
     const char *cur_text = "(未選択)";
     if (current.type == VALUE_STRING) cur_text = current.string.data;
     else if (current.type == VALUE_NUMBER) {
         static char nb[32];
-        if (current.number == (int)current.number)
-            snprintf(nb, sizeof(nb), "%d", (int)current.number);
-        else
-            snprintf(nb, sizeof(nb), "%.2f", current.number);
+        snprintf(nb, sizeof(nb), "%.15g", current.number);
         cur_text = nb;
     }
 
-    bool hov = gui_hit((float)g_cur->in.mx, (float)g_cur->in.my,
-                        fx, y, fw, GUI_INPUT_H);
-    bool is_open = (g_combo_open == id);
+    bool hov = gui_text_hover(fx, y, fw, GUI_INPUT_H);
+    bool is_open = (g_cur->combo_open == id);
+    float visible_x = fx, visible_y = y, visible_w = fw, visible_h = GUI_INPUT_H;
+    bool interactive = !g_disabled && !g_cur->closing && !g_cur->composition[0] &&
+        (!g_cur->modal_title[0] || g_cur->modal_entered) &&
+        gui_visible_rect(&visible_x, &visible_y, &visible_w, &visible_h);
+    if (!interactive && is_open) { g_cur->combo_open = 0; is_open = false; }
+    if (is_open) g_cur->combo_seen = true;
+    bool activate = gui_nav_control(id, fx, y, fw, GUI_INPUT_H);
 
     /* ヘッダー部分のクリック判定 */
-    if (g_cur->in.clicked && hov) {
-        g_combo_open = is_open ? 0 : id;
+    if (interactive && (activate || (g_cur->in.clicked && hov))) {
+        g_cur->combo_open = is_open ? 0 : id;
         is_open = !is_open;
+        g_cur->combo_seen = is_open;
+        g_cur->focused = 0;
+        hjp_stop_text_input();
+        g_cur->in.clicked = false;
     }
 
     /* ヘッダー描画 */
@@ -3675,12 +3679,13 @@ static Value fn_combobox(int argc, Value *argv) {
 
     hjpFillColor(vg, TH_TEXT);
     hjpTextAlign(vg, HJP_ALIGN_LEFT | HJP_ALIGN_MIDDLE);
-    hjpText(vg, fx + GUI_INPUT_PAD, y + GUI_INPUT_H * 0.5f, cur_text, NULL);
+    gui_single_line(vg, cur_text, fx + GUI_INPUT_PAD, y + (GUI_INPUT_H - GUI_FONT_SIZE * 1.4f) * 0.5f,
+                    fmaxf(0, fw - GUI_INPUT_PAD - 28), GUI_FONT_SIZE * 1.4f, false);
 
     /* ▼ アイコン */
     hjpFillColor(vg, TH_TEXT_DIM);
     hjpTextAlign(vg, HJP_ALIGN_RIGHT | HJP_ALIGN_MIDDLE);
-    hjpText(vg, fx + fw - 8.0f, y + GUI_INPUT_H * 0.5f, "▼", NULL);
+    gui_single_line(vg, "▼", fx + fmaxf(0, fw - 24), y, fminf(fw, 24), GUI_INPUT_H, true);
 
     Value result = current;
     float dropdown_h = 0;
@@ -3702,8 +3707,7 @@ static Value fn_combobox(int argc, Value *argv) {
 
         for (int i = 0; i < n; i++) {
             float iy = dy + 2.0f + GUI_COMBO_ITEM_H * i;
-            bool ih = gui_hit((float)g_cur->in.mx, (float)g_cur->in.my,
-                               fx + 2, iy, fw - 4, GUI_COMBO_ITEM_H);
+            bool ih = gui_text_hover(fx + 2, iy, fw - 4, GUI_COMBO_ITEM_H);
 
             if (ih) {
                 hjpBeginPath(vg);
@@ -3717,21 +3721,19 @@ static Value fn_combobox(int argc, Value *argv) {
             if (item.type == VALUE_STRING) item_text = item.string.data;
             else if (item.type == VALUE_NUMBER) {
                 static char ib[32];
-                if (item.number == (int)item.number)
-                    snprintf(ib, sizeof(ib), "%d", (int)item.number);
-                else
-                    snprintf(ib, sizeof(ib), "%.2f", item.number);
+                snprintf(ib, sizeof(ib), "%.15g", item.number);
                 item_text = ib;
             }
 
             hjpFillColor(vg, ih ? TH_CHECK : TH_TEXT);
             hjpTextAlign(vg, HJP_ALIGN_LEFT | HJP_ALIGN_MIDDLE);
-            hjpText(vg, fx + GUI_INPUT_PAD,
-                    iy + GUI_COMBO_ITEM_H * 0.5f, item_text, NULL);
+            gui_single_line(vg, item_text, fx + GUI_INPUT_PAD, iy + (GUI_COMBO_ITEM_H - GUI_FONT_SIZE * 1.4f) * 0.5f,
+                            fmaxf(0, fw - GUI_INPUT_PAD * 2), GUI_FONT_SIZE * 1.4f, false);
 
             if (ih && g_cur->in.clicked) {
                 result = item;
-                g_combo_open = 0;
+                g_cur->combo_open = 0;
+                g_cur->in.clicked = false;
             }
         }
     }
@@ -4788,7 +4790,7 @@ static Value fn_modal_reserve(int argc, Value *argv) {
         g_cur->modal_focus_pending = g_cur->focused != 0;
         g_cur->modal_focus_validate = false;
         g_cur->nav_previous_count = g_cur->nav_current_count = 0;
-        g_cur->active = g_cur->text_drag = g_cur->pending_accessibility_press = 0;
+        g_cur->active = g_cur->text_drag = g_cur->pending_accessibility_press = g_cur->combo_open = 0;
         for (int i = 0; i < g_cur->text_buf_count; i++) g_cur->text_bufs[i].ax_visible = false;
 #ifdef __APPLE__
         hjp_accessibility_begin(g_cur->window);
@@ -6001,7 +6003,7 @@ static Value fn_theme_color(int argc, Value *argv) {
 
 /* テーマフォント(ファミリー[,サイズ]) */
 static Value fn_theme_font(int argc, Value *argv) {
-    if (argc >= 2 && argv[1].type == VALUE_NUMBER)
+    if (argc >= 2 && argv[1].type == VALUE_NUMBER && isfinite(argv[1].number) && argv[1].number >= 0 && argv[1].number <= 512)
         g_custom_font_size = (float)argv[1].number;
     (void)argv;
     return hajimu_null();
@@ -6036,7 +6038,7 @@ static Value fn_font_load(int argc, Value *argv) {
 
 /* フォントサイズ(サイズ) */
 static Value fn_font_size_set(int argc, Value *argv) {
-    if (argc >= 1 && argv[0].type == VALUE_NUMBER)
+    if (argc >= 1 && argv[0].type == VALUE_NUMBER && isfinite(argv[0].number) && argv[0].number >= 0 && argv[0].number <= 512)
         g_custom_font_size = (float)argv[0].number;
     return hajimu_null();
 }
@@ -25763,7 +25765,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.29.0",
+        .version        = "14.30.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,
