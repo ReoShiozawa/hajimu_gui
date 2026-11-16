@@ -1804,6 +1804,97 @@ static void check_compact_rows(void) {
     g_cur->nav_enabled = false; g_cur->nav_focus = 0;
 }
 
+static void check_virtual_rows(void) {
+    GuiScrollRegion saved[GUI_MAX_SCROLL]; memcpy(saved, g_scrolls, sizeof(saved));
+    memset(g_scrolls, 0, sizeof(g_scrolls));
+    float original_font = g_custom_font_size;
+    bool original_nav = g_cur->nav_enabled;
+    g_cur->nav_enabled = false;
+    frame(false, false, 500); g_cur->lay.y = 30;
+    g_scrolls[0].scroll_y = 205;
+    Value area[] = {hajimu_number(250), hajimu_number(100)};
+    Value region = fn_scroll_begin(2, area);
+    Value args[] = {hajimu_number(100), hajimu_number(20)};
+    GuiLayout layout = g_cur->lay; g_next_widget_w = 73;
+    Value range = fn_virtual_scroll(2, args);
+    assert(gui_dict_lookup(range, "開始").number == 10 && gui_dict_lookup(range, "終了").number == 16);
+    assert(gui_dict_lookup(range, "前余白").number == 200 && gui_dict_lookup(range, "後余白").number == 1680);
+    assert(!memcmp(&layout, &g_cur->lay, sizeof(layout)) && g_next_widget_w == 73);
+    g_cur->lay.y += 200 + 6 * 20 + 1680;
+    fn_scroll_end(1, &region);
+    assert(g_scrolls[0].content_h == 2000 && g_scrolls[0].scroll_y == 205);
+    /* 検索/削除で件数が減っても、全高を渡してスクロールを次フレームで復帰させる。 */
+    frame(false, false, 500); args[0] = hajimu_number(2);
+    region = fn_scroll_begin(2, area); range = fn_virtual_scroll(2, args);
+    assert(gui_dict_lookup(range, "開始").number == 2 && gui_dict_lookup(range, "終了").number == 2);
+    g_cur->lay.y += 40; fn_scroll_end(1, &region); assert(g_scrolls[0].scroll_y == 0);
+    frame(false, false, 500); region = fn_scroll_begin(2, area); range = fn_virtual_scroll(2, args);
+    assert(gui_dict_lookup(range, "開始").number == 0 && gui_dict_lookup(range, "終了").number == 2);
+    g_cur->lay.y += 40; fn_scroll_end(1, &region);
+    frame(false, false, 30); g_cur->in.my = 50; g_cur->in.scroll_y = -3;
+    args[0] = hajimu_number(100); region = fn_scroll_begin(2, area);
+    g_cur->lay.y += 2000; fn_scroll_end(1, &region);
+    assert(g_scrolls[0].scroll_y == 90 && g_cur->in.scroll_y == 0);
+    frame(false, false, 500); region = fn_scroll_begin(2, area); range = fn_virtual_scroll(2, args);
+    assert(gui_dict_lookup(range, "開始").number == 4 && gui_dict_lookup(range, "終了").number == 10);
+    g_cur->lay.y += 2000; fn_scroll_end(1, &region);
+    /* 文字拡大時も既存一覧行の実際の行送りと一致し、全高を維持する。 */
+    const float fonts[] = {14, 22, 32};
+    for (size_t f = 0; f < 3; f++) {
+        g_custom_font_size = fonts[f];
+        float step = GUI_FONT_SIZE * 1.4f + 16 + GUI_MARGIN;
+        frame(false, false, 500);
+        g_scrolls[0].scroll_y = step * 500 + step / 3;
+        region = fn_scroll_begin(2, area);
+        float origin = g_cur->lay.y;
+        args[0] = hajimu_number(10000); args[1] = hajimu_number(0);
+        range = fn_virtual_scroll(2, args);
+        int first = (int)gui_dict_lookup(range, "開始").number;
+        int end = (int)gui_dict_lookup(range, "終了").number;
+        assert(first == 500 && end > first && end - first < 5);
+        Value space = gui_dict_lookup(range, "前余白"); fn_spacer(1, &space);
+        for (int i = first; i < end; i++) {
+            char id[32]; snprintf(id, sizeof(id), "virtual:%d", i);
+            Value row[] = {hajimu_string(id), hajimu_string("表示する行"), hajimu_string("")};
+            fn_detail_row(3, row);
+        }
+        space = gui_dict_lookup(range, "後余白"); fn_spacer(1, &space);
+        assert(fabs((double)g_cur->lay.y - origin - 10000.0 * step) < 1);
+        fn_scroll_end(1, &region);
+        assert(fabs(g_scrolls[0].content_h - 10000.0 * step) < 1);
+    }
+    frame(false, false, 500);
+    g_scrolls[0] = (GuiScrollRegion){.x = 0, .y = 100, .w = 300, .h = 100, .active = true};
+    g_scrolls[1] = (GuiScrollRegion){.x = 0, .y = 130, .w = 300, .h = 20, .active = true};
+    g_cur->lay.y = -5; args[0] = hajimu_number(100); args[1] = hajimu_number(20);
+    range = fn_virtual_scroll(2, args);
+    assert(gui_dict_lookup(range, "開始").number == 6 && gui_dict_lookup(range, "終了").number == 8);
+    g_cur->lay.y = 200; range = fn_virtual_scroll(2, args);
+    assert(gui_dict_lookup(range, "開始").number == 0 && gui_dict_lookup(range, "終了").number == 0);
+    assert(gui_dict_lookup(range, "後余白").number == 2000);
+    g_cur->lay.y = -3000; range = fn_virtual_scroll(2, args);
+    assert(gui_dict_lookup(range, "開始").number == 100 && gui_dict_lookup(range, "終了").number == 100);
+    assert(gui_dict_lookup(range, "前余白").number == 2000);
+    double invalid[] = {-1, NAN, INFINITY, 0.5, (double)INT_MAX + 1};
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        args[0] = hajimu_number(invalid[i]); range = fn_virtual_scroll(2, args);
+        assert(gui_dict_lookup(range, "開始").number == 0 && gui_dict_lookup(range, "終了").number == 0);
+        assert(gui_dict_lookup(range, "前余白").number == 0 && gui_dict_lookup(range, "後余白").number == 0);
+    }
+    args[0] = hajimu_number(100); args[1] = hajimu_number(DBL_MAX);
+    range = fn_virtual_scroll(2, args); assert(gui_dict_lookup(range, "後余白").number == 0);
+    args[1] = hajimu_string("20"); range = fn_virtual_scroll(2, args);
+    assert(gui_dict_lookup(range, "後余白").number == 0);
+    args[0] = hajimu_number(0); args[1] = hajimu_number(20);
+    range = fn_virtual_scroll(2, args); assert(gui_dict_lookup(range, "前余白").number == 0);
+    assert(gui_dict_lookup(range, "開始").number == 0 && gui_dict_lookup(range, "終了").number == 0);
+    GuiApp *app = g_cur; g_cur = NULL; range = fn_virtual_scroll(2, args); g_cur = app;
+    assert(gui_dict_lookup(range, "後余白").number == 0);
+    g_custom_font_size = original_font; g_cur->nav_enabled = original_nav;
+    g_next_widget_w = 0; memcpy(g_scrolls, saved, sizeof(saved));
+    hjpCancelFrame(g_cur->vg);
+}
+
 int main(void) {
     /* 仮想macOSのソフトウェアGLは2.1止まりの場合がある。実装失敗と区別する。 */
     if (getenv("CONTROL_ALLOW_UNSUPPORTED_GL")) {
@@ -1861,6 +1952,7 @@ int main(void) {
     check_navigation_loop();
     check_popup_loop();
     check_compact_rows();
+    check_virtual_rows();
     check_modal_stack();
     check_modal_forms();
     check_responsive_fields();

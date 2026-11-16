@@ -44,6 +44,7 @@
 #include <time.h>
 #include <sys/stat.h>
 #include <limits.h>
+#include <float.h>
 #include "hjp_tasks.h"
 #include "hjp_event_queue.h"
 #include "hjp_grapheme.h"
@@ -10026,24 +10027,35 @@ static Value fn_tab_order(int argc, Value *argv) {
     return hajimu_null();
 }
 
-/* 仮想スクロール(総数, 行高さ) → {開始, 終了} — 可視範囲を計算 */
+/* 行送り0は補足なしの一覧項目。範囲は0始まり・終了を含まない。配置は変更しない。 */
 static Value fn_virtual_scroll(int argc, Value *argv) {
-    (void)argc;
-    int   total = (int)argv[0].number;
-    float row_h = (float)argv[1].number;
-    if (row_h <= 0) row_h = 28.0f;
-
-    float visible_h = g_cur ? (float)g_cur->win_h : 600.0f;
-    float scroll_y  = g_cur ? g_cur->lay.y : 0.0f;
-
-    int start = (int)(scroll_y / row_h);
-    if (start < 0) start = 0;
-    int visible_count = (int)(visible_h / row_h) + 2;
-    int end = start + visible_count;
-    if (end > total) end = total;
-
-    return gui_dict2("開始", hajimu_number(start),
-                     "終了", hajimu_number(end));
+    int start = 0, end = 0;
+    double before = 0, after = 0;
+    if (g_cur && argc >= 2 && argv[0].type == VALUE_NUMBER && argv[1].type == VALUE_NUMBER &&
+        isfinite(argv[0].number) && argv[0].number >= 0 && argv[0].number <= INT_MAX &&
+        floor(argv[0].number) == argv[0].number && isfinite(argv[1].number) && argv[1].number >= 0) {
+        int total = (int)argv[0].number;
+        double step = argv[1].number == 0 ? GUI_FONT_SIZE * 1.4f + 16 + GUI_MARGIN : argv[1].number;
+        double height = step * total;
+        /* 下流の配置はfloatなので、変換時の無限大も事前に拒否する。 */
+        if (isfinite(height) && height <= FLT_MAX / 4 && step <= FLT_MAX / 4 &&
+            isfinite(g_cur->lay.y) && isfinite(g_cur->lay.x) && isfinite(g_cur->lay.w)) {
+            float x = g_cur->lay.x + g_cur->lay.indent + GUI_PADDING, y = 0;
+            float w = g_cur->lay.w - g_cur->lay.indent - GUI_PADDING * 2, h = g_cur->win_h;
+            if (gui_visible_rect(&x, &y, &w, &h)) {
+                start = (int)fmax(0, fmin(total, floor(((double)y - g_cur->lay.y) / step)));
+                end = (int)fmax(start, fmin(total, ceil(((double)y + h - g_cur->lay.y) / step)));
+            }
+            before = start * step;
+            after = (total - end) * step;
+        }
+    }
+    Value result = make_dict();
+    dict_set(&result, "開始", hajimu_number(start));
+    dict_set(&result, "終了", hajimu_number(end));
+    dict_set(&result, "前余白", hajimu_number(before));
+    dict_set(&result, "後余白", hajimu_number(after));
+    return result;
 }
 
 /* テーブルフィルター(テーブル, 列, 条件) — 行フィルタ（破壊的） */
@@ -26273,7 +26285,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.43.0",
+        .version        = "14.44.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,
