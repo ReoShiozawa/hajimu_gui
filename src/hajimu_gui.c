@@ -2411,6 +2411,54 @@ static Value fn_button(int argc, Value *argv) {
     return hajimu_bool(clicked);
 }
 
+typedef struct {
+    float x, y, width, height;
+} GuiFieldGeometry;
+static bool gui_form_field(const char *label, float minimum, GuiFieldGeometry *field);
+static Value gui_owned_control_value(Value value);
+
+typedef struct {
+    float x, y, width, height, icon, label_x, label_y, label_width, label_height;
+} GuiToggleGeometry;
+
+/* 真偽選択のラベルも通常テキストと同じ行分割で測定する。 */
+static bool gui_toggle_geometry(const char *label, float icon, float minimum_height, GuiToggleGeometry *out) {
+    float x, y, width;
+    gui_pos(&x, &y, &width);
+    if (!isfinite(width) || width <= 0) return false;
+    icon = fminf(icon, width);
+    float gap = *label ? fminf(8, fmaxf(0, width - icon)) : 0;
+    float text_width = fmaxf(0, width - icon - gap), measured = 0, text_height = 0;
+    hjpFontFaceId(g_cur->vg, g_cur->font_id);
+    hjpFontSize(g_cur->vg, GUI_FONT_SIZE);
+    if (*label && text_width > 0) {
+        GuiTextBlock block = {GUI_FONT_SIZE, text_width, GUI_FONT_SIZE * 1.4f, TH_TEXT};
+        int lines;
+        if (!gui_text_block_layout(label, &block, false, x, y, &measured, &lines)) return false;
+        text_height = lines * block.line_height;
+    }
+    float height = fmaxf(minimum_height, text_height);
+    *out = (GuiToggleGeometry){x, y, fminf(width, icon + gap + measured), height, icon,
+                              x + icon + gap, y + (height - text_height) * 0.5f, text_width, text_height};
+    return true;
+}
+
+static void gui_toggle_label(const char *label, const GuiToggleGeometry *layout) {
+    if (layout->label_width <= 0 || layout->label_height <= 0) return;
+    Hjpcontext *vg = g_cur->vg;
+    int depth = hjpStateDepth(vg);
+    hjpSave(vg);
+    if (hjpStateDepth(vg) != depth + 1) return;
+    hjpIntersectScissor(vg, layout->label_x, layout->label_y, layout->label_width, layout->label_height);
+    hjpTextAlign(vg, HJP_ALIGN_LEFT | HJP_ALIGN_TOP);
+    hjpFillColor(vg, g_disabled ? TH_TEXT_DIM : TH_TEXT);
+    GuiTextBlock block = {GUI_FONT_SIZE, layout->label_width, GUI_FONT_SIZE * 1.4f, g_disabled ? TH_TEXT_DIM : TH_TEXT};
+    float width;
+    int lines;
+    gui_text_block_layout(label, &block, true, layout->label_x, layout->label_y, &width, &lines);
+    hjpRestore(vg);
+}
+
 /* ---------------------------------------------------------------
  * チェックボックス(ラベル, 値) → 真偽
  *   クリックでトグルした値を返す。
@@ -2426,16 +2474,12 @@ static Value fn_checkbox(int argc, Value *argv) {
                  : false;
     uint32_t id = gui_hash(label);
 
-    float x, y, w;
-    gui_pos(&x, &y, &w);
-    float row_h = GUI_CHECK_SIZE + 4.0f;
-    float total_w = GUI_CHECK_SIZE + 8.0f;
-
-    /* テキスト幅を追加してヒット領域を広げる */
-    hjpFontFaceId(vg, g_cur->font_id);
-    hjpFontSize(vg, GUI_FONT_SIZE);
-    float tw = hjpTextBounds(vg, 0, 0, label, NULL, NULL);
-    total_w += tw;
+    GuiToggleGeometry layout;
+    if (!gui_toggle_geometry(label, GUI_CHECK_SIZE, GUI_CHECK_SIZE + 4, &layout)) {
+        if (g_cur->active == id) g_cur->active = 0;
+        return hajimu_bool(checked);
+    }
+    float x = layout.x, y = layout.y, row_h = layout.height, total_w = layout.width, size = layout.icon;
 
     bool hov = false, pressed = false;
     bool clicked = gui_widget_logic(id, x, y, total_w, row_h, &hov, &pressed);
@@ -2443,9 +2487,9 @@ static Value fn_checkbox(int argc, Value *argv) {
     if (clicked) checked = !checked;
 
     /* チェックボックス枠 */
-    float bx = x, by = y + (row_h - GUI_CHECK_SIZE) * 0.5f;
+    float bx = x, by = y + (row_h - size) * 0.5f;
     hjpBeginPath(vg);
-    hjpRoundedRect(vg, bx, by, GUI_CHECK_SIZE, GUI_CHECK_SIZE, 4.0f);
+    hjpRoundedRect(vg, bx, by, size, size, fminf(4, size * 0.2f));
     hjpFillColor(vg, checked ? TH_ACCENT : TH_WIDGET_BG);
     hjpFill(vg);
     hjpStrokeColor(vg, hov ? TH_ACCENT_HOVER : TH_BORDER);
@@ -2455,9 +2499,9 @@ static Value fn_checkbox(int argc, Value *argv) {
     /* チェックマーク */
     if (checked) {
         hjpBeginPath(vg);
-        float cx = bx + GUI_CHECK_SIZE * 0.5f;
-        float cy = by + GUI_CHECK_SIZE * 0.5f;
-        float s  = GUI_CHECK_SIZE * 0.3f;
+        float cx = bx + size * 0.5f;
+        float cy = by + size * 0.5f;
+        float s  = size * 0.3f;
         hjpMoveTo(vg, cx - s, cy);
         hjpLineTo(vg, cx - s * 0.3f, cy + s * 0.7f);
         hjpLineTo(vg, cx + s, cy - s * 0.6f);
@@ -2469,11 +2513,10 @@ static Value fn_checkbox(int argc, Value *argv) {
     }
 
     /* ラベル */
-    hjpFillColor(vg, TH_TEXT);
-    hjpTextAlign(vg, HJP_ALIGN_LEFT | HJP_ALIGN_MIDDLE);
-    hjpText(vg, bx + GUI_CHECK_SIZE + 8.0f, y + row_h * 0.5f, label, NULL);
+    gui_toggle_label(label, &layout);
 
     gui_accessible(id, label, 1, x, y, total_w, row_h, !g_disabled, checked);
+    g_cur->last = (GuiLastWidget){x, y, total_w, row_h, hov};
     gui_advance(row_h);
     return hajimu_bool(checked);
 }
@@ -2486,7 +2529,7 @@ static Value fn_radio(int argc, Value *argv) {
     if (!g_cur || argc < 3 ||
         argv[0].type != VALUE_STRING ||
         argv[1].type != VALUE_STRING)
-        return (argc >= 3) ? argv[2] : hajimu_null();
+        return (argc >= 3) ? gui_owned_control_value(argv[2]) : hajimu_null();
 
     Hjpcontext *vg = g_cur->vg;
     const char *label = argv[0].string.data;
@@ -2498,23 +2541,21 @@ static Value fn_radio(int argc, Value *argv) {
 
     uint32_t id = gui_hash(label);
 
-    float x, y, w;
-    gui_pos(&x, &y, &w);
-    float row_h = GUI_RADIO_RADIUS * 2.0f + 8.0f;
-
-    hjpFontFaceId(vg, g_cur->font_id);
-    hjpFontSize(vg, GUI_FONT_SIZE);
-    float tw = hjpTextBounds(vg, 0, 0, label, NULL, NULL);
-    float total_w = GUI_RADIO_RADIUS * 2.0f + 10.0f + tw;
+    GuiToggleGeometry layout;
+    if (!gui_toggle_geometry(label, GUI_RADIO_RADIUS * 2, GUI_RADIO_RADIUS * 2 + 8, &layout)) {
+        if (g_cur->active == id) g_cur->active = 0;
+        return gui_owned_control_value(current);
+    }
+    float x = layout.x, y = layout.y, row_h = layout.height, total_w = layout.width, radius = layout.icon * 0.5f;
 
     bool hov = false, pressed = false;
     bool clicked = gui_widget_logic(id, x, y, total_w, row_h, &hov, &pressed);
 
     /* 外円 */
-    float cx = x + GUI_RADIO_RADIUS + 2.0f;
+    float cx = x + radius;
     float cy = y + row_h * 0.5f;
     hjpBeginPath(vg);
-    hjpCircle(vg, cx, cy, GUI_RADIO_RADIUS);
+    hjpCircle(vg, cx, cy, radius);
     hjpFillColor(vg, TH_WIDGET_BG);
     hjpFill(vg);
     hjpStrokeColor(vg, hov ? TH_ACCENT_HOVER : TH_BORDER);
@@ -2524,20 +2565,19 @@ static Value fn_radio(int argc, Value *argv) {
     /* 選択時の内円 */
     if (selected) {
         hjpBeginPath(vg);
-        hjpCircle(vg, cx, cy, GUI_RADIO_RADIUS * 0.5f);
+        hjpCircle(vg, cx, cy, radius * 0.5f);
         hjpFillColor(vg, TH_ACCENT);
         hjpFill(vg);
     }
 
     /* ラベル */
-    hjpFillColor(vg, TH_TEXT);
-    hjpTextAlign(vg, HJP_ALIGN_LEFT | HJP_ALIGN_MIDDLE);
-    hjpText(vg, cx + GUI_RADIO_RADIUS + 8.0f, cy, label, NULL);
+    gui_toggle_label(label, &layout);
 
     clicked = gui_nav_control(id, x, y, total_w, row_h) || clicked;
     gui_accessible(id, label, 2, x, y, total_w, row_h, !g_disabled, selected || clicked);
+    g_cur->last = (GuiLastWidget){x, y, total_w, row_h, hov};
     gui_advance(row_h);
-    return clicked ? hajimu_string(label) : argv[2];
+    return clicked ? hajimu_string(label) : gui_owned_control_value(current);
 }
 
 /* ---------------------------------------------------------------
@@ -2548,41 +2588,60 @@ static Value fn_slider(int argc, Value *argv) {
     if (!g_cur || argc < 4 || argv[0].type != VALUE_STRING)
         return (argc >= 2) ? argv[1] : hajimu_number(0);
 
+    for (int i = 1; i < 4; i++)
+        if (argv[i].type != VALUE_NUMBER || !isfinite(argv[i].number)) return argv[1];
     Hjpcontext *vg = g_cur->vg;
     const char *label = argv[0].string.data;
     double val = argv[1].number;
     double vmin = argv[2].number;
     double vmax = argv[3].number;
-    if (vmax <= vmin) vmax = vmin + 1.0;
+    double span = vmax - vmin;
+    if (!isfinite(span) || span <= 0) return argv[1];
+    val = fmax(vmin, fmin(vmax, val));
     uint32_t id = gui_hash(label);
 
-    float x, y, avail_w;
-    gui_pos(&x, &y, &avail_w);
-    float row_h = GUI_WIDGET_H;
-
-    /* ラベル描画 */
-    hjpFontFaceId(vg, g_cur->font_id);
-    hjpFontSize(vg, GUI_FONT_SIZE);
-    hjpFillColor(vg, TH_TEXT);
-    hjpTextAlign(vg, HJP_ALIGN_LEFT | HJP_ALIGN_MIDDLE);
-    hjpText(vg, x, y + row_h * 0.5f, label, NULL);
-
-    /* スライダー領域 */
-    float sx = x + GUI_LABEL_W;
-    float sw = avail_w - GUI_LABEL_W - 70.0f;  /* 値表示分を確保 */
-    if (sw < 60.0f) sw = 60.0f;
-    float sy = y + (row_h - GUI_SLIDER_H) * 0.5f;
+    GuiFieldGeometry field;
+    if (!gui_form_field(label, 140, &field)) {
+        if (g_cur->active == id) g_cur->active = 0;
+        return argv[1];
+    }
+    float row_h = field.height, y = field.y, input_h = GUI_INPUT_H;
+    bool stacked_value = field.width < 120;
+    float value_w = stacked_value ? field.width : fminf(field.width * 0.4f, fmaxf(70, GUI_FONT_SIZE * 4));
+    float track_w = stacked_value ? field.width : field.width - value_w - 8;
+    float value_x = stacked_value ? field.x : field.x + track_w + 8;
+    float value_y = stacked_value ? y + input_h + 4 : y;
+    if (stacked_value) row_h += input_h + 4;
+    float radius = fminf(GUI_SLIDER_HANDLE * 0.5f, track_w * 0.25f);
+    float sx = field.x + radius, sw = fmaxf(FLT_MIN, track_w - radius * 2);
+    float sy = y + (input_h - GUI_SLIDER_H) * 0.5f;
 
     /* ヒット領域はスライダートラック全体 */
     bool hov = false, pressed = false;
-    gui_widget_logic(id, sx, y, sw, row_h, &hov, &pressed);
+    gui_widget_logic(id, field.x, y, track_w, input_h, &hov, &pressed);
+    float vx = field.x, vy = y, vw = track_w, vh = input_h;
+    bool interactive = !g_disabled && !g_cur->closing && !g_cur->composition[0] &&
+        (!g_cur->modal_title[0] || g_cur->modal_entered) && gui_visible_rect(&vx, &vy, &vw, &vh);
+    if (!interactive && g_cur->active == id) g_cur->active = 0;
 
     /* ドラッグ中の値更新 */
-    if (g_cur->active == id && g_cur->in.down) {
+    if (interactive && g_cur->active == id && g_cur->in.down) {
         float ratio = ((float)g_cur->in.mx - sx) / sw;
         if (ratio < 0) ratio = 0;
         if (ratio > 1) ratio = 1;
-        val = vmin + (vmax - vmin) * ratio;
+        val = ratio >= 1 ? vmax : vmin + span * ratio;
+    }
+
+    bool focused = gui_nav_register(id, field.x, y, track_w, input_h);
+    if (interactive && focused && !g_cur->focused) {
+        if (g_cur->in.key_home) { val = vmin; g_cur->in.key_home = false; }
+        if (g_cur->in.key_end) { val = vmax; g_cur->in.key_end = false; }
+        if (g_cur->in.key_left || g_cur->in.key_down) {
+            val = fmax(vmin, val - span * 0.01); g_cur->in.key_left = g_cur->in.key_down = false;
+        }
+        if (g_cur->in.key_right || g_cur->in.key_up) {
+            val = fmin(vmax, val + span * 0.01); g_cur->in.key_right = g_cur->in.key_up = false;
+        }
     }
 
     float ratio = (float)((val - vmin) / (vmax - vmin));
@@ -2603,9 +2662,9 @@ static Value fn_slider(int argc, Value *argv) {
 
     /* ハンドル */
     float hx = sx + sw * ratio;
-    float hy = y + row_h * 0.5f;
+    float hy = y + input_h * 0.5f;
     hjpBeginPath(vg);
-    hjpCircle(vg, hx, hy, GUI_SLIDER_HANDLE * 0.5f);
+    hjpCircle(vg, hx, hy, radius);
     Hjpcolor hcol = (g_cur->active == id) ? TH_ACCENT_HOVER
                   : hov                   ? TH_WIDGET_HOVER
                   :                         TH_ACCENT;
@@ -2614,14 +2673,16 @@ static Value fn_slider(int argc, Value *argv) {
 
     /* 値テキスト */
     char vbuf[32];
-    if (val == (int)val)
-        snprintf(vbuf, sizeof(vbuf), "%d", (int)val);
-    else
-        snprintf(vbuf, sizeof(vbuf), "%.2f", val);
+    snprintf(vbuf, sizeof(vbuf), "%.15g", val);
     hjpFillColor(vg, TH_TEXT_DIM);
     hjpTextAlign(vg, HJP_ALIGN_LEFT | HJP_ALIGN_MIDDLE);
-    hjpText(vg, sx + sw + 10.0f, y + row_h * 0.5f, vbuf, NULL);
+    gui_single_line(vg, vbuf, value_x, value_y, value_w, input_h, true);
+    if (focused) {
+        hjpBeginPath(vg); hjpRoundedRect(vg, field.x + 1, y + 1, fmaxf(0, track_w - 2), input_h - 2, 3);
+        hjpStrokeColor(vg, TH_ACCENT); hjpStrokeWidth(vg, 1); hjpStroke(vg);
+    }
 
+    g_cur->last = (GuiLastWidget){field.x, y, field.width, input_h + (stacked_value ? input_h + 4 : 0), hov};
     gui_advance(row_h);
     return hajimu_number(val);
 }
@@ -3034,10 +3095,6 @@ static Value gui_owned_control_value(Value value) {
         return value;
     return hajimu_null();
 }
-
-typedef struct {
-    float x, y, width, height;
-} GuiFieldGeometry;
 
 /* ラベルの実幅と入力の最低希望幅が収まらなければ、ラベルを上へ折り返す。 */
 static bool gui_form_field(const char *label, float minimum, GuiFieldGeometry *field) {
@@ -7141,7 +7198,11 @@ static Value fn_scroll_begin(int argc, Value *argv) {
     gui_pos(&x, &y, &w);
     /* 子ウィンドウと同じく、0以下は現在位置からの残り領域として扱う。 */
     if (sw <= 0) sw = w;
-    if (sh <= 0) sh = (float)g_cur->win_h - y - GUI_PADDING;
+    if (sh <= 0) {
+        float vx = x, vy = y, vw = sw, vh = fmaxf(0, (float)g_cur->win_h - y - GUI_PADDING);
+        if (!gui_visible_rect(&vx, &vy, &vw, &vh)) return hajimu_number(-1);
+        sh = vy + vh - y;
+    }
     if (sw > w) sw = w;
     if (sh < 1) sh = 1;
 
@@ -25765,7 +25826,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.30.0",
+        .version        = "14.31.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,

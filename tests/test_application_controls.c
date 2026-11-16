@@ -901,6 +901,55 @@ static void check_responsive_fields(void) {
     hjpCancelFrame(g_cur->vg);
 }
 
+static void check_toggle_slider_layout(void) {
+    float original_font = g_custom_font_size;
+    bool original_nav = g_cur->nav_enabled;
+    g_cur->nav_enabled = false;
+    const float widths[] = {1, 40, 120, 300, 600}, sizes[] = {16, 28, 48};
+    for (int font = 0; font < 3; font++) for (int width = 0; width < 5; width++) {
+        g_custom_font_size = sizes[font];
+        for (int control = 0; control < 3; control++) {
+            frame(false, false, 800); g_cur->lay.w = widths[width];
+            GuiLastWidget before = g_cur->last;
+            Value label = hajimu_string("長い説明文も入力欄の幅に合わせて表示します");
+            Value check[] = {label, hajimu_bool(true)};
+            Value radio[] = {label, hajimu_string("group"), hajimu_string("other")};
+            Value slider[] = {label, hajimu_number(50), hajimu_number(0), hajimu_number(100)};
+            if (control == 0) assert(fn_checkbox(2, check).boolean);
+            if (control == 1) assert(!strcmp(fn_radio(3, radio).string.data, "other"));
+            if (control == 2) assert(fn_slider(4, slider).number == 50);
+            if (widths[width] <= GUI_PADDING * 2) {
+                assert(g_cur->lay.y == 0 && !memcmp(&before, &g_cur->last, sizeof(before)));
+                hjpCancelFrame(g_cur->vg);
+                continue;
+            }
+            assert(g_cur->last.x >= 0 && g_cur->last.w >= 0);
+            assert(g_cur->last.x + g_cur->last.w <= widths[width] + 0.01f);
+            assert(g_cur->lay.y >= g_cur->last.y + g_cur->last.h);
+            hjpCancelFrame(g_cur->vg);
+        }
+    }
+    g_custom_font_size = 0;
+    Value slider[] = {hajimu_string("volume"), hajimu_number(50), hajimu_number(0), hajimu_number(100)};
+    frame(false, false, 800); g_cur->nav_enabled = true; g_cur->nav_focus = gui_hash("volume"); g_cur->focused = 0;
+    g_cur->in.key_right = true;
+    assert(fn_slider(4, slider).number == 51 && !g_cur->in.key_right);
+    frame(false, false, 800); g_cur->in.key_home = true;
+    assert(fn_slider(4, slider).number == 0 && !g_cur->in.key_home);
+    frame(false, false, 800); g_cur->in.key_end = true;
+    assert(fn_slider(4, slider).number == 100 && !g_cur->in.key_end);
+    frame(true, false, 600); g_cur->active = gui_hash("volume"); g_disabled = true;
+    assert(fn_slider(4, slider).number == 50 && !g_cur->active); g_disabled = false;
+    frame(true, false, 600); g_cur->active = gui_hash("volume"); strcpy(g_cur->composition, "a");
+    assert(fn_slider(4, slider).number == 50 && !g_cur->active); g_cur->composition[0] = 0;
+    frame(false, false, 800); slider[1] = hajimu_number(NAN);
+    assert(isnan(fn_slider(4, slider).number) && g_cur->lay.y == 0);
+    slider[1] = hajimu_number(50); slider[3] = hajimu_number(0);
+    assert(fn_slider(4, slider).number == 50 && g_cur->lay.y == 0);
+    g_cur->active = 0; g_custom_font_size = original_font; g_cur->nav_enabled = original_nav;
+    hjpCancelFrame(g_cur->vg);
+}
+
 static void check_modal_forms(void) {
     frame(false, false, 500); gui_nav_begin();
     Value parent = modal_list("form", NULL), none = modal_list(NULL, NULL);
@@ -935,6 +984,15 @@ static void check_modal_forms(void) {
 }
 
 static void check_form_scrolling(void) {
+    frame(false, false, 500);
+    Value parent[] = {hajimu_string("auto-scroll-parent"), hajimu_number(220), hajimu_number(120)};
+    assert(fn_child_begin(3, parent).boolean);
+    Value automatic[] = {hajimu_number(-1), hajimu_number(-1)};
+    Value auto_slot = fn_scroll_begin(2, automatic);
+    assert(auto_slot.number >= 0);
+    GuiScrollRegion *auto_region = &g_scrolls[(int)auto_slot.number];
+    assert(auto_region->y + auto_region->h <= g_scrolls[0].y + g_scrolls[0].h);
+    fn_scroll_end(1, &auto_slot); fn_child_end(0, NULL);
     frame(false, false, 500);
     Value dimensions[] = {hajimu_number(220), hajimu_number(100)};
     Value slot = fn_scroll_begin(2, dimensions);
@@ -1098,6 +1156,7 @@ int main(void) {
     check_modal_stack();
     check_modal_forms();
     check_responsive_fields();
+    check_toggle_slider_layout();
     check_text_block_layout();
     check_form_scrolling();
     char oversized[GUI_MAX_TEXT_BUF + 8];
