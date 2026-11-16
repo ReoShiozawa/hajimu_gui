@@ -1319,9 +1319,13 @@ static Value window_event_observe(Value *callback, int argc, Value *argv) {
     (void)argv; assert(argc == 0);
     if (callback->function.definition == (struct ASTNode *)&event_guard_tag) {
         assert(event_model_committed);
+        Value app_id = hajimu_number(g_cur - g_apps);
+        assert(!gui_dict_lookup(fn_close_state(1, &app_id), "OS終了要求待ち").boolean);
         event_guards++; return hajimu_bool(true);
     }
     assert(callback->function.definition == (struct ASTNode *)&event_callback_tag);
+    Value app_id = hajimu_number(g_cur - g_apps);
+    assert(gui_dict_lookup(fn_close_state(1, &app_id), "OS終了要求待ち").boolean);
     Value args[] = {hajimu_string("event-field"), hajimu_string("before")};
     Value text = fn_text_input(2, args);
     assert(!strcmp(text.string.data, event_overflow ? "before" : "beforeX"));
@@ -1375,6 +1379,7 @@ static void check_window_close_input(void) {
             assert(!gui_dict_lookup(state, "入力リセット待ち").boolean);
         }
         fn_app_quit(1, &app_id);
+        assert(!gui_dict_lookup(fn_close_state(1, &app_id), "OS終了要求待ち").boolean);
     }
     __hajimu_runtime = previous;
     g_cur = original;

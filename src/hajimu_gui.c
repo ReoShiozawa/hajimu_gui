@@ -2042,11 +2042,13 @@ static Value fn_request_close(int argc, Value *argv) {
 
 static Value fn_close_state(int argc, Value *argv) {
     const char *state = "不明";
+    bool pending_request = false;
     int frames = 0, error = 0, pending = 0;
     if (argc == 1 && argv[0].type == VALUE_NUMBER && isfinite(argv[0].number) &&
         argv[0].number >= 0 && argv[0].number < GUI_MAX_APPS && floor(argv[0].number) == argv[0].number) {
         GuiApp *app = &g_apps[(int)argv[0].number];
         if (app->valid) {
+            pending_request = app->os_close_pending;
             state = app->closing ? "終了処理中" : app->running ? "実行中" : "停止";
             frames = app->close_frames; error = app->close_error;
 #ifndef _WIN32
@@ -2059,6 +2061,7 @@ static Value fn_close_state(int argc, Value *argv) {
     dict_set(&result, "終了待機フレーム", hajimu_number(frames));
     dict_set(&result, "エラー番号", hajimu_number(error));
     dict_set(&result, "未回収タスク", hajimu_number(pending));
+    dict_set(&result, "OS終了要求待ち", hajimu_bool(pending_request));
     return result;
 }
 
@@ -26267,7 +26270,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.41.0",
+        .version        = "14.42.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,

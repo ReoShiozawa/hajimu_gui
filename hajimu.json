@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "name": "hajimu_gui",
-  "version": "14.41.0",
+  "version": "14.42.0",
   "description": "はじむ言語用 GUI パッケージ — egui風の即時モード + PyQt風ウィジェット",
   "author": "はじむ開発チーム",
   "license": "MIT",
