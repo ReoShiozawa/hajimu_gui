@@ -100,9 +100,10 @@ int main(int argc, char **argv) {
                         if (e.type == HJP_EVENT_TEXTEDITING) cleared = e.text.text[0] == '\0';
                         if (e.type == HJP_EVENT_TEXTINPUT) {
                             assert(e.source.window == win && e.source.generation == win->windowId);
-                            assert([[NSString alloc] initWithUTF8String:e.text.text] != nil);
-                            bytes += strlen(e.text.text);
+                            assert([[NSString alloc] initWithUTF8String:hjp_input_text(&e)] != nil);
+                            bytes += strlen(hjp_input_text(&e));
                         }
+                        hjp_native_dispose(&e);
                     }
                     assert(cleared && bytes == strlen(commit.UTF8String));
                     hjp_set_text_input_context(win, 901, "A😀日本Z", 5, 11, 2048);
@@ -370,6 +371,12 @@ int main(int argc, char **argv) {
                     hjp_set_text_input_context(win, 950, "AB", 0, 2, 2048);
                     [view insertText:largeCommit replacementRange:NSMakeRange(NSNotFound, 0)];
                     assert([view.inputDocument isEqualToString:@"AB"] && NSEqualRanges(view.documentSelection, NSMakeRange(0, 2)));
+                    assert(!hjp__popEvent(&e));
+                    hjp_set_text_input_context(win, 0, "", 0, 0, 0);
+                    [view insertText:largeCommit replacementRange:NSMakeRange(NSNotFound, 0)];
+                    assert(hjp__popEvent(&e) && e.type == HJP_EVENT_TEXTINPUT);
+                    assert(!strcmp(hjp_input_text(&e), largeCommit.UTF8String));
+                    hjp_native_dispose(&e);
                     assert(!hjp__popEvent(&e));
                     hjp_set_text_input_context(win, 901, "AB", 1, 1, 2048);
                     [view setMarkedText:@"に" selectedRange:NSMakeRange(1, 0)

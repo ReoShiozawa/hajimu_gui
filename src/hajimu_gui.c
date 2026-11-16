@@ -236,6 +236,7 @@ typedef struct {
     /* キーボード入力 (Phase 3) */
     char text_input[4096];      /* 同一フレームの複数の確定イベントを保持 */
     int  text_input_len;        /* 今フレームの入力バイト数     */
+    const char *text_input_external; /* 大きい入力はアプリ所有領域を借用 */
     bool key_backspace;         /* Backspace 押下                 */
     bool key_delete;            /* Delete 押下                    */
     bool key_return;            /* Enter / Return 押下            */
@@ -343,6 +344,9 @@ typedef struct {
     bool modal_entered, modal_input_saved;
     bool modal_input_delivered;
     GuiInput modal_input;
+    char *input_text_storage;
+    size_t input_text_capacity;
+    uint64_t input_text_rejected;
     struct {
         char title[256];
         uint32_t restore_nav, restore_text;
@@ -509,6 +513,39 @@ static bool gui_ime_event(GuiApp *app, const HjpEvent *event) {
         if (app->composition_version == previous) app->composition_version++;
     }
     return true;
+}
+
+static const char *gui_input_text(const GuiInput *input) {
+    return input->text_input_external ? input->text_input_external : input->text_input;
+}
+
+/* スナップショットは同一フレーム内だけ領域を借用し、所有者はアプリに限定する。 */
+static bool gui_input_append(GuiApp *app, const char *text) {
+    size_t length = strnlen(text, GUI_TEXT_LIMIT);
+    size_t previous = (size_t)app->in.text_input_len;
+    if (app->in.text_input_len < 0 || previous >= GUI_TEXT_LIMIT ||
+        length > GUI_TEXT_LIMIT - 1 - previous) goto rejected;
+    size_t required = previous + length + 1;
+    if (required <= sizeof(app->in.text_input) && !app->in.text_input_external) {
+        memcpy(app->in.text_input + previous, text, length + 1);
+    } else {
+        bool external = app->in.text_input_external != NULL;
+        if (required > app->input_text_capacity) {
+            size_t capacity = app->input_text_capacity ? app->input_text_capacity : sizeof(app->in.text_input);
+            while (capacity < required) capacity *= 2;
+            char *storage = HJP_GUI_TEXT_REALLOC(app->input_text_storage, capacity);
+            if (!storage) goto rejected;
+            app->input_text_storage = storage; app->input_text_capacity = capacity;
+        }
+        if (!external) memcpy(app->input_text_storage, app->in.text_input, previous);
+        memcpy(app->input_text_storage + previous, text, length + 1);
+        app->in.text_input_external = app->input_text_storage;
+    }
+    app->in.text_input_len = (int)(previous + length);
+    return true;
+rejected:
+    if (app->input_text_rejected < UINT64_MAX) app->input_text_rejected++;
+    return false;
 }
 static void gui_accessible(uint32_t id, const char *name, int role, float x, float y,
     float w, float h, bool enabled, bool selected);
@@ -1506,6 +1543,7 @@ static Value fn_draw_loop(int argc, Value *argv) {
         app->in.pmx = app->in.mx;
         app->in.pmy = app->in.my;
         app->in.text_input_len = 0;
+        app->in.text_input_external = NULL;
         app->in.text_input[0]  = '\0';
         app->in.key_backspace  = false;
         app->in.key_delete     = false;
@@ -1591,13 +1629,7 @@ static Value fn_draw_loop(int argc, Value *argv) {
                 }
                 break;
             case HJP_EVENT_TEXTINPUT: {
-                int n = (int)strlen(ev.text.text);
-                if (app->in.text_input_len + n < (int)sizeof(app->in.text_input) - 1) {
-                    memcpy(app->in.text_input + app->in.text_input_len,
-                           ev.text.text, n);
-                    app->in.text_input_len += n;
-                    app->in.text_input[app->in.text_input_len] = '\0';
-                }
+                gui_input_append(app, hjp_input_text(&ev));
                 break;
             }
             case HJP_EVENT_TEXTEDITING:
@@ -1920,6 +1952,7 @@ static Value fn_input_state(int argc, Value *argv) {
     dict_set(&result, "共通キュー破棄数", hajimu_number(app ? (double)app->rejected_events : 0));
     dict_set(&result, "OSキュー破棄入力数", hajimu_number(app ? (double)app->native_dropped : 0));
     dict_set(&result, "入力リセット待ち", hajimu_bool(app && app->events.blocked));
+    dict_set(&result, "確定入力拒否数", hajimu_number(app ? (double)app->input_text_rejected : 0));
     return result;
 }
 
@@ -1936,6 +1969,9 @@ static Value fn_app_quit(int argc, Value *argv) {
     if (app->loop_active || g_cur == app) return hajimu_null();
     hjp_event_queue_clear(&app->events);
     gui_histories_close(app);
+    free(app->input_text_storage);
+    app->input_text_storage = NULL; app->input_text_capacity = 0;
+    app->in.text_input_external = NULL; app->in.text_input_len = 0;
     if (app->composition != app->composition_inline) free(app->composition);
     app->composition = app->composition_inline;
     app->composition_inline[0] = '\0';
@@ -3112,7 +3148,7 @@ static void gui_text_buf_edit(GuiTextBuf *tb, bool allow_copy) {
         }
     }
     if (in->text_input_len > 0)
-        changed |= gui_text_replace_selection(tb, in->text_input, in->text_input_len);
+        changed |= gui_text_replace_selection(tb, gui_input_text(in), in->text_input_len);
     if (in->key_backspace || in->key_delete) {
         gui_text_selection(tb, &start, &end);
         if (start == end) {
@@ -12885,13 +12921,12 @@ static Value fn_input_dialog(int argc, Value *argv) {
     /* テキスト入力処理 */
     if (g_cur->in.text_input_len > 0) {
         int len = (int)strlen(d->buf);
-        for (int i = 0; i < g_cur->in.text_input_len && len < 254; i++)
-            d->buf[len++] = g_cur->in.text_input[i];
-        d->buf[len] = 0;
+        if (g_cur->in.text_input_len < (int)sizeof(d->buf) - len)
+            memcpy(d->buf + len, gui_input_text(&g_cur->in), (size_t)g_cur->in.text_input_len + 1);
     }
     if (g_cur->in.key_backspace && d->buf[0]) {
         int len = (int)strlen(d->buf);
-        d->buf[len-1] = 0;
+        d->buf[hjp_grapheme_prev(d->buf, len, len)] = 0;
     }
 
     /* ボタン */
@@ -13415,14 +13450,16 @@ static Value fn_mask_input(int argc, Value *argv) {
         int len = (int)strlen(tb->buf);
         /* テキスト入力 (数字のみ受け付け) */
         for (int i = 0; i < g_cur->in.text_input_len && len < 254; i++) {
-            char ch = g_cur->in.text_input[i];
+            char ch = gui_input_text(&g_cur->in)[i];
             if (ch >= '0' && ch <= '9') tb->buf[len++] = ch;
         }
         tb->buf[len] = '\0';
         /* バックスペース */
         if (g_cur->in.key_backspace && len > 0) {
-            tb->buf[len - 1] = '\0';
+            tb->buf[hjp_grapheme_prev(tb->buf, len, len)] = '\0';
         }
+        tb->len = (int)strlen(tb->buf);
+        gui_text_collapse(tb, tb->len);
     }
     const char *raw = tb ? tb->buf : val;
 
@@ -13483,7 +13520,7 @@ static Value fn_pincode(int argc, Value *argv) {
     if (focused && g_cur->in.text_input_len > 0) {
         int len = (int)strlen(tb->buf);
         for (int i = 0; i < g_cur->in.text_input_len && len < digits; i++) {
-            char c = g_cur->in.text_input[i];
+            char c = gui_input_text(&g_cur->in)[i];
             if (c >= '0' && c <= '9') tb->buf[len++] = c;
         }
         tb->buf[len] = 0;
@@ -13658,16 +13695,7 @@ static Value fn_auto_resize_text(int argc, Value *argv) {
     if (hov && g_cur->in.clicked) g_cur->focused = id;
     bool focused = (g_cur->focused == id);
 
-    if (focused && g_cur->in.text_input_len > 0) {
-        int len = (int)strlen(tb->buf);
-        for (int i = 0; i < g_cur->in.text_input_len && len < GUI_MAX_TEXT_BUF - 2; i++)
-            tb->buf[len++] = g_cur->in.text_input[i];
-        tb->buf[len] = 0;
-    }
-    if (focused && g_cur->in.key_backspace && tb->buf[0]) {
-        int len = (int)strlen(tb->buf);
-        tb->buf[len-1] = 0;
-    }
+    if (focused) gui_text_buf_process(tb);
 
     /* 行数を計算 */
     int lines = 1;
@@ -14797,13 +14825,14 @@ static Value fn_table_inline_edit(int argc, Value *argv) {
             int len = (int)strlen(t->edit_buf);
             int add = g_cur->in.text_input_len;
             if (len + add < (int)sizeof(t->edit_buf) - 1) {
-                memcpy(t->edit_buf + len, g_cur->in.text_input, add);
+                memcpy(t->edit_buf + len, gui_input_text(&g_cur->in), add);
                 t->edit_buf[len + add] = '\0';
                 t->edit_cursor = len + add;
             }
         }
         if (g_cur->in.key_backspace && t->edit_cursor > 0) {
-            t->edit_buf[--t->edit_cursor] = '\0';
+            t->edit_cursor = hjp_grapheme_prev(t->edit_buf, (int)strlen(t->edit_buf), t->edit_cursor);
+            t->edit_buf[t->edit_cursor] = '\0';
         }
         /* Enter で確定 (HJP_SCANCODE_RETURN = 40) */
         const uint8_t *ks = hjp_get_keyboard_state(NULL);
@@ -25956,7 +25985,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.36.0",
+        .version        = "14.37.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,

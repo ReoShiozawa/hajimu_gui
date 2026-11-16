@@ -164,7 +164,7 @@ typedef struct {
 
 typedef struct {
     char text[128];
-    char *owned_text; /* 長い未確定文字。イベント破棄時に解放 */
+    char *owned_text; /* 長い確定/未確定文字。イベント破棄時に解放 */
     int selection_start, selection_end; /* 未確定文字内のUTF-8バイト範囲 */
     bool has_selection;
 } HjpTextInputEvent;

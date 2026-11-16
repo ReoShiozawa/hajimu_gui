@@ -87,10 +87,10 @@ int main(void) {
     char long_text[8192];
     memset(long_text, 'x', sizeof(long_text) - 1); long_text[sizeof(long_text) - 1] = '\0';
     for (int i = 0; i < 1000; i++) {
-        event = input(0, HJP_EVENT_TEXTEDITING);
-        assert(hjp_composition_set_text(&event, long_text));
+        event = input(0, HJP_EVENT_TEXTINPUT);
+        assert(hjp_input_set_text(&event, long_text));
         assert(hjp_native_push(&q, &event));
-        assert(hjp_native_pop(&q, &result) && !strcmp(hjp_composition_text(&result), long_text));
+        assert(hjp_native_pop(&q, &result) && !strcmp(hjp_input_text(&result), long_text));
         hjp_native_dispose(&result);
     }
     event = input(0, HJP_EVENT_TEXTREPLACE);

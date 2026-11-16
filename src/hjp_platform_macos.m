@@ -615,21 +615,12 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
         [self clearComposition];
         return;
     }
-    if ([self hasMarkedText]) [self clearComposition];
     const char *utf8 = [str UTF8String];
-    /* キューの1イベントに収まるUTF-8境界で分割する。 */
-    while (utf8 && *utf8) {
-        HjpEvent e = {0};
-        e.type = HJP_EVENT_TEXTINPUT;
-        size_t n = strlen(utf8);
-        if (n >= sizeof(e.text.text)) {
-            n = sizeof(e.text.text) - 1;
-            while (n && ((unsigned char)utf8[n] & 0xc0) == 0x80) n--;
-        }
-        memcpy(e.text.text, utf8, n);
-        hjp__pushWindowEvent(self.ownerWindow, &e);
-        utf8 += n;
-    }
+    if (hjp_native_free(&g_hjp.queue) < ([self hasMarkedText] ? 2u : 1u)) return;
+    HjpEvent e = {0}; e.type = HJP_EVENT_TEXTINPUT;
+    if (!hjp_input_set_text(&e, utf8)) return;
+    if ([self hasMarkedText]) [self clearComposition];
+    hjp__pushWindowEvent(self.ownerWindow, &e);
 }
 - (void)doCommandBySelector:(SEL)aSelector {
     if (!self.documentID || self.hasMarkedText) return;

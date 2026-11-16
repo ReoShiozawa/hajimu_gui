@@ -386,6 +386,34 @@ static void check_long_composition(void) {
     hjpCancelFrame(g_cur->vg);
 }
 
+static void check_input_aggregation(void) {
+    GuiApp *app = calloc(1, sizeof(*app));
+    char *text = malloc(200001);
+    assert(app && text);
+    memset(text, 'x', 200000); text[200000] = '\0';
+    assert(gui_input_append(app, "先"));
+    assert(gui_input_append(app, text));
+    assert(app->in.text_input_len == 200003 && !strncmp(gui_input_text(&app->in), "先xxx", 6));
+    GuiInput saved = app->in;
+    app->in = (GuiInput){0};
+    app->in = saved;
+    assert(!strcmp(gui_input_text(&app->in) + 3, text));
+    app->in = (GuiInput){0};
+    assert(gui_input_append(app, "保持"));
+    free(app->input_text_storage); app->input_text_storage = NULL; app->input_text_capacity = 0;
+    control_text_allocation_failure = true;
+    assert(!gui_input_append(app, text));
+    control_text_allocation_failure = false;
+    assert(app->in.text_input_len == 6 && !strcmp(gui_input_text(&app->in), "保持"));
+    assert(app->input_text_rejected == 1);
+    char *oversized = malloc(GUI_TEXT_LIMIT + 1);
+    assert(oversized);
+    memset(oversized, 'x', GUI_TEXT_LIMIT); oversized[GUI_TEXT_LIMIT] = '\0';
+    assert(!gui_input_append(app, oversized));
+    assert(app->input_text_rejected == 2 && !strcmp(gui_input_text(&app->in), "保持"));
+    free(oversized); free(text); free(app);
+}
+
 static void check_long_text(void) {
     frame(false, false, 500);
     char *text = malloc(24001);
@@ -1339,6 +1367,53 @@ static void check_window_close_input(void) {
     hjp_gl_make_current(original->window, original->gl);
 }
 
+static const char *raw_input_expected;
+static Value raw_input_app;
+static int raw_input_callbacks;
+static Value raw_input_callback(Value *callback, int argc, Value *argv) {
+    (void)callback; (void)argv;
+    assert(argc == 0);
+    raw_input_callbacks++;
+    Value args[] = {hajimu_string("raw-input"), hajimu_string("")};
+    Value result = fn_textarea(2, args);
+    assert(!strcmp(result.string.data, raw_input_expected));
+    fn_app_quit(1, &raw_input_app);
+    return hajimu_null();
+}
+
+static void check_raw_input_loop(void) {
+    GuiApp *original = g_cur;
+    HajimuRuntime *runtime = __hajimu_runtime;
+    HajimuRuntime test_runtime = {.call = raw_input_callback};
+    char *text = malloc(90001);
+    assert(text);
+    for (int i = 0; i < 10000; i++) memcpy(text + i * 9, "日本語", 9);
+    text[90000] = '\0';
+    raw_input_expected = text; raw_input_callbacks = 0;
+    Value create[] = {hajimu_string("raw input loop"), hajimu_number(640), hajimu_number(400)};
+    raw_input_app = fn_app_create(3, create);
+    assert(raw_input_app.type == VALUE_NUMBER);
+    GuiApp *app = &g_apps[(int)raw_input_app.number];
+    g_cur = app; g_id_scope_depth = 0;
+    app->focused = gui_hash("raw-input");
+    assert(gui_get_text_buf(app->focused, ""));
+    HjpEvent event = source_event(app, HJP_EVENT_TEXTINPUT);
+    assert(hjp_input_set_text(&event, text));
+    hjp_test_native_event(&event);
+    __hajimu_runtime = &test_runtime; g_cur = NULL;
+    Value draw[] = {raw_input_app, {.type = VALUE_FUNCTION}};
+    fn_draw_loop(2, draw);
+    assert(raw_input_callbacks == 1 && app->input_text_rejected == 0);
+    Value state = fn_input_state(1, &raw_input_app);
+    Value rejected = gui_dict_lookup(state, "確定入力拒否数");
+    assert(rejected.type == VALUE_NUMBER && rejected.number == 0);
+    fn_app_quit(1, &raw_input_app);
+    assert(!app->input_text_storage && !app->text_buf_count);
+    __hajimu_runtime = runtime; g_cur = original;
+    hjp_gl_make_current(original->window, original->gl);
+    free(text);
+}
+
 int main(void) {
     /* 仮想macOSのソフトウェアGLは2.1止まりの場合がある。実装失敗と区別する。 */
     if (getenv("CONTROL_ALLOW_UNSUPPORTED_GL")) {
@@ -1381,6 +1456,7 @@ int main(void) {
     check_text_formatting();
     check_text_selection();
     check_long_composition();
+    check_input_aggregation();
     check_long_text();
     check_grapheme_editing();
     check_text_navigation();
@@ -1390,6 +1466,7 @@ int main(void) {
     check_closing_loop();
     check_window_routing();
     check_window_close_input();
+    check_raw_input_loop();
     check_modal_stack();
     check_modal_forms();
     check_responsive_fields();
@@ -1757,6 +1834,7 @@ int main(void) {
     g_cur = NULL;
     fn_app_quit(1, &app);
     assert(g_apps[(int)app.number].composition == g_apps[(int)app.number].composition_inline);
+    assert(!g_apps[(int)app.number].input_text_storage);
     assert(g_histories[history_slot].id == 0);
     assert(waitpid(shutdown_pid, NULL, WNOHANG) == -1 && errno == ECHILD);
     puts("application controls passed: registration, UTF-8, text selection/navigation, clicks, list isolation/LRU, visible rows, disabled wheel, shrink");

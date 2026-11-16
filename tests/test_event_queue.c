@@ -17,11 +17,13 @@ int main(void) {
     char long_text[8192];
     memset(long_text, 'x', sizeof(long_text) - 1); long_text[sizeof(long_text) - 1] = '\0';
     for (int i = 0; i < 1000; i++) {
-        HjpEvent edit = {.type = i % 2 ? HJP_EVENT_TEXTREPLACE : HJP_EVENT_TEXTEDITING}, received;
-        assert(i % 2 ? hjp_document_set_text(&edit, long_text) : hjp_composition_set_text(&edit, long_text));
+        HjpEvent edit = {.type = i % 3 == 0 ? HJP_EVENT_TEXTREPLACE : i % 3 == 1 ? HJP_EVENT_TEXTEDITING : HJP_EVENT_TEXTINPUT}, received;
+        bool stored = i % 3 == 0 ? hjp_document_set_text(&edit, long_text) :
+            i % 3 == 1 ? hjp_composition_set_text(&edit, long_text) : hjp_input_set_text(&edit, long_text);
+        assert(stored);
         assert(hjp_event_queue_push(&queue, &edit));
         assert(hjp_event_queue_pop(&queue, &received));
-        assert(!strcmp(i % 2 ? hjp_document_text(&received) : hjp_composition_text(&received), long_text));
+        assert(!strcmp(hjp_document_event(&received) ? hjp_document_text(&received) : hjp_input_text(&received), long_text));
         hjp_event_dispose(&received);
     }
     for (int i = 0; i <= HJP_DEFERRED_EVENTS; i++) {

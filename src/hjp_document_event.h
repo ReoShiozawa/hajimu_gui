@@ -33,8 +33,17 @@ static inline bool hjp_composition_set_text(HjpEvent *event, const char *text) {
         sizeof(event->text.text), &event->text.owned_text, text);
 }
 
-static inline const char *hjp_composition_text(const HjpEvent *event) {
+static inline bool hjp_input_set_text(HjpEvent *event, const char *text) {
+    return event->type == HJP_EVENT_TEXTINPUT && hjp_event_store_text(event->text.text,
+        sizeof(event->text.text), &event->text.owned_text, text);
+}
+
+static inline const char *hjp_input_text(const HjpEvent *event) {
     return event->text.owned_text ? event->text.owned_text : event->text.text;
+}
+
+static inline const char *hjp_composition_text(const HjpEvent *event) {
+    return hjp_input_text(event);
 }
 
 static inline const char *hjp_document_text(const HjpEvent *event) {
@@ -45,7 +54,7 @@ static inline void hjp_document_dispose(HjpEvent *event) {
     if (hjp_document_event(event)) {
         free(event->edit.owned_text);
         event->edit.owned_text = NULL;
-    } else if (event->type == HJP_EVENT_TEXTEDITING) {
+    } else if (event->type == HJP_EVENT_TEXTEDITING || event->type == HJP_EVENT_TEXTINPUT) {
         free(event->text.owned_text);
         event->text.owned_text = NULL;
     }
