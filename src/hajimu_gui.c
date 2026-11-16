@@ -3539,7 +3539,7 @@ static void gui_textarea_navigate(GuiTextBuf *tb, uint32_t id, bool hovered,
  * ---------------------------------------------------------------*/
 static Value fn_textarea(int argc, Value *argv) {
     if (!g_cur || argc < 2 || argv[0].type != VALUE_STRING)
-        return (argc >= 2) ? argv[1] : hajimu_string("");
+        return (argc >= 2) ? gui_owned_control_value(argv[1]) : hajimu_string("");
 
     Hjpcontext *vg = g_cur->vg;
     const char *label = argv[0].string.data;
@@ -3578,11 +3578,13 @@ static Value fn_textarea(int argc, Value *argv) {
     if (focused || g_cur->text_drag == id) gui_textarea_navigate(tb, id, hov, x + GUI_INPUT_PAD, y + GUI_INPUT_PAD,
                                       fw - GUI_INPUT_PAD * 2, fh - GUI_INPUT_PAD * 2);
     /* Enter → 改行挿入 */
-    if (focused && !g_disabled && !g_cur->composition[0] && g_cur->in.key_return) {
-        gui_text_replace_selection(tb, "\n", 1);
-        g_cur->in.key_return = false;
-    } else if (focused) {
+    if (focused) {
         gui_text_buf_process(tb);
+        if (!g_disabled && !g_cur->closing && !g_cur->composition[0] &&
+            (!g_cur->modal_title[0] || g_cur->modal_entered) && g_cur->in.key_return) {
+            gui_text_replace_selection(tb, "\n", 1);
+            g_cur->in.key_return = false;
+        }
     }
     gui_publish_text_context(tb, id, false);
 
@@ -15380,42 +15382,37 @@ static Value fn_text_fold(int argc, Value *argv) {
 /* 入力フォーマッタ(入力, パターン) → 無
    パターン: "通貨", "電話", "数字のみ" 等 */
 static Value fn_input_formatter(int argc, Value *argv) {
-    (void)argc;
+    if (!g_cur || argc < 2 || argv[0].type != VALUE_STRING || argv[1].type != VALUE_STRING)
+        return hajimu_null();
     const char *input_id = argv[0].string.data;
     const char *pattern  = argv[1].string.data;
     uint32_t id = gui_hash(input_id);
     GuiTextBuf *tb = gui_get_text_buf(id, "");
     if (!tb) return hajimu_null();
 
-    /* 数字のみフィルタ */
-    if (strstr(pattern, "\xe6\x95\xb0\xe5\xad\x97") /* 数字 */ ||
-        strstr(pattern, "number")) {
-        int wi = 0;
-        for (int i = 0; tb->buf[i]; i++)
-            if (tb->buf[i] >= '0' && tb->buf[i] <= '9')
-                tb->buf[wi++] = tb->buf[i];
-        tb->buf[wi] = '\0';
+    bool currency = strstr(pattern, "通貨") || strstr(pattern, "currency");
+    bool number = strstr(pattern, "数字") || strstr(pattern, "number");
+    if (!currency && !number) return hajimu_null();
+    /* 未確定文書や非対話領域は書き換えない。容量不足も本文ごと保持する。 */
+    if (g_cur->closing || g_disabled || g_cur->composition[0] ||
+        (g_cur->modal_title[0] && !g_cur->modal_entered)) return hajimu_null();
+    char digits[GUI_MAX_TEXT_BUF], formatted[GUI_MAX_TEXT_BUF];
+    int count = 0;
+    for (int i = 0; i < tb->len; i++)
+        if (tb->buf[i] >= '0' && tb->buf[i] <= '9') digits[count++] = tb->buf[i];
+    int required = count + (currency && count ? (count - 1) / 3 : 0);
+    if (required >= GUI_MAX_TEXT_BUF) return hajimu_null();
+    int written = 0;
+    for (int i = 0; i < count; i++) {
+        if (currency && i && (count - i) % 3 == 0) formatted[written++] = ',';
+        formatted[written++] = digits[i];
     }
-    /* 通貨: 3桁カンマ */
-    if (strstr(pattern, "\xe9\x80\x9a\xe8\xb2\xa8") /* 通貨 */ ||
-        strstr(pattern, "currency")) {
-        /* まず数字のみ抽出 */
-        char digits[GUI_MAX_TEXT_BUF];
-        int di = 0;
-        for (int i = 0; tb->buf[i]; i++)
-            if (tb->buf[i] >= '0' && tb->buf[i] <= '9')
-                digits[di++] = tb->buf[i];
-        digits[di] = '\0';
-        /* 3桁ごとにカンマ */
-        char formatted[GUI_MAX_TEXT_BUF];
-        int fi = 0, len = di;
-        for (int i = 0; i < len; i++) {
-            if (i > 0 && (len - i) % 3 == 0)
-                formatted[fi++] = ',';
-            formatted[fi++] = digits[i];
-        }
-        formatted[fi] = '\0';
-        snprintf(tb->buf, GUI_MAX_TEXT_BUF, "%s", formatted);
+    formatted[written] = '\0';
+    if (strcmp(tb->buf, formatted)) {
+        memcpy(tb->buf, formatted, written + 1);
+        tb->len = written;
+        gui_text_collapse(tb, tb->cursor);
+        tb->scroll_y = 0;
     }
     return hajimu_null();
 }
@@ -25826,7 +25823,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.31.0",
+        .version        = "14.32.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,

@@ -145,8 +145,59 @@ static void check_textarea_layout(void) {
     fn_textarea(3, args);
     assert(!strcmp(tb->buf, args[1].string.data));
     gui_ime_update(g_cur, "");
+    frame(false, false, 500);
+    tb->cursor = tb->sel_start = tb->sel_end = tb->len;
+    g_cur->in.key_return = true;
+    memcpy(g_cur->in.text_input, "確定", 7);
+    g_cur->in.text_input_len = 6;
+    Value result = fn_textarea(3, args);
+    assert(result.type == VALUE_STRING && strstr(result.string.data, "六確定\n"));
+    assert(strstr(tb->buf, "六確定\n") && !g_cur->in.key_return);
+    frame(false, false, 500);
+    gui_ime_update(g_cur, "未確定");
+    int saved_len = tb->len;
+    g_cur->in.key_return = true;
+    fn_textarea(3, args);
+    assert(tb->len == saved_len && g_cur->in.key_return);
+    gui_ime_update(g_cur, "");
     g_cur->focused = 0;
     hjpCancelFrame(vg);
+}
+
+static void check_text_formatting(void) {
+    frame(false, false, 500);
+    Value args[] = {hajimu_string("format-safety"), hajimu_string("通貨")};
+    GuiTextBuf *tb = gui_get_text_buf(gui_hash(args[0].string.data), "1234567");
+    fn_input_formatter(2, args);
+    assert(!strcmp(tb->buf, "1,234,567") && tb->len == 9 && tb->cursor <= tb->len);
+    fn_input_formatter(2, args);
+    assert(!strcmp(tb->buf, "1,234,567") && tb->len == 9);
+    memset(tb->buf, '9', GUI_MAX_TEXT_BUF - 1);
+    tb->buf[GUI_MAX_TEXT_BUF - 1] = '\0';
+    tb->len = tb->cursor = GUI_MAX_TEXT_BUF - 1;
+    tb->sel_start = 1; tb->sel_end = tb->len;
+    fn_input_formatter(2, args);
+    assert(tb->len == GUI_MAX_TEXT_BUF - 1 && tb->cursor == tb->len && tb->sel_start == 1);
+    for (int i = 0; i < tb->len; i++) assert(tb->buf[i] == '9');
+    strcpy(tb->buf, "日本123円"); tb->len = tb->cursor = (int)strlen(tb->buf);
+    tb->sel_start = 0; tb->sel_end = tb->len;
+    args[1] = hajimu_string("数字のみ");
+    gui_ime_update(g_cur, "変換中");
+    fn_input_formatter(2, args);
+    assert(!strcmp(tb->buf, "日本123円"));
+    gui_ime_update(g_cur, "");
+    g_disabled = true; fn_input_formatter(2, args); g_disabled = false;
+    assert(!strcmp(tb->buf, "日本123円"));
+    fn_input_formatter(2, args);
+    assert(!strcmp(tb->buf, "123") && tb->len == 3 && tb->cursor == 3);
+    assert(tb->sel_start == 3 && tb->sel_end == 3);
+    g_cur->focused = tb->id;
+    g_cur->in = (GuiInput){.key_backspace = true};
+    gui_text_buf_process(tb);
+    assert(!strcmp(tb->buf, "12") && tb->len == 2);
+    fn_input_formatter(0, NULL);
+    g_cur->focused = 0;
+    hjpCancelFrame(g_cur->vg);
 }
 
 static void check_text_selection(void) {
@@ -1144,6 +1195,7 @@ int main(void) {
     hjp_window_set_size(g_cur->window, 640, 400);
     check_ime_notifications();
     check_textarea_layout();
+    check_text_formatting();
     check_text_selection();
     check_grapheme_editing();
     check_text_navigation();
