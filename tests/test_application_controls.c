@@ -1437,6 +1437,169 @@ static void check_raw_input_loop(bool ime) {
     free(text);
 }
 
+static void check_navigation_current_frame(void) {
+    g_cur->nav_enabled = true;
+    g_cur->nav_focus = g_cur->focused = 0;
+    Value field[] = {hajimu_string("tab-edit"), hajimu_string("前")};
+    Value toggle[] = {hajimu_string("tab-toggle"), hajimu_bool(false)};
+    frame(false, false, 500); g_cur->in.key_tab = true; gui_nav_begin();
+    fn_text_input(2, field); fn_checkbox(2, toggle); gui_nav_end();
+    assert(g_cur->nav_focus == gui_hash("tab-edit") && g_cur->focused == gui_hash("tab-edit"));
+    frame(false, false, 500);
+    g_cur->in.key_tab = true; g_cur->in.last_key = HJPK_TAB;
+    memcpy(g_cur->in.text_input, "確定", 7); g_cur->in.text_input_len = 6;
+    gui_nav_begin();
+    Value result = fn_text_input(2, field);
+    assert(!strcmp(result.string.data, "前確定"));
+    fn_checkbox(2, toggle); gui_nav_end();
+    assert(g_cur->nav_focus == gui_hash("tab-toggle") && !g_cur->focused);
+    frame(false, false, 500); gui_nav_begin();
+    result = fn_text_input(2, field);
+    assert(!strcmp(result.string.data, "前確定"));
+    g_cur->in.last_key = ' ';
+    assert(fn_checkbox(2, toggle).boolean);
+    gui_nav_end();
+
+    /* 前フレームに存在しても、今フレームの無効/非表示欄へは移らない。 */
+    frame(false, false, 500); gui_nav_begin();
+    g_cur->nav_focus = 201;
+    gui_nav_control(201, 0, 0, 100, 30); gui_nav_control(202, 0, 40, 100, 30);
+    gui_nav_control(203, 0, 80, 100, 30); gui_nav_end();
+    frame(false, false, 500); g_cur->in.key_tab = true; gui_nav_begin();
+    gui_nav_control(201, 0, 0, 100, 30);
+    g_disabled = true; gui_nav_control(202, 0, 40, 100, 30); g_disabled = false;
+    gui_nav_control(203, 0, 80, 100, 30); gui_nav_end(); assert(g_cur->nav_focus == 203);
+    frame(false, false, 500); g_cur->in.key_tab = true; gui_nav_begin();
+    gui_nav_control(201, 0, 0, 100, 30); gui_nav_end(); assert(g_cur->nav_focus == 201);
+    frame(false, false, 500); g_cur->in.key_tab = g_cur->in.mod_shift = true; gui_nav_begin();
+    gui_nav_control(201, 0, 0, 100, 30); gui_nav_control(203, 0, 80, 100, 30);
+    gui_nav_end(); assert(g_cur->nav_focus == 203);
+    frame(false, false, 500); gui_ime_update(g_cur, "変換中");
+    g_cur->in.key_tab = true; gui_nav_begin();
+    gui_nav_control(201, 0, 0, 100, 30); gui_nav_control(203, 0, 80, 100, 30);
+    gui_nav_end(); assert(g_cur->nav_focus == 203); gui_ime_update(g_cur, "");
+    frame(false, false, 500); g_cur->in.key_tab = true; gui_nav_begin();
+    g_disabled = true; gui_nav_control(201, 0, 0, 100, 30); g_disabled = false;
+    gui_nav_end(); assert(!g_cur->nav_focus);
+    frame(false, false, 500); gui_nav_begin();
+    g_cur->nav_focus = gui_hash("tab-edit"); fn_text_input(2, field); gui_nav_end();
+    assert(g_cur->focused == gui_hash("tab-edit"));
+    frame(true, false, 500); gui_nav_begin(); fn_text_input(2, field); gui_nav_end();
+    assert(!g_cur->focused && !g_cur->nav_focus);
+    frame(false, false, 500); gui_nav_begin(); fn_text_input(2, field); gui_nav_end();
+    assert(!g_cur->focused); /* 空白クリックの次フレームも勝手に復帰しない。 */
+    frame(true, false, 50); g_cur->in.my = 5; gui_nav_begin();
+    GuiScrollRegion saved = g_scrolls[0];
+    g_scrolls[0] = (GuiScrollRegion){.active = true, .x = 0, .y = 0, .w = 10, .h = 10};
+    assert(!gui_nav_register(204, 0, 0, 100, 30));
+    g_scrolls[0] = saved; gui_nav_end(); assert(!g_cur->nav_focus);
+    g_cur->nav_enabled = false;
+}
+
+static bool navigation_modal_controls(Value *dialog, uint32_t first, uint32_t second) {
+    assert(fn_dialog_begin(2, dialog).boolean);
+    float x = g_cur->lay.x + 12, y = g_cur->lay.y;
+    bool activated = gui_nav_control(first, x, y, 100, 30);
+    activated |= gui_nav_control(second, x, y + 40, 100, 30);
+    assert(fn_dialog_end(0, NULL).boolean);
+    return activated;
+}
+
+static void check_navigation_modals(void) {
+    Value none = hajimu_string(""), parent = modal_list("nav-parent", NULL);
+    Value both = modal_list("nav-parent", "nav-child");
+    Value parent_dialog[] = {hajimu_string("nav-parent"), hajimu_bool(true)};
+    Value child_dialog[] = {hajimu_string("nav-child"), hajimu_bool(true)};
+    g_cur->nav_enabled = true; g_cur->nav_focus = 201; g_cur->focused = 0;
+    frame(false, false, 500); gui_nav_begin();
+    fn_modal_reserve(1, &parent);
+    assert(!navigation_modal_controls(parent_dialog, 301, 302));
+    gui_nav_end(); assert(g_cur->nav_focus == 301);
+    frame(false, false, 500); g_cur->in.key_tab = g_cur->in.mod_shift = true;
+    gui_nav_begin(); fn_modal_reserve(1, &parent);
+    assert(!navigation_modal_controls(parent_dialog, 301, 302));
+    gui_nav_end(); assert(g_cur->nav_focus == 302);
+    frame(false, false, 500); gui_nav_begin(); fn_modal_reserve(1, &both);
+    assert(!navigation_modal_controls(parent_dialog, 301, 302));
+    assert(g_cur->nav_current_count == 0);
+    assert(!navigation_modal_controls(child_dialog, 401, 402));
+    gui_nav_end(); assert(g_cur->nav_focus == 401);
+    frame(false, false, 500); g_cur->in.key_tab = true;
+    gui_nav_begin(); fn_modal_reserve(1, &both);
+    assert(!navigation_modal_controls(parent_dialog, 301, 302));
+    assert(!navigation_modal_controls(child_dialog, 401, 402));
+    gui_nav_end(); assert(g_cur->nav_focus == 402);
+    frame(false, false, 500); g_cur->in.key_return = true;
+    gui_nav_begin(); fn_modal_reserve(1, &both);
+    assert(!gui_nav_control(201, 0, 0, 100, 30));
+    assert(!navigation_modal_controls(parent_dialog, 301, 302));
+    assert(navigation_modal_controls(child_dialog, 401, 402)); gui_nav_end();
+    frame(false, false, 500); gui_nav_begin(); fn_modal_reserve(1, &parent);
+    assert(!navigation_modal_controls(parent_dialog, 301, 302));
+    gui_nav_end(); assert(g_cur->nav_focus == 302);
+    frame(false, false, 500); gui_nav_begin(); fn_modal_reserve(1, &none);
+    assert(!gui_nav_control(201, 0, 0, 100, 30)); gui_nav_end();
+    assert(g_cur->nav_focus == 201);
+    g_cur->nav_enabled = false; g_cur->nav_focus = 0;
+}
+
+static void check_keyboard_choices(void) {
+    Value choices = hajimu_array();
+    hajimu_array_push(&choices, hajimu_string("左"));
+    hajimu_array_push(&choices, hajimu_string("中央"));
+    hajimu_array_push(&choices, hajimu_string("右"));
+    Value combo[] = {hajimu_string("keyboard-choice"), choices, choices.array.elements[0]};
+    g_cur->nav_enabled = true; g_cur->focused = 0; g_cur->nav_focus = gui_hash("keyboard-choice");
+    frame(false, false, 500); g_cur->in.key_down = true; gui_nav_begin();
+    Value value = fn_combobox(3, combo);
+    assert(!strcmp(value.string.data, "中央") && !g_cur->in.key_down); gui_nav_end();
+    frame(false, false, 500); g_cur->in.key_return = true; gui_nav_begin();
+    value = fn_combobox(3, combo);
+    assert(g_cur->combo_open && !strcmp(value.string.data, "左")); gui_nav_end();
+    frame(false, false, 500); g_cur->in.key_end = true; gui_nav_begin();
+    value = fn_combobox(3, combo);
+    assert(g_cur->combo_cursor == 2 && !strcmp(value.string.data, "左")); gui_nav_end();
+    frame(false, false, 500); g_cur->in.key_return = true; gui_nav_begin();
+    value = fn_combobox(3, combo);
+    assert(!g_cur->combo_open && !strcmp(value.string.data, "右")); gui_nav_end();
+    frame(false, false, 500); g_cur->in.key_return = true; gui_nav_begin();
+    fn_combobox(3, combo); gui_nav_end(); assert(g_cur->combo_open);
+    frame(false, false, 500); g_cur->in.last_key = HJPK_ESCAPE; gui_nav_begin();
+    assert(!g_cur->combo_open && g_cur->in.last_key == 0);
+    value = fn_combobox(3, combo); gui_nav_end(); assert(!strcmp(value.string.data, "左"));
+    frame(false, false, 500); g_cur->in.key_down = true; gui_nav_begin(); g_disabled = true;
+    value = fn_combobox(3, combo); g_disabled = false; gui_nav_end();
+    assert(!strcmp(value.string.data, "左"));
+
+    Value items = hajimu_array();
+    for (int i = 0; i < 100; i++) hajimu_array_push(&items, hajimu_number(i));
+    Value list[] = {hajimu_string("keyboard-list"), items, hajimu_number(0)};
+    g_cur->nav_focus = gui_hash("keyboard-list");
+    frame(false, false, 500); g_cur->in.key_end = true; gui_nav_begin();
+    value = fn_list(3, list); gui_nav_end();
+    assert(value.number == 99 && *gui_list_scroll(gui_hash("keyboard-list")) > 0 && !g_cur->in.key_end);
+    list[2] = hajimu_number(99);
+    frame(false, false, 500); g_cur->in.key_up = true; gui_nav_begin();
+    value = fn_list(3, list); gui_nav_end(); assert(value.number == 98);
+    frame(false, false, 500); g_cur->in.key_home = true; gui_nav_begin();
+    value = fn_list(3, list); gui_nav_end();
+    assert(value.number == 0 && *gui_list_scroll(gui_hash("keyboard-list")) == 0);
+    frame(false, false, 500); gui_nav_begin(); gui_ime_update(g_cur, "変換");
+    g_cur->in.key_down = true; value = fn_list(3, list); gui_nav_end(); assert(value.number == 99);
+    gui_ime_update(g_cur, "");
+    Value modal = modal_list("keyboard-list-background", NULL), none = hajimu_string("");
+    frame(false, false, 500); gui_nav_begin(); fn_modal_reserve(1, &modal);
+    g_cur->in.mx = 20; g_cur->in.my = 50; g_cur->in.clicked = true; g_cur->in.scroll_y = -3;
+    g_cur->in.key_home = true; value = fn_list(3, list);
+    assert(value.number == 99 && *gui_list_scroll(gui_hash("keyboard-list")) == 0);
+    fn_modal_reserve(1, &none); gui_nav_end();
+    frame(false, false, 500); gui_nav_begin();
+    g_cur->in.mx = 20; g_cur->in.my = 50; g_cur->in.scroll_y = -3;
+    fn_list(3, list); gui_nav_end();
+    assert(*gui_list_scroll(gui_hash("keyboard-list")) > 0 && g_cur->in.scroll_y == 0);
+    g_cur->nav_enabled = false; g_cur->nav_focus = g_cur->focused = 0;
+}
+
 int main(void) {
     /* 仮想macOSのソフトウェアGLは2.1止まりの場合がある。実装失敗と区別する。 */
     if (getenv("CONTROL_ALLOW_UNSUPPORTED_GL")) {
@@ -1502,6 +1665,9 @@ int main(void) {
     memcpy(oversized + GUI_MAX_TEXT_BUF - 2, "日本", 7);
     GuiTextBuf *limited = gui_get_text_buf(gui_hash("utf8-initial-limit"), oversized);
     assert(limited->len == (int)strlen(oversized) && !strcmp(limited->buf, oversized));
+    check_navigation_current_frame();
+    check_navigation_modals();
+    check_keyboard_choices();
     assert(fn_focus_traversal(0, NULL).boolean);
     frame(false, false, 500);
     gui_nav_begin();
@@ -1511,7 +1677,12 @@ int main(void) {
     frame(false, false, 500);
     g_cur->in.key_tab = true;
     gui_nav_begin();
+    assert(g_cur->nav_focus == 0);
+    gui_nav_control(101, 0, 0, 100, 30);
+    gui_nav_control(102, 0, 40, 100, 30);
+    gui_nav_end();
     assert(g_cur->nav_focus == 101);
+    frame(false, false, 500); gui_nav_begin();
     g_cur->in.key_return = true;
     assert(gui_nav_control(101, 0, 0, 100, 30));
     assert(!gui_nav_control(101, 0, 0, 100, 30));
@@ -1521,7 +1692,11 @@ int main(void) {
     g_cur->in.key_tab = true;
     g_cur->in.mod_shift = true;
     gui_nav_begin();
+    gui_nav_control(101, 0, 0, 100, 30);
+    gui_nav_control(102, 0, 40, 100, 30);
+    gui_nav_end();
     assert(g_cur->nav_focus == 102);
+    frame(false, false, 500); gui_nav_begin();
     g_cur->in.last_key = ' ';
     assert(gui_nav_control(102, 0, 40, 100, 30));
     g_disabled = true;
@@ -1545,14 +1720,19 @@ int main(void) {
     g_cur->in.key_tab = true;
     gui_nav_begin();
     fn_text_input(2, text);
-    assert(g_cur->focused == gui_hash("field"));
     fn_checkbox(2, check);
     gui_nav_end();
+    assert(g_cur->nav_focus == gui_hash("field"));
+    frame(false, false, 500); gui_nav_begin();
+    fn_text_input(2, text); fn_checkbox(2, check); gui_nav_end();
+    assert(g_cur->focused == gui_hash("field"));
     frame(false, false, 500);
     g_cur->in.key_tab = true;
     gui_nav_begin();
     fn_text_input(2, text);
+    fn_checkbox(2, check); gui_nav_end();
     assert(g_cur->focused == 0);
+    frame(false, false, 500); gui_nav_begin(); fn_text_input(2, text);
     g_cur->in.last_key = ' ';
     assert(fn_checkbox(2, check).boolean);
     gui_nav_end();
@@ -1561,8 +1741,11 @@ int main(void) {
     g_cur->in.mod_shift = true;
     gui_nav_begin();
     fn_text_input(2, text);
-    assert(g_cur->focused == gui_hash("field"));
+    fn_checkbox(2, check);
     gui_nav_end();
+    assert(g_cur->nav_focus == gui_hash("field"));
+    frame(false, false, 500); gui_nav_begin(); fn_text_input(2, text); gui_nav_end();
+    assert(g_cur->focused == gui_hash("field"));
     frame(false, false, 500);
     gui_nav_begin();
     gui_nav_end();
@@ -1609,7 +1792,6 @@ int main(void) {
     assert(!gui_nav_control(703, 0, 0, 100, 30));
     gui_nav_end();
     frame(false, false, 30);
-    g_cur->in.key_tab = true;
     gui_nav_begin();
     assert(g_cur->nav_focus == 703);
     g_cur->in.key_return = true;

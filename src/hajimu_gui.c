@@ -339,9 +339,13 @@ typedef struct {
     uint32_t hot;               /* ホバー中ウィジェット ID          */
     uint32_t active;            /* 操作中ウィジェット ID            */
     uint32_t combo_open;        /* 選択肢の開閉はウィンドウごとに保持 */
+    int combo_cursor;
     bool combo_seen;
     uint32_t nav_focus;
     bool nav_enabled;
+    int nav_direction;
+    bool nav_autofocus;
+    bool nav_mouse_pending, nav_mouse_claimed;
     char modal_title[256];
     bool modal_entered, modal_input_saved;
     bool modal_input_delivered;
@@ -366,8 +370,8 @@ typedef struct {
     bool text_context_published;
     uint32_t text_context_id;
     uint64_t composition_version, composition_notified;
-    uint32_t nav_previous[512], nav_current[512];
-    int nav_previous_count, nav_current_count;
+    struct { uint32_t id; bool text; float x, y, h; } nav_current[512];
+    int nav_current_count;
     /* 上限付きの一覧状態。別ウィンドウや剰余の一致で状態を共有しない。 */
     struct {
         uint32_t id;
@@ -1209,19 +1213,48 @@ static inline void gui_pos(float *x, float *y, float *w) {
     }
 }
 
-/* 前フレームの描画順を使う。入力欄編集中のキーはここで奪わない。 */
-static void gui_nav_move(int direction) {
-    if (!g_cur || g_cur->nav_previous_count == 0) return;
-    int index = -1;
-    for (int i = 0; i < g_cur->nav_previous_count; i++)
-        if (g_cur->nav_previous[i] == g_cur->nav_focus) index = i;
-    if (index < 0) index = direction < 0 ? 0 : -1;
-    index = (index + (direction < 0 ? -1 : 1) + g_cur->nav_previous_count) % g_cur->nav_previous_count;
-    g_cur->nav_focus = g_cur->nav_previous[index];
-    if (g_cur->focused) {
-        g_cur->focused = 0;
+/* 次のイベント取得より前にOS側も切り替え、欄を移った直後の入力を失わない。 */
+static void gui_nav_focus_entry(int index) {
+    uint32_t id = g_cur->nav_current[index].id;
+    if (g_cur->focused != id) {
         hjp_stop_text_input();
+        g_cur->text_context_id = 0;
+        g_cur->text_context_published = false;
     }
+    g_cur->nav_focus = id;
+    g_cur->focused = 0;
+    g_cur->modal_focus_pending = false;
+    if (!g_cur->nav_current[index].text) return;
+    for (int i = 0; i < g_cur->text_buf_count; i++) {
+        GuiTextBuf *tb = &g_cur->text_bufs[i];
+        if (tb->id != id) continue;
+        g_cur->focused = id;
+        hjp_start_text_input();
+#ifdef __APPLE__
+        bool collapsed = tb->sel_start == tb->sel_end;
+        hjp_set_text_input_context(g_cur->window, tb->ax_secure ? 0 : id, tb->ax_secure ? "" : tb->buf,
+            tb->ax_secure ? 0 : (collapsed ? tb->cursor : tb->sel_start),
+            tb->ax_secure ? 0 : (collapsed ? tb->cursor : tb->sel_end), GUI_TEXT_LIMIT);
+        g_cur->text_context_id = id;
+        g_cur->text_context_published = true;
+#endif
+#if defined(__APPLE__) || defined(_WIN32)
+        hjp_set_text_input_rect(g_cur->window, g_cur->nav_current[index].x + GUI_INPUT_PAD,
+            g_cur->nav_current[index].y, 1, g_cur->nav_current[index].h);
+#endif
+        break;
+    }
+}
+
+/* 入力欄の編集後に、今フレームの有効な部品だけで移動する。 */
+static void gui_nav_move(int direction) {
+    if (!g_cur || g_cur->nav_current_count == 0) return;
+    int index = -1;
+    for (int i = 0; i < g_cur->nav_current_count; i++)
+        if (g_cur->nav_current[i].id == g_cur->nav_focus) index = i;
+    if (index < 0) index = direction < 0 ? 0 : -1;
+    index = (index + (direction < 0 ? -1 : 1) + g_cur->nav_current_count) % g_cur->nav_current_count;
+    gui_nav_focus_entry(index);
 }
 
 static void gui_nav_begin(void) {
@@ -1236,10 +1269,18 @@ static void gui_nav_begin(void) {
     g_cur->modal_focus_validate = g_cur->modal_focus_pending;
     for (int i = 0; i < g_cur->modal_count; i++) g_cur->modals[i].drawn = false;
     g_cur->nav_current_count = 0;
-    if (g_cur->nav_enabled && !g_cur->composition[0] && g_cur->in.key_tab &&
+    g_cur->nav_direction = 0;
+    g_cur->nav_mouse_pending = g_cur->in.clicked;
+    g_cur->nav_mouse_claimed = false;
+    if (g_cur->combo_open && !g_cur->composition[0] && g_cur->in.last_key == HJPK_ESCAPE) {
+        g_cur->combo_open = 0;
+        g_cur->in.last_key = 0;
+    }
+    if (g_cur->nav_enabled && !g_cur->in.clicked && !g_cur->composition[0] && g_cur->in.key_tab &&
         (!g_cur->focused || g_cur->focused == g_cur->nav_focus)) {
-        gui_nav_move(g_cur->in.mod_shift ? -1 : 1);
+        g_cur->nav_direction = g_cur->in.mod_shift ? -1 : 1;
         g_cur->in.key_tab = false;
+        if (g_cur->in.last_key == HJPK_TAB) g_cur->in.last_key = 0;
     }
 }
 
@@ -1250,9 +1291,24 @@ static void gui_nav_end(void) {
 #ifdef __APPLE__
     hjp_accessibility_end(g_cur->window);
 #endif
+    if (g_cur->nav_enabled && g_cur->nav_mouse_pending && !g_cur->nav_mouse_claimed) {
+        g_cur->nav_focus = g_cur->focused = 0;
+        g_cur->combo_open = 0;
+        hjp_stop_text_input();
+    }
+    if (g_cur->nav_enabled && !g_cur->closing && !g_cur->composition[0]) {
+        if (g_cur->nav_direction) {
+            gui_nav_move(g_cur->nav_direction);
+            g_cur->combo_open = 0;
+        }
+        else if (g_cur->nav_autofocus && !g_cur->nav_focus && g_cur->nav_current_count)
+            gui_nav_focus_entry(0);
+    }
+    g_cur->nav_direction = 0;
+    g_cur->nav_autofocus = false;
     bool found = false;
     for (int i = 0; i < g_cur->nav_current_count; i++)
-        if (g_cur->nav_current[i] == g_cur->nav_focus) found = true;
+        if (g_cur->nav_current[i].id == g_cur->nav_focus) found = true;
     if (!found && !(g_cur->modal_focus_pending && !g_cur->modal_focus_validate)) {
         if (g_cur->focused && g_cur->focused == g_cur->nav_focus) {
             g_cur->focused = 0;
@@ -1260,9 +1316,6 @@ static void gui_nav_end(void) {
         }
         g_cur->nav_focus = 0;
     }
-    g_cur->nav_previous_count = g_cur->nav_current_count;
-    memcpy(g_cur->nav_previous, g_cur->nav_current,
-           (size_t)g_cur->nav_current_count * sizeof(uint32_t));
     if (g_cur->modal_focus_pending && g_cur->modal_focus_validate) {
         g_cur->focused = 0;
         g_cur->modal_focus_pending = false;
@@ -1277,10 +1330,16 @@ static bool gui_nav_register(uint32_t id, float x, float y, float w, float h) {
         (g_cur->modal_title[0] && !g_cur->modal_entered)) return false;
     bool registered = false;
     for (int i = 0; i < g_cur->nav_current_count; i++)
-        if (g_cur->nav_current[i] == id) registered = true;
-    if (!registered && g_cur->nav_current_count < 512)
-        g_cur->nav_current[g_cur->nav_current_count++] = id;
-    if (g_cur->in.clicked && gui_hit(g_cur->in.mx, g_cur->in.my, x, y, w, h)) {
+        if (g_cur->nav_current[i].id == id) registered = true;
+    if (!registered && g_cur->nav_current_count < 512) {
+        int index = g_cur->nav_current_count++;
+        memset(&g_cur->nav_current[index], 0, sizeof(g_cur->nav_current[index]));
+        g_cur->nav_current[index].id = id;
+        g_cur->nav_current[index].x = x; g_cur->nav_current[index].y = y; g_cur->nav_current[index].h = h;
+    }
+    if (g_cur->in.clicked && gui_hit(g_cur->in.mx, g_cur->in.my, vx, vy, vw, vh)) {
+        g_cur->nav_mouse_claimed = true;
+        if (g_cur->combo_open && g_cur->combo_open != id) g_cur->combo_open = 0;
         if (g_cur->focused && g_cur->focused != id) {
             g_cur->focused = 0;
             hjp_stop_text_input();
@@ -1299,6 +1358,8 @@ static void gui_nav_text(uint32_t id, float x, float y, float w, float h) {
         g_cur->focused = id;
         hjp_start_text_input();
     }
+    for (int i = 0; i < g_cur->nav_current_count; i++)
+        if (g_cur->nav_current[i].id == id) g_cur->nav_current[i].text = true;
     if (g_disabled && g_cur->focused == id) {
         g_cur->focused = 0;
         hjp_stop_text_input();
@@ -1313,12 +1374,29 @@ static bool gui_nav_control(uint32_t id, float x, float y, float w, float h) {
     Hjpcontext *vg = g_cur->vg;
     hjpBeginPath(vg); hjpRoundedRect(vg, x + 2, y + 2, fmaxf(0, w - 4), fmaxf(0, h - 4), 3);
     hjpStrokeColor(vg, TH_ACCENT); hjpStrokeWidth(vg, 2); hjpStroke(vg);
-    if (!g_cur->focused && !g_cur->composition[0] && (g_cur->in.key_return || g_cur->in.last_key == ' ')) {
+    if (!g_cur->focused && !g_cur->nav_direction && !g_cur->composition[0] &&
+        (g_cur->in.key_return || g_cur->in.last_key == ' ')) {
         g_cur->in.key_return = false;
         g_cur->in.last_key = 0;
         return true;
     }
     return false;
+}
+
+/* 選択部品の移動キーは一か所で消費し、入力欄や別の部品へ渡さない。 */
+static int gui_nav_index(int current, int count) {
+    GuiInput *in = &g_cur->in;
+    if (count <= 0 || g_cur->focused || g_cur->nav_direction || g_cur->composition[0]) return current;
+    if (!in->key_up && !in->key_down && !in->key_home && !in->key_end) return current;
+    if (current >= count) current = -1;
+    int next = current;
+    if (in->key_home) next = 0;
+    else if (in->key_end) next = count - 1;
+    else if (in->key_down) next = current < 0 ? 0 : (current < count - 1 ? current + 1 : count - 1);
+    else next = current < 0 ? count - 1 : (current > 0 ? current - 1 : 0);
+    in->key_up = in->key_down = in->key_home = in->key_end = false;
+    in->last_key = 0;
+    return next;
 }
 
 /* --- ウィジェットのホバー・アクティブ判定 --- */
@@ -3853,6 +3931,13 @@ static Value fn_combobox(int argc, Value *argv) {
     const char *label = argv[0].string.data;
     Value choices = argv[1];
     Value current = argv[2];
+    Value result = current;
+    int n = choices.array.length, selected = -1;
+    for (int i = 0; i < n; i++) {
+        Value item = choices.array.elements[i];
+        if ((item.type == VALUE_STRING && current.type == VALUE_STRING && !strcmp(item.string.data, current.string.data)) ||
+            (item.type == VALUE_NUMBER && current.type == VALUE_NUMBER && item.number == current.number)) { selected = i; break; }
+    }
     uint32_t id = gui_hash(label);
 
     GuiFieldGeometry field;
@@ -3880,12 +3965,22 @@ static Value fn_combobox(int argc, Value *argv) {
 
     /* ヘッダー部分のクリック判定 */
     if (interactive && (activate || (g_cur->in.clicked && hov))) {
+        if (activate && is_open && g_cur->combo_cursor >= 0 && g_cur->combo_cursor < n)
+            result = choices.array.elements[g_cur->combo_cursor];
         g_cur->combo_open = is_open ? 0 : id;
         is_open = !is_open;
+        if (is_open) g_cur->combo_cursor = selected < 0 ? 0 : selected;
         g_cur->combo_seen = is_open;
         g_cur->focused = 0;
         hjp_stop_text_input();
         g_cur->in.clicked = false;
+    }
+    if (interactive && g_cur->nav_enabled && g_cur->nav_focus == id) {
+        if (is_open) g_cur->combo_cursor = gui_nav_index(g_cur->combo_cursor, n);
+        else {
+            int next = gui_nav_index(selected, n);
+            if (next != selected && next >= 0 && next < n) result = choices.array.elements[next];
+        }
     }
 
     /* ヘッダー描画 */
@@ -3893,7 +3988,7 @@ static Value fn_combobox(int argc, Value *argv) {
     hjpRoundedRect(vg, fx, y, fw, GUI_INPUT_H, 4.0f);
     hjpFillColor(vg, hov ? TH_WIDGET_HOVER : TH_WIDGET_BG);
     hjpFill(vg);
-    hjpStrokeColor(vg, is_open ? TH_ACCENT : TH_BORDER);
+    hjpStrokeColor(vg, is_open || (interactive && g_cur->nav_enabled && g_cur->nav_focus == id) ? TH_ACCENT : TH_BORDER);
     hjpStrokeWidth(vg, 1.0f);
     hjpStroke(vg);
 
@@ -3907,12 +4002,10 @@ static Value fn_combobox(int argc, Value *argv) {
     hjpTextAlign(vg, HJP_ALIGN_RIGHT | HJP_ALIGN_MIDDLE);
     gui_single_line(vg, "▼", fx + fmaxf(0, fw - 24), y, fminf(fw, 24), GUI_INPUT_H, true);
 
-    Value result = current;
     float dropdown_h = 0;
 
     /* ドロップダウン表示 */
     if (is_open && choices.array.length > 0) {
-        int n = choices.array.length;
         dropdown_h = GUI_COMBO_ITEM_H * n + 4.0f;
         float dy = y + GUI_INPUT_H + 2.0f;
 
@@ -3929,7 +4022,8 @@ static Value fn_combobox(int argc, Value *argv) {
             float iy = dy + 2.0f + GUI_COMBO_ITEM_H * i;
             bool ih = gui_text_hover(fx + 2, iy, fw - 4, GUI_COMBO_ITEM_H);
 
-            if (ih) {
+            bool keyboard_selected = g_cur->nav_enabled && g_cur->nav_focus == id && i == g_cur->combo_cursor;
+            if (ih || keyboard_selected) {
                 hjpBeginPath(vg);
                 hjpRoundedRect(vg, fx + 2, iy, fw - 4, GUI_COMBO_ITEM_H, 2.0f);
                 hjpFillColor(vg, TH_ACCENT);
@@ -3945,7 +4039,7 @@ static Value fn_combobox(int argc, Value *argv) {
                 item_text = ib;
             }
 
-            hjpFillColor(vg, ih ? TH_CHECK : TH_TEXT);
+            hjpFillColor(vg, ih || keyboard_selected ? TH_CHECK : TH_TEXT);
             hjpTextAlign(vg, HJP_ALIGN_LEFT | HJP_ALIGN_MIDDLE);
             gui_single_line(vg, item_text, fx + GUI_INPUT_PAD, iy + (GUI_COMBO_ITEM_H - GUI_FONT_SIZE * 1.4f) * 0.5f,
                             fmaxf(0, fw - GUI_INPUT_PAD * 2), GUI_FONT_SIZE * 1.4f, false);
@@ -4193,9 +4287,11 @@ static Value fn_list(int argc, Value *argv) {
     Hjpcontext *vg = g_cur->vg;
     const char *label = argv[0].string.data;
     Value items = argv[1];
-    int selected = (argc >= 3 && argv[2].type == VALUE_NUMBER)
+    int selected = (argc >= 3 && argv[2].type == VALUE_NUMBER && isfinite(argv[2].number) &&
+                    argv[2].number >= -1 && argv[2].number <= INT_MAX)
                    ? (int)argv[2].number : -1;
     int n = items.array.length;
+    uint32_t id = gui_hash(label);
     int visible = n < 10 ? n : 10;
     if (visible < 1) visible = 1;
     float item_h = GUI_LIST_ITEM_H;
@@ -4210,6 +4306,9 @@ static Value fn_list(int argc, Value *argv) {
     hjpTextAlign(vg, HJP_ALIGN_LEFT | HJP_ALIGN_TOP);
     hjpText(vg, x, y, label, NULL);
     y += GUI_FONT_SIZE * 1.4f + 4.0f;
+    bool nav_focused = gui_nav_register(id, x, y, avail_w, list_h);
+    int old_selected = selected;
+    if (nav_focused) selected = gui_nav_index(selected, n);
 
     hjpBeginPath(vg);
     hjpRoundedRect(vg, x, y, avail_w, list_h, 4.0f);
@@ -4219,15 +4318,21 @@ static Value fn_list(int argc, Value *argv) {
     hjpStrokeWidth(vg, 1.0f);
     hjpStroke(vg);
 
-    float *saved_scroll = gui_list_scroll(gui_hash(label));
-    bool list_hov = gui_hit((float)g_cur->in.mx, (float)g_cur->in.my,
-                             x, y, avail_w, list_h);
-    if (!g_disabled && list_hov && g_cur->in.scroll_y != 0) {
+    float *saved_scroll = gui_list_scroll(id);
+    bool list_hov = gui_text_hover(x, y, avail_w, list_h);
+    float old_scroll = *saved_scroll;
+    if (list_hov && g_cur->in.scroll_y != 0) {
         *saved_scroll -= g_cur->in.scroll_y * item_h;
+    }
+    if (selected != old_selected && selected >= 0 && selected < n) {
+        float top = selected * item_h;
+        if (top < *saved_scroll) *saved_scroll = top;
+        if (top + item_h > *saved_scroll + list_h) *saved_scroll = top + item_h - list_h;
     }
     /* 検索や削除で項目数が減ったフレームにもスクロール範囲を補正する。 */
     float max_s = fmaxf(0, (n - visible) * item_h);
     *saved_scroll = fmaxf(0, fminf(*saved_scroll, max_s));
+    if (list_hov && old_scroll != *saved_scroll) g_cur->in.scroll_y = 0;
     float scroll = *saved_scroll;
 
     hjpSave(vg);
@@ -4253,7 +4358,7 @@ static Value fn_list(int argc, Value *argv) {
             hjpFillColor(vg, TH_WIDGET_HOVER);
             hjpFill(vg);
         }
-        if (hov && g_cur->in.clicked) selected = i;
+        if (hov && g_cur->in.clicked) { selected = i; g_cur->in.clicked = false; }
         char nb[32];
         const char *text = gui_value_to_str(items.array.elements[i], nb, sizeof(nb));
         hjpFontFaceId(vg, g_cur->font_id);
@@ -4263,6 +4368,7 @@ static Value fn_list(int argc, Value *argv) {
                         avail_w - 20, GUI_FONT_SIZE * 1.4f, false);
     }
     hjpRestore(vg);
+    (void)gui_nav_control(id, x, y, avail_w, list_h);
 
     g_cur->last = (GuiLastWidget){x, y, avail_w, list_h, list_hov};
     gui_advance(list_h + GUI_FONT_SIZE * 1.4f + 4.0f);
@@ -5011,7 +5117,10 @@ static Value fn_modal_reserve(int argc, Value *argv) {
         }
         g_cur->modal_focus_pending = g_cur->focused != 0;
         g_cur->modal_focus_validate = false;
-        g_cur->nav_previous_count = g_cur->nav_current_count = 0;
+        g_cur->nav_current_count = 0;
+        g_cur->nav_direction = 0;
+        g_cur->nav_autofocus = count > 0 && !g_cur->nav_focus;
+        g_cur->nav_mouse_pending = g_cur->nav_mouse_claimed = false;
         g_cur->active = g_cur->text_drag = g_cur->pending_accessibility_press = g_cur->combo_open = 0;
         for (int i = 0; i < g_cur->text_buf_count; i++) g_cur->text_bufs[i].ax_visible = false;
 #ifdef __APPLE__
@@ -7009,6 +7118,7 @@ static Value fn_selectable(int argc, Value *argv) {
     hjpTextAlign(vg, HJP_ALIGN_LEFT | HJP_ALIGN_MIDDLE);
     hjpText(vg, x + 8.0f, y + h * 0.5f, label, NULL);
 
+    if (gui_nav_control(id, x, y, w, h)) selected = !selected;
     gui_advance(h);
     return hajimu_bool(selected);
 }
@@ -25972,7 +26082,7 @@ static Value fn_api_status(int argc, Value *argv) {
         } else if (found->fn == fn_a11y_name || found->fn == fn_a11y_desc || found->fn == fn_a11y_role || found->fn == fn_sr_announce) {
             state = "部分対応"; reason = "macOSの基本部品と通常入力欄の編集/選択/フォーカス。外部AX・実読み上げ・テーブル/ツリー・他OSは未完了";
         } else if (found->fn == fn_focus_traversal) {
-            state = "部分対応"; reason = "明示有効化する基本部品のフォーカス移動。全ウィジェットへの適用は未完了";
+            state = "部分対応"; reason = "現在の有効部品によるTab移動、モーダル復帰、一覧/コンボのキー選択。全特殊部品/OS実操作は未完了";
         }
     }
     dict_set(&result, "名前", hajimu_string(argv[0].string.data));
@@ -26001,7 +26111,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.39.0",
+        .version        = "14.40.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,
