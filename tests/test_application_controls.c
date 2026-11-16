@@ -1437,6 +1437,46 @@ static void check_raw_input_loop(bool ime) {
     free(text);
 }
 
+static Value navigation_loop_app;
+static int navigation_loop_frames;
+static Value navigation_loop_callback(Value *callback, int argc, Value *argv) {
+    (void)callback; (void)argv; assert(argc == 0);
+    Value first[] = {hajimu_string("loop-first"), hajimu_string("")};
+    Value second[] = {hajimu_string("loop-second"), hajimu_string("")};
+    Value a = fn_text_input(2, first), b = fn_text_input(2, second);
+    int step = navigation_loop_frames++;
+    assert(!strcmp(a.string.data, step == 3 ? "前再" : "前"));
+    assert(!strcmp(b.string.data, step == 0 ? "" : "後"));
+    assert(g_cur->focused == gui_hash(step == 1 || step == 2 ? "loop-second" : "loop-first"));
+    if (step == 3) fn_app_quit(1, &navigation_loop_app);
+    else {
+        HjpEvent event = source_event(g_cur, step == 1 ? HJP_EVENT_KEYDOWN : HJP_EVENT_TEXTINPUT);
+        if (step == 1) { event.key.sym = HJPK_TAB; event.key.mod = HJP_KMOD_SHIFT; }
+        else assert(hjp_input_set_text(&event, step == 0 ? "後" : "再"));
+        hjp_test_native_event(&event);
+    }
+    return hajimu_null();
+}
+
+static void check_navigation_loop(void) {
+    GuiApp *original = g_cur;
+    HajimuRuntime *runtime = __hajimu_runtime;
+    HajimuRuntime test_runtime = {.call = navigation_loop_callback};
+    Value create[] = {hajimu_string("navigation loop"), hajimu_number(640), hajimu_number(400)};
+    navigation_loop_app = fn_app_create(3, create);
+    assert(navigation_loop_app.type == VALUE_NUMBER);
+    g_cur = &g_apps[(int)navigation_loop_app.number]; g_id_scope_depth = 0;
+    g_cur->nav_enabled = true; g_cur->focused = g_cur->nav_focus = gui_hash("loop-first");
+    assert(gui_get_text_buf(g_cur->focused, ""));
+    HjpEvent event = source_event(g_cur, HJP_EVENT_TEXTINPUT);
+    assert(hjp_input_set_text(&event, "前")); hjp_test_native_event(&event);
+    event = source_event(g_cur, HJP_EVENT_KEYDOWN); event.key.sym = HJPK_TAB; hjp_test_native_event(&event);
+    navigation_loop_frames = 0; __hajimu_runtime = &test_runtime; g_cur = NULL;
+    Value draw[] = {navigation_loop_app, {.type = VALUE_FUNCTION}}; fn_draw_loop(2, draw);
+    assert(navigation_loop_frames == 4); fn_app_quit(1, &navigation_loop_app);
+    __hajimu_runtime = runtime; g_cur = original; hjp_gl_make_current(original->window, original->gl);
+}
+
 static void check_navigation_current_frame(void) {
     g_cur->nav_enabled = true;
     g_cur->nav_focus = g_cur->focused = 0;
@@ -1654,6 +1694,7 @@ int main(void) {
     check_window_close_input();
     check_raw_input_loop(false);
     check_raw_input_loop(true);
+    check_navigation_loop();
     check_modal_stack();
     check_modal_forms();
     check_responsive_fields();
