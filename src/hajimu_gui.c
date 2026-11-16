@@ -340,6 +340,21 @@ typedef struct {
     uint32_t active;            /* 操作中ウィジェット ID            */
     uint32_t combo_open;        /* 選択肢の開閉はウィンドウごとに保持 */
     int combo_cursor;
+    int combo_first;
+    uint64_t combo_signature;
+    bool combo_drag;
+    float combo_grab;
+    GuiInput combo_input;
+    bool combo_input_saved;
+    struct {
+        uint32_t id;
+        uint64_t epoch;
+        bool ready;
+        float x, y, w, h, item_h, font_size;
+        float header_x, header_y, header_w, header_h;
+        int count, total, first, cursor, hovered;
+        char labels[8][1024];
+    } combo_popup;
     bool combo_seen;
     uint32_t nav_focus;
     bool nav_enabled;
@@ -1009,6 +1024,7 @@ static GuiDialogScope g_dialog_scopes[GUI_MAX_APPS][GUI_MAX_MODALS];
 static int g_dialog_depth[GUI_MAX_APPS];
 static GuiScrollRegion g_dialog_scrolls[GUI_MAX_APPS][GUI_MAX_MODALS][GUI_MAX_SCROLL];
 static bool gui_dialog_scope_end(void);
+static void gui_combo_draw(void);
 
 static void gui_modal_mask_input(GuiInput *input) {
     *input = (GuiInput){0}; input->mx = input->my = -100000;
@@ -1276,6 +1292,20 @@ static void gui_nav_begin(void) {
         g_cur->combo_open = 0;
         g_cur->in.last_key = 0;
     }
+    g_cur->combo_input_saved = false;
+    if (!g_cur->combo_open) g_cur->combo_drag = false;
+    if (g_cur->combo_open && g_cur->combo_popup.ready && g_cur->combo_popup.id == g_cur->combo_open &&
+        !g_cur->in.key_tab) {
+        bool inside = gui_hit(g_cur->in.mx, g_cur->in.my, g_cur->combo_popup.x, g_cur->combo_popup.y,
+                             g_cur->combo_popup.w, g_cur->combo_popup.h) ||
+            gui_hit(g_cur->in.mx, g_cur->in.my, g_cur->combo_popup.header_x, g_cur->combo_popup.header_y,
+                    g_cur->combo_popup.header_w, g_cur->combo_popup.header_h);
+        if (g_cur->in.clicked && !inside) g_cur->combo_open = 0;
+        else { g_cur->combo_input = g_cur->in; g_cur->combo_input_saved = true; }
+        gui_modal_mask_input(&g_cur->in);
+        g_cur->nav_mouse_pending = false;
+    }
+    g_cur->combo_popup.ready = false;
     if (g_cur->nav_enabled && !g_cur->in.clicked && !g_cur->composition[0] && g_cur->in.key_tab &&
         (!g_cur->focused || g_cur->focused == g_cur->nav_focus)) {
         g_cur->nav_direction = g_cur->in.mod_shift ? -1 : 1;
@@ -1836,6 +1866,7 @@ static Value fn_draw_loop(int argc, Value *argv) {
 #ifndef _WIN32
         for (size_t ti = 0; ti < 32; ti++) if (hjp_tasks[ti].owner == app) hjp_task_poll(&hjp_tasks[ti]);
 #endif
+        GuiInput frame_input = app->in;
         gui_nav_begin();
         g_frame_count++;
         app->text_context_published = false;
@@ -1859,7 +1890,7 @@ static Value fn_draw_loop(int argc, Value *argv) {
             app->text_context_id = 0;
         }
 #endif
-        if (!app->in.down) app->text_drag = 0;
+        if (!frame_input.down) app->text_drag = 0;
         gui_nav_end();
 
         /* コールバック内の終了要求ではリソースを即時解放しない。
@@ -1896,6 +1927,7 @@ static Value fn_draw_loop(int argc, Value *argv) {
             break;
         }
 
+        gui_combo_draw();
         /* ── ツールチップ描画 ── */
         if (app->tooltip_show && app->tooltip[0]) {
             Hjpcontext *vg = app->vg;
@@ -1967,7 +1999,11 @@ static Value fn_draw_loop(int argc, Value *argv) {
         hjp_gl_swap_window(app->window);
 
         /* アクティブ解除 */
-        if (app->in.released) app->active = 0;
+        if (frame_input.released) app->active = 0;
+        /* 背景への配送を消費しても、次フレームの座標と保持状態は失わない。 */
+        app->in.mx = frame_input.mx; app->in.my = frame_input.my;
+        app->in.down = frame_input.down; app->in.mouse_middle = frame_input.mouse_middle;
+        app->in.mod_ctrl = frame_input.mod_ctrl; app->in.mod_shift = frame_input.mod_shift;
 
         /* フレームレート制御 */
         if (app->target_fps > 0) {
@@ -3917,14 +3953,84 @@ static Value fn_textarea(int argc, Value *argv) {
     return hajimu_string(tb->buf);
 }
 
-/* ---------------------------------------------------------------
- * コンボボックス(ラベル, 選択肢, 選択値) → 値
- *   選択肢は配列。クリックでドロップダウン表示。
- * ---------------------------------------------------------------*/
+static const char *gui_combo_text(Value value, char number[32]) {
+    if (value.type == VALUE_STRING) return value.string.data;
+    if (value.type == VALUE_NUMBER) { snprintf(number, 32, "%.15g", value.number); return number; }
+    return "";
+}
+
+/* ASCIIだけ大小文字を区別しない。日本語はUTF-8の部分一致で扱う。 */
+static bool gui_combo_match(const char *text, const char *query) {
+    if (!*query) return true;
+    for (; *text; text++) {
+        const unsigned char *a = (const unsigned char *)text, *b = (const unsigned char *)query;
+        while (*a && *b) {
+            unsigned char x = *a, y = *b;
+            if (x >= 'A' && x <= 'Z') x += 'a' - 'A';
+            if (y >= 'A' && y <= 'Z') y += 'a' - 'A';
+            if (x != y) break;
+            a++; b++;
+        }
+        if (!*b) return true;
+    }
+    return false;
+}
+
+/* 候補の値を保持せず、最前面描画に必要な短い表示だけを複製する。 */
+static void gui_combo_preview(char output[1024], const char *text) {
+    size_t n = strnlen(text, 1024);
+    if (n == 1024) {
+        n = 1020;
+        while (n && ((unsigned char)text[n] & 0xc0) == 0x80) n--;
+        memcpy(output, text, n); memcpy(output + n, "...", 4);
+    } else memcpy(output, text, n + 1);
+}
+
+static void gui_combo_draw(void) {
+    GuiApp *app = g_cur;
+    if (!app || app->closing || !app->combo_popup.ready || app->combo_open != app->combo_popup.id) return;
+    uint64_t epoch = app->modal_count ? app->modals[app->modal_count - 1].epoch : 0;
+    if (epoch != app->combo_popup.epoch) return;
+    Hjpcontext *vg = app->vg;
+    hjpSave(vg); hjpResetTransform(vg); hjpResetScissor(vg); hjpGlobalAlpha(vg, 1);
+    float x = app->combo_popup.x, y = app->combo_popup.y, w = app->combo_popup.w, h = app->combo_popup.h;
+    hjpBeginPath(vg); hjpRoundedRect(vg, x, y, w, h, 4);
+    hjpFillColor(vg, TH_WIDGET_BG); hjpFill(vg);
+    hjpStrokeColor(vg, TH_BORDER); hjpStrokeWidth(vg, 1); hjpStroke(vg);
+    hjpIntersectScissor(vg, x + 1, y + 1, fmaxf(0, w - 2), fmaxf(0, h - 2));
+    hjpFontFaceId(vg, app->font_id); hjpFontSize(vg, app->combo_popup.font_size);
+    for (int i = 0; i < app->combo_popup.count; i++) {
+        float row_y = y + 2 + i * app->combo_popup.item_h;
+        int ordinal = app->combo_popup.first + i;
+        bool highlight = app->combo_popup.total &&
+            (ordinal == app->combo_popup.cursor || ordinal == app->combo_popup.hovered);
+        if (highlight) {
+            hjpBeginPath(vg); hjpRect(vg, x + 2, row_y, w - 4, app->combo_popup.item_h);
+            hjpFillColor(vg, TH_ACCENT); hjpFill(vg);
+        }
+        hjpFillColor(vg, highlight ? TH_CHECK : TH_TEXT);
+        hjpTextAlign(vg, HJP_ALIGN_LEFT | HJP_ALIGN_MIDDLE);
+        gui_single_line(vg, app->combo_popup.labels[i], x + GUI_INPUT_PAD,
+            row_y + (app->combo_popup.item_h - app->combo_popup.font_size * 1.4f) * 0.5f,
+            fmaxf(0, w - GUI_INPUT_PAD * 2 - 6), app->combo_popup.font_size * 1.4f, false);
+    }
+    if (app->combo_popup.total > app->combo_popup.count) {
+        float track = h - 4;
+        float thumb = fmaxf(8, track * app->combo_popup.count / app->combo_popup.total);
+        thumb = fminf(thumb, track);
+        float top = y + 2 + (track - thumb) * app->combo_popup.first /
+            (app->combo_popup.total - app->combo_popup.count);
+        hjpBeginPath(vg); hjpRoundedRect(vg, x + w - 6, top, 4, thumb, 2);
+        hjpFillColor(vg, TH_TEXT_DIM); hjpFill(vg);
+    }
+    hjpRestore(vg);
+}
+
+/* コンボボックス(ラベル, 選択肢, 選択値[, 検索語])。検索欄は既存入力と合成する。 */
 static Value fn_combobox(int argc, Value *argv) {
     if (!g_cur || argc < 3 ||
         argv[0].type != VALUE_STRING ||
-        argv[1].type != VALUE_ARRAY)
+        argv[1].type != VALUE_ARRAY || (argc >= 4 && argv[3].type != VALUE_STRING))
         return (argc >= 3) ? gui_owned_control_value(argv[2]) : hajimu_null();
 
     Hjpcontext *vg = g_cur->vg;
@@ -3932,11 +4038,17 @@ static Value fn_combobox(int argc, Value *argv) {
     Value choices = argv[1];
     Value current = argv[2];
     Value result = current;
-    int n = choices.array.length, selected = -1;
+    int n = choices.array.length, selected = -1, matches = 0;
+    const char *query = argc >= 4 ? argv[3].string.data : "";
+    uint64_t signature = gui_hash_raw(query);
     for (int i = 0; i < n; i++) {
         Value item = choices.array.elements[i];
+        char number[32]; const char *text = gui_combo_text(item, number);
+        signature = (signature ^ gui_hash_raw(text) ^ (uint64_t)item.type) * UINT64_C(1099511628211);
+        if (!gui_combo_match(text, query)) continue;
         if ((item.type == VALUE_STRING && current.type == VALUE_STRING && !strcmp(item.string.data, current.string.data)) ||
-            (item.type == VALUE_NUMBER && current.type == VALUE_NUMBER && item.number == current.number)) { selected = i; break; }
+            (item.type == VALUE_NUMBER && current.type == VALUE_NUMBER && item.number == current.number)) selected = matches;
+        matches++;
     }
     uint32_t id = gui_hash(label);
 
@@ -3960,28 +4072,45 @@ static Value fn_combobox(int argc, Value *argv) {
         (!g_cur->modal_title[0] || g_cur->modal_entered) &&
         gui_visible_rect(&visible_x, &visible_y, &visible_w, &visible_h);
     if (!interactive && is_open) { g_cur->combo_open = 0; is_open = false; }
+    bool isolated = is_open && g_cur->combo_input_saved;
+    if (isolated) {
+        g_cur->in = g_cur->combo_input;
+        g_cur->combo_input_saved = false;
+        hov = gui_text_hover(fx, y, fw, GUI_INPUT_H);
+    }
     if (is_open) g_cur->combo_seen = true;
     bool activate = gui_nav_control(id, fx, y, fw, GUI_INPUT_H);
+    int choose = -1;
+    bool opening = false;
+    if (is_open && g_cur->combo_signature != signature) {
+        g_cur->combo_cursor = selected < 0 ? 0 : selected; g_cur->combo_first = 0;
+    }
+    int previous_cursor = g_cur->combo_cursor;
 
     /* ヘッダー部分のクリック判定 */
     if (interactive && (activate || (g_cur->in.clicked && hov))) {
-        if (activate && is_open && g_cur->combo_cursor >= 0 && g_cur->combo_cursor < n)
-            result = choices.array.elements[g_cur->combo_cursor];
+        if (activate && is_open) choose = g_cur->combo_cursor;
         g_cur->combo_open = is_open ? 0 : id;
         is_open = !is_open;
-        if (is_open) g_cur->combo_cursor = selected < 0 ? 0 : selected;
+        if (is_open) {
+            g_cur->combo_cursor = selected < 0 ? 0 : selected;
+            g_cur->combo_first = 0; opening = true;
+            g_cur->combo_drag = false;
+            g_cur->active = g_cur->text_drag = 0;
+        }
         g_cur->combo_seen = is_open;
         g_cur->focused = 0;
         hjp_stop_text_input();
         g_cur->in.clicked = false;
     }
     if (interactive && g_cur->nav_enabled && g_cur->nav_focus == id) {
-        if (is_open) g_cur->combo_cursor = gui_nav_index(g_cur->combo_cursor, n);
+        if (is_open) g_cur->combo_cursor = gui_nav_index(g_cur->combo_cursor, matches);
         else {
-            int next = gui_nav_index(selected, n);
-            if (next != selected && next >= 0 && next < n) result = choices.array.elements[next];
+            int next = gui_nav_index(selected, matches);
+            if (next != selected) choose = next;
         }
     }
+    if (g_cur->combo_open == id) g_cur->combo_signature = signature;
 
     /* ヘッダー描画 */
     hjpBeginPath(vg);
@@ -4002,58 +4131,82 @@ static Value fn_combobox(int argc, Value *argv) {
     hjpTextAlign(vg, HJP_ALIGN_RIGHT | HJP_ALIGN_MIDDLE);
     gui_single_line(vg, "▼", fx + fmaxf(0, fw - 24), y, fminf(fw, 24), GUI_INPUT_H, true);
 
-    float dropdown_h = 0;
-
-    /* ドロップダウン表示 */
-    if (is_open && choices.array.length > 0) {
-        dropdown_h = GUI_COMBO_ITEM_H * n + 4.0f;
-        float dy = y + GUI_INPUT_H + 2.0f;
-
-        /* 背景 */
-        hjpBeginPath(vg);
-        hjpRoundedRect(vg, fx, dy, fw, dropdown_h, 4.0f);
-        hjpFillColor(vg, TH_WIDGET_BG);
-        hjpFill(vg);
-        hjpStrokeColor(vg, TH_BORDER);
-        hjpStrokeWidth(vg, 1.0f);
-        hjpStroke(vg);
-
-        for (int i = 0; i < n; i++) {
-            float iy = dy + 2.0f + GUI_COMBO_ITEM_H * i;
-            bool ih = gui_text_hover(fx + 2, iy, fw - 4, GUI_COMBO_ITEM_H);
-
-            bool keyboard_selected = g_cur->nav_enabled && g_cur->nav_focus == id && i == g_cur->combo_cursor;
-            if (ih || keyboard_selected) {
-                hjpBeginPath(vg);
-                hjpRoundedRect(vg, fx + 2, iy, fw - 4, GUI_COMBO_ITEM_H, 2.0f);
-                hjpFillColor(vg, TH_ACCENT);
-                hjpFill(vg);
+    if (is_open) {
+        float item_h = fmaxf(GUI_COMBO_ITEM_H, GUI_FONT_SIZE * 1.4f + 8);
+        float below = fmaxf(0, g_cur->win_h - (y + GUI_INPUT_H + 2) - 4);
+        float above = fmaxf(0, y - 6);
+        float desired = fminf(matches > 0 ? matches : 1, 8) * item_h + 4;
+        bool down = below >= desired || below >= above;
+        float room = down ? below : above;
+        int rows = (int)fminf(8, fmaxf(0, floorf((room - 4) / item_h)));
+        if (!rows || g_cur->win_w <= 8) { g_cur->combo_open = 0; is_open = false; }
+        else {
+            int count = matches > 0 && matches < rows ? matches : rows;
+            if (!matches) count = 1;
+            float ph = count * item_h + 4, pw = fminf(fw, g_cur->win_w - 8);
+            float px = fmaxf(4, fminf(fx, g_cur->win_w - pw - 4));
+            float py = down ? y + GUI_INPUT_H + 2 : y - ph - 2;
+            bool popup_hover = gui_hit(g_cur->in.mx, g_cur->in.my, px, py, pw, ph);
+            if (opening || previous_cursor != g_cur->combo_cursor) {
+                if (g_cur->combo_cursor < g_cur->combo_first) g_cur->combo_first = g_cur->combo_cursor;
+                if (g_cur->combo_cursor >= g_cur->combo_first + count) g_cur->combo_first = g_cur->combo_cursor - count + 1;
             }
-
-            const char *item_text = "";
-            Value item = choices.array.elements[i];
-            if (item.type == VALUE_STRING) item_text = item.string.data;
-            else if (item.type == VALUE_NUMBER) {
-                static char ib[32];
-                snprintf(ib, sizeof(ib), "%.15g", item.number);
-                item_text = ib;
+            if (popup_hover && g_cur->in.scroll_y) {
+                int steps = (int)fmin(32, fmax(1, fabs((double)g_cur->in.scroll_y)));
+                g_cur->combo_first += g_cur->in.scroll_y > 0 ? -steps * 3 : steps * 3;
+                g_cur->in.scroll_y = 0;
             }
-
-            hjpFillColor(vg, ih || keyboard_selected ? TH_CHECK : TH_TEXT);
-            hjpTextAlign(vg, HJP_ALIGN_LEFT | HJP_ALIGN_MIDDLE);
-            gui_single_line(vg, item_text, fx + GUI_INPUT_PAD, iy + (GUI_COMBO_ITEM_H - GUI_FONT_SIZE * 1.4f) * 0.5f,
-                            fmaxf(0, fw - GUI_INPUT_PAD * 2), GUI_FONT_SIZE * 1.4f, false);
-
-            if (ih && g_cur->in.clicked) {
-                result = item;
-                g_cur->combo_open = 0;
-                g_cur->in.clicked = false;
+            int max_first = matches > count ? matches - count : 0;
+            if (g_cur->combo_first < 0) g_cur->combo_first = 0;
+            if (g_cur->combo_first > max_first) g_cur->combo_first = max_first;
+            if (max_first > 0) {
+                float track = ph - 4, thumb = fminf(track, fmaxf(8, track * count / matches));
+                float top = py + 2 + (track - thumb) * g_cur->combo_first / max_first;
+                if (g_cur->in.clicked && gui_hit(g_cur->in.mx, g_cur->in.my, px + pw - 10, py + 2, 10, track)) {
+                    g_cur->combo_drag = true;
+                    g_cur->combo_grab = g_cur->in.my >= top && g_cur->in.my < top + thumb ? g_cur->in.my - top : thumb * 0.5f;
+                    g_cur->in.clicked = false;
+                }
+                if (g_cur->combo_drag && g_cur->in.down && track > thumb) {
+                    double ratio = (g_cur->in.my - py - 2 - g_cur->combo_grab) / (track - thumb);
+                    g_cur->combo_first = (int)(fmax(0, fmin(1, ratio)) * max_first);
+                }
             }
+            if (g_cur->in.released || !g_cur->in.down) g_cur->combo_drag = false;
+            int hovered = -1;
+            if (!g_cur->combo_drag && popup_hover && (max_first == 0 || g_cur->in.mx < px + pw - 10) &&
+                g_cur->in.my >= py + 2 && g_cur->in.my < py + ph - 2)
+                hovered = g_cur->combo_first + (int)((g_cur->in.my - py - 2) / item_h);
+            if (matches && hovered >= 0 && hovered < matches && g_cur->in.clicked) {
+                choose = hovered; g_cur->combo_open = 0;
+                g_cur->nav_mouse_claimed = true;
+            }
+            g_cur->combo_popup.id = id; g_cur->combo_popup.ready = g_cur->combo_open == id;
+            g_cur->combo_popup.epoch = g_cur->modal_count ? g_cur->modals[g_cur->modal_count - 1].epoch : 0;
+            g_cur->combo_popup.x = px; g_cur->combo_popup.y = py; g_cur->combo_popup.w = pw; g_cur->combo_popup.h = ph;
+            g_cur->combo_popup.item_h = item_h; g_cur->combo_popup.font_size = GUI_FONT_SIZE;
+            g_cur->combo_popup.header_x = visible_x; g_cur->combo_popup.header_y = visible_y;
+            g_cur->combo_popup.header_w = visible_w; g_cur->combo_popup.header_h = visible_h;
+            g_cur->combo_popup.first = g_cur->combo_first; g_cur->combo_popup.count = count;
+            g_cur->combo_popup.total = matches; g_cur->combo_popup.cursor = g_cur->combo_cursor;
+            g_cur->combo_popup.hovered = hovered;
+            if (!matches) gui_combo_preview(g_cur->combo_popup.labels[0], "一致する候補がありません");
         }
     }
+    int ordinal = 0;
+    for (int i = 0; i < n; i++) {
+        char number[32]; const char *text = gui_combo_text(choices.array.elements[i], number);
+        if (!gui_combo_match(text, query)) continue;
+        if (ordinal == choose) result = choices.array.elements[i];
+        if (is_open && g_cur->combo_popup.ready && ordinal >= g_cur->combo_first &&
+            ordinal < g_cur->combo_first + g_cur->combo_popup.count)
+            gui_combo_preview(g_cur->combo_popup.labels[ordinal - g_cur->combo_first], text);
+        ordinal++;
+    }
+    if (isolated || is_open) gui_modal_mask_input(&g_cur->in);
 
     g_cur->last = (GuiLastWidget){fx, y, fw, GUI_INPUT_H, hov};
-    gui_advance(row_h + dropdown_h);
+    gui_advance(row_h);
     return gui_owned_control_value(result);
 }
 
@@ -5122,6 +5275,7 @@ static Value fn_modal_reserve(int argc, Value *argv) {
         g_cur->nav_autofocus = count > 0 && !g_cur->nav_focus;
         g_cur->nav_mouse_pending = g_cur->nav_mouse_claimed = false;
         g_cur->active = g_cur->text_drag = g_cur->pending_accessibility_press = g_cur->combo_open = 0;
+        g_cur->combo_input_saved = g_cur->combo_popup.ready = false;
         for (int i = 0; i < g_cur->text_buf_count; i++) g_cur->text_bufs[i].ax_visible = false;
 #ifdef __APPLE__
         hjp_accessibility_begin(g_cur->window);
@@ -24730,7 +24884,7 @@ static HajimuPluginFunc gui_functions[] = {
     {"パスワード入力",       fn_password_input,2, 2},
     {"数値入力",             fn_number_input,  2, 5},
     {"テキストエリア",       fn_textarea,      2, 3},
-    {"コンボボックス",       fn_combobox,      3, 3},
+    {"コンボボックス",       fn_combobox,      3, 4},
     /* --- Phase 4: レイアウト --- */
     {"パネル開始",           fn_panel_begin,   0, 2},
     {"パネル終了",           fn_panel_end,     0, 0},
@@ -26083,6 +26237,8 @@ static Value fn_api_status(int argc, Value *argv) {
             state = "部分対応"; reason = "macOSの基本部品と通常入力欄の編集/選択/フォーカス。外部AX・実読み上げ・テーブル/ツリー・他OSは未完了";
         } else if (found->fn == fn_focus_traversal) {
             state = "部分対応"; reason = "現在の有効部品によるTab移動、モーダル復帰、一覧/コンボのキー選択。全特殊部品/OS実操作は未完了";
+        } else if (found->fn == fn_combobox) {
+            state = "部分対応"; reason = "最大8行の前面候補、上下配置、スクロールと検索語による絞込。全OS実操作/支援技術は未完了";
         }
     }
     dict_set(&result, "名前", hajimu_string(argv[0].string.data));
@@ -26111,7 +26267,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.40.0",
+        .version        = "14.41.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,

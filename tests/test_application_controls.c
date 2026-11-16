@@ -1640,6 +1640,133 @@ static void check_keyboard_choices(void) {
     g_cur->nav_enabled = false; g_cur->nav_focus = g_cur->focused = 0;
 }
 
+static Value popup_loop_app, popup_loop_choices;
+static int popup_loop_frames;
+static Value popup_loop_callback(Value *callback, int argc, Value *argv) {
+    (void)callback; (void)argv; assert(argc == 0);
+    int step = popup_loop_frames++;
+    if (step == 1 || step == 2) assert(g_cur->combo_input_saved && g_cur->combo_input.down);
+    if (step == 4) assert(!g_cur->combo_open && !g_cur->in.clicked);
+    Value combo[] = {hajimu_string("popup-loop"), popup_loop_choices, hajimu_number(0)};
+    fn_combobox(3, combo);
+    if (step == 2 || step == 3) assert(g_cur->combo_first > 0);
+    if (step == 3) assert(!g_cur->combo_drag);
+    if (step == 4) { fn_app_quit(1, &popup_loop_app); return hajimu_null(); }
+    int x = (int)(g_cur->combo_popup.x + g_cur->combo_popup.w - 3);
+    int y = (int)(g_cur->combo_popup.y + (step == 0 ? 3 : g_cur->combo_popup.h - 3));
+    HjpEvent event = source_event(g_cur, step == 1 ? HJP_EVENT_MOUSEMOTION :
+        step == 2 ? HJP_EVENT_MOUSEBUTTONUP : HJP_EVENT_MOUSEBUTTONDOWN);
+    if (step == 1) { event.motion.x = x; event.motion.y = y; }
+    else { event.button.button = HJP_BUTTON_LEFT; event.button.x = step == 3 ? 0 : x; event.button.y = step == 3 ? 0 : y; }
+    hjp_test_native_event(&event);
+    if (step == 2) {
+        /* 後続の描画よりも候補が前面に残ることを保存画像で検査できる。 */
+        hjpBeginPath(g_cur->vg);
+        hjpRect(g_cur->vg, g_cur->combo_popup.x, g_cur->combo_popup.y, g_cur->combo_popup.w, g_cur->combo_popup.h);
+        hjpFillColor(g_cur->vg, hjpRGB(255, 0, 0)); hjpFill(g_cur->vg);
+        const char *capture = getenv("GUI_COMBO_CAPTURE");
+        if (capture) {
+            snprintf(g_cur->screenshot_path, sizeof(g_cur->screenshot_path), "%s", capture);
+            g_cur->screenshot_pending = true;
+        }
+    }
+    return hajimu_null();
+}
+
+static void check_popup_loop(void) {
+    GuiApp *original = g_cur;
+    HajimuRuntime *runtime = __hajimu_runtime;
+    HajimuRuntime test_runtime = {.call = popup_loop_callback};
+    popup_loop_choices = hajimu_array();
+    for (int i = 0; i < 100; i++) hajimu_array_push(&popup_loop_choices, hajimu_number(i));
+    Value create[] = {hajimu_string("popup loop"), hajimu_number(640), hajimu_number(400)};
+    popup_loop_app = fn_app_create(3, create); assert(popup_loop_app.type == VALUE_NUMBER);
+    g_cur = &g_apps[(int)popup_loop_app.number]; g_id_scope_depth = 0;
+    g_cur->nav_enabled = true; g_cur->nav_focus = gui_hash("popup-loop");
+    HjpEvent event = source_event(g_cur, HJP_EVENT_KEYDOWN); event.key.sym = HJPK_RETURN; hjp_test_native_event(&event);
+    popup_loop_frames = 0; __hajimu_runtime = &test_runtime; g_cur = NULL;
+    Value draw[] = {popup_loop_app, {.type = VALUE_FUNCTION}}; fn_draw_loop(2, draw);
+    assert(popup_loop_frames == 5); fn_app_quit(1, &popup_loop_app);
+    __hajimu_runtime = runtime; g_cur = original; hjp_gl_make_current(original->window, original->gl);
+}
+
+static void check_combo_popup(void) {
+    Value choices = hajimu_array();
+    for (int i = 0; i < 100; i++) hajimu_array_push(&choices, hajimu_number(i));
+    Value combo[] = {hajimu_string("bounded-choice"), choices, hajimu_number(0), hajimu_string("")};
+    uint32_t id = gui_hash("bounded-choice");
+    float original_font = g_custom_font_size;
+    g_cur->nav_enabled = true; g_cur->focused = 0;
+    const float fonts[] = {16, 28, 48};
+    for (int i = 0; i < 3; i++) {
+        g_custom_font_size = fonts[i];
+        frame(false, false, 500); g_cur->lay.w = g_cur->win_w - 32;
+        g_cur->lay.y = g_cur->win_h - GUI_INPUT_H - 8;
+        fn_combobox(4, combo); float closed_bottom = g_cur->lay.y;
+        frame(false, false, 500); g_cur->lay.w = g_cur->win_w - 32;
+        g_cur->lay.y = g_cur->win_h - GUI_INPUT_H - 8;
+        gui_nav_begin(); g_cur->combo_open = g_cur->nav_focus = id;
+        fn_combobox(4, combo); gui_nav_end();
+        assert(g_cur->combo_popup.ready && g_cur->combo_popup.count <= 8);
+        assert(g_cur->combo_popup.y < g_cur->combo_popup.header_y);
+        assert(g_cur->combo_popup.x >= 4 && g_cur->combo_popup.y >= 4);
+        assert(g_cur->combo_popup.x + g_cur->combo_popup.w <= g_cur->win_w - 4);
+        assert(g_cur->combo_popup.y + g_cur->combo_popup.h <= g_cur->win_h - 4);
+        assert(fabsf(g_cur->lay.y - closed_bottom) < 0.01f);
+        g_cur->combo_open = 0;
+    }
+    g_custom_font_size = original_font;
+    frame(false, false, 500); gui_nav_begin(); g_cur->combo_open = g_cur->nav_focus = id;
+    fn_combobox(4, combo); gui_nav_end();
+    int px = (int)g_cur->combo_popup.x + 10, py = (int)g_cur->combo_popup.y + 10;
+    frame(false, false, px); g_cur->in.my = py; g_cur->in.scroll_y = -100000;
+    gui_nav_begin(); assert(!g_cur->in.scroll_y);
+    fn_combobox(4, combo); gui_nav_end();
+    assert(g_cur->combo_first > 0 && g_cur->combo_first + g_cur->combo_popup.count <= 100);
+    Value other[] = {hajimu_string("unrelated-choice"), choices, hajimu_number(5), hajimu_string("9")};
+    uint64_t signature = g_cur->combo_signature;
+    fn_combobox(4, other); assert(g_cur->combo_signature == signature);
+    frame(false, false, 500); g_cur->in.key_end = true; gui_nav_begin();
+    fn_combobox(4, combo); gui_nav_end(); assert(g_cur->combo_cursor == 99);
+    frame(false, false, 500); g_cur->in.key_return = true; gui_nav_begin();
+    Value result = fn_combobox(4, combo); gui_nav_end();
+    assert(result.number == 99 && !g_cur->combo_open);
+    combo[3] = hajimu_string("9");
+    frame(false, false, 500); gui_nav_begin(); g_cur->combo_open = g_cur->nav_focus = id;
+    fn_combobox(4, combo); gui_nav_end(); assert(g_cur->combo_popup.total == 19);
+    combo[3] = hajimu_string("no matches");
+    frame(false, false, 500); gui_nav_begin();
+    result = fn_combobox(4, combo); gui_nav_end();
+    assert(result.number == 0 && !g_cur->combo_popup.total && g_cur->combo_popup.count == 1);
+    frame(false, false, 500); g_cur->in.key_return = true; gui_nav_begin();
+    result = fn_combobox(4, combo); gui_nav_end(); assert(result.number == 0 && !g_cur->combo_open);
+    assert(gui_combo_match("Characters/Mina.png", "MINA") && gui_combo_match("ミナト/表情.png", "表情"));
+    assert(!gui_combo_match("ミナト/表情.png", "背景"));
+    char long_label[3002], preview[1024]; long_label[0] = 'x';
+    for (int i = 0; i < 1000; i++) memcpy(long_label + 1 + i * 3, "あ", 3);
+    long_label[3001] = 0; gui_combo_preview(preview, long_label);
+    size_t length = strlen(preview);
+    assert(length < sizeof(preview) && !strcmp(preview + length - 3, "...") && (length - 4) % 3 == 0);
+
+    combo[3] = hajimu_string("");
+    frame(false, false, 500); gui_nav_begin(); g_cur->combo_open = g_cur->nav_focus = id;
+    fn_combobox(4, combo); gui_nav_end();
+    px = (int)g_cur->combo_popup.x + 10; py = (int)g_cur->combo_popup.y + 10;
+    frame(true, false, px); g_cur->in.my = py; gui_nav_begin();
+    bool hovered, pressed;
+    assert(!gui_widget_logic(9911, px - 5, py - 5, 100, 30, &hovered, &pressed));
+    assert(!g_cur->in.clicked);
+    result = fn_combobox(4, combo); gui_nav_end();
+    assert(result.number == 0 && !g_cur->combo_open);
+    frame(false, false, 500); gui_nav_begin(); g_cur->combo_open = g_cur->nav_focus = id;
+    fn_combobox(4, combo); gui_nav_end();
+    frame(true, false, 0); g_cur->in.my = 0; gui_nav_begin();
+    assert(!g_cur->combo_open && !g_cur->in.clicked);
+    fn_combobox(4, combo); gui_nav_end();
+    g_cur->nav_enabled = false; g_cur->nav_focus = 0;
+    hjpCancelFrame(g_cur->vg);
+}
+
 int main(void) {
     /* 仮想macOSのソフトウェアGLは2.1止まりの場合がある。実装失敗と区別する。 */
     if (getenv("CONTROL_ALLOW_UNSUPPORTED_GL")) {
@@ -1695,6 +1822,7 @@ int main(void) {
     check_raw_input_loop(false);
     check_raw_input_loop(true);
     check_navigation_loop();
+    check_popup_loop();
     check_modal_stack();
     check_modal_forms();
     check_responsive_fields();
@@ -1709,6 +1837,7 @@ int main(void) {
     check_navigation_current_frame();
     check_navigation_modals();
     check_keyboard_choices();
+    check_combo_popup();
     assert(fn_focus_traversal(0, NULL).boolean);
     frame(false, false, 500);
     gui_nav_begin();
