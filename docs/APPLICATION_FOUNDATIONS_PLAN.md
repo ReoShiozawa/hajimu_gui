@@ -22,6 +22,13 @@
 
 旧進捗やAPI名の存在だけを、上記の完成根拠にしない。検証が未完了の部分は明示する。
 
+### LinuxのXIM確定文字の読取 (14.38.0)
+
+- [Xlibの仕様](https://xorg.freedesktop.org/releases/X11R6.9.0/doc/html/Xutf8LookupString.3.html)に従い、XBufferOverflowで返された必要容量を使い同じキーイベントを一度だけ再取得する。XLookupChars/KeySym/Both/Noneを区別する。
+- 短文は既存領域、長文は再取得用領域を所有イベントへ渡す。上限/再度の容量不足/確保失敗/不正UTF-8/埋込NULでは部分配送しない。
+- `XIM_SANITIZE=1 sh tests/check-xim-lookup.sh` で短文/90KB/最大容量、200回の読取と所有権、状態/失敗を検査する。Linux CIへ追加し、ローカルではX11ヘッダーでバックエンドの構文も検査する。
+- この検査は読取関数の再現で、実際のXIMサーバー/入力エンジンを操作していない。候補/未確定文字/再変換、Windows接続、非XIM経路の多言語対応と各OS実操作は残る。
+
 ### 通常の確定入力の長文配送 (14.37.0)
 
 - macOSの文書接続外のTEXTINPUTも所有イベントへ変更。確保/キュー不足では一部だけ配送せず、未確定状態を先に解除しない。

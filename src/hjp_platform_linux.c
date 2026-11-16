@@ -37,6 +37,7 @@
 #include <dlfcn.h>
 #include <limits.h>
 #include "hjp_native_queue.h"
+#include "hjp_xim_lookup.h"
 static int hjp_window_serial;
 
 /* =====================================================================
@@ -523,17 +524,19 @@ void hjp_pump_events(void) {
         switch (xe.type) {
             case KeyPress: {
                 KeySym ks = NoSymbol;
-                char buf[128] = {0};
-                int len = 0;
+                HjpEvent text = {0};
+                text.type = HJP_EVENT_TEXTINPUT; text.source = ev.source;
+                bool has_text = false;
                 if (owner && owner->xic) {
-                    Status status;
-                    len = Xutf8LookupString(owner->xic, &xe.xkey, buf, sizeof(buf)-1, &ks, &status);
-                    if (status == XBufferOverflow) { len = 0; ks = XLookupKeysym(&xe.xkey, 0); }
+                    has_text = hjp_xim_lookup(owner->xic, &xe.xkey, &ks, &text);
                 } else {
-                    len = XLookupString(&xe.xkey, buf, sizeof(buf)-1, &ks, NULL);
+                    char buf[128] = {0};
+                    int length = XLookupString(&xe.xkey, buf, sizeof(buf) - 1, &ks, NULL);
+                    if (length > 0 && length < (int)sizeof(buf)) {
+                        buf[length] = '\0';
+                        has_text = hjp_input_set_text(&text, buf);
+                    }
                 }
-                if (len < 0 || len >= (int)sizeof(buf)) len = 0;
-                buf[len] = '\0';
 
                 /* KEYDOWN */
                 ev.type = HJP_EVENT_KEYDOWN;
@@ -542,14 +545,10 @@ void hjp_pump_events(void) {
                 push_event(&ev);
 
                 /* TEXT INPUT (印字可能文字のみ) */
-                if (g_hjp.text_input_active && len > 0 && (unsigned char)buf[0] >= 32) {
-                    HjpEvent tev;
-                    memset(&tev, 0, sizeof(tev));
-                    tev.source = ev.source;
-                    tev.type = HJP_EVENT_TEXTINPUT;
-                    strncpy(tev.text.text, buf, sizeof(tev.text.text) - 1);
-                    push_event(&tev);
-                }
+                if (g_hjp.text_input_active && has_text && (unsigned char)hjp_input_text(&text)[0] >= 32 &&
+                    (unsigned char)hjp_input_text(&text)[0] != 127)
+                    push_event(&text);
+                else hjp_native_dispose(&text);
 
                 /* キーボード状態更新 */
                 {
