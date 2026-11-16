@@ -381,6 +381,20 @@ static void check_long_composition(void) {
     result = fn_text_input(2, args);
     assert(!strcmp(result.string.data, "前後"));
     hjp_document_dispose(&selected);
+    gui_ime_update(g_cur, "次");
+    g_cur->in = (GuiInput){.ime_committed = true, .ime_target = id, .text_input_len = 6, .text_input = "確定"};
+    g_disabled = true;
+    gui_text_buf_process(tb);
+    assert(!strcmp(tb->buf, "前後"));
+    g_disabled = false;
+    g_cur->in.ime_target = id + 1;
+    gui_text_buf_process(tb);
+    assert(!strcmp(tb->buf, "前後"));
+    g_cur->in.ime_target = id;
+    gui_text_buf_process(tb);
+    assert(!strcmp(tb->buf, "前確定後") && !g_cur->in.ime_committed && !g_cur->in.text_input_len);
+    gui_text_buf_process(tb);
+    assert(!strcmp(tb->buf, "前確定後"));
     gui_ime_update(g_cur, "");
     g_cur->focused = 0; g_cur->in = (GuiInput){0};
     hjpCancelFrame(g_cur->vg);
@@ -1370,6 +1384,7 @@ static void check_window_close_input(void) {
 static const char *raw_input_expected;
 static Value raw_input_app;
 static int raw_input_callbacks;
+static bool raw_input_ime;
 static Value raw_input_callback(Value *callback, int argc, Value *argv) {
     (void)callback; (void)argv;
     assert(argc == 0);
@@ -1377,11 +1392,12 @@ static Value raw_input_callback(Value *callback, int argc, Value *argv) {
     Value args[] = {hajimu_string("raw-input"), hajimu_string("")};
     Value result = fn_textarea(2, args);
     assert(!strcmp(result.string.data, raw_input_expected));
+    if (raw_input_ime) assert(!strcmp(g_cur->composition, "次") && !g_cur->in.ime_committed && !g_cur->in.text_input_len);
     fn_app_quit(1, &raw_input_app);
     return hajimu_null();
 }
 
-static void check_raw_input_loop(void) {
+static void check_raw_input_loop(bool ime) {
     GuiApp *original = g_cur;
     HajimuRuntime *runtime = __hajimu_runtime;
     HajimuRuntime test_runtime = {.call = raw_input_callback};
@@ -1390,6 +1406,7 @@ static void check_raw_input_loop(void) {
     for (int i = 0; i < 10000; i++) memcpy(text + i * 9, "日本語", 9);
     text[90000] = '\0';
     raw_input_expected = text; raw_input_callbacks = 0;
+    raw_input_ime = ime;
     Value create[] = {hajimu_string("raw input loop"), hajimu_number(640), hajimu_number(400)};
     raw_input_app = fn_app_create(3, create);
     assert(raw_input_app.type == VALUE_NUMBER);
@@ -1399,7 +1416,13 @@ static void check_raw_input_loop(void) {
     assert(gui_get_text_buf(app->focused, ""));
     HjpEvent event = source_event(app, HJP_EVENT_TEXTINPUT);
     assert(hjp_input_set_text(&event, text));
+    event.text.ime_result = ime;
     hjp_test_native_event(&event);
+    if (ime) {
+        event = source_event(app, HJP_EVENT_TEXTEDITING);
+        assert(hjp_composition_set_text(&event, "次"));
+        hjp_test_native_event(&event);
+    }
     __hajimu_runtime = &test_runtime; g_cur = NULL;
     Value draw[] = {raw_input_app, {.type = VALUE_FUNCTION}};
     fn_draw_loop(2, draw);
@@ -1466,7 +1489,8 @@ int main(void) {
     check_closing_loop();
     check_window_routing();
     check_window_close_input();
-    check_raw_input_loop();
+    check_raw_input_loop(false);
+    check_raw_input_loop(true);
     check_modal_stack();
     check_modal_forms();
     check_responsive_fields();

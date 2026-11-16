@@ -167,6 +167,7 @@ typedef struct {
     char *owned_text; /* 長い確定/未確定文字。イベント破棄時に解放 */
     int selection_start, selection_end; /* 未確定文字内のUTF-8バイト範囲 */
     bool has_selection;
+    bool ime_result;
 } HjpTextInputEvent;
 
 /* 通常の編集欄とOS文書接続で共用する、NULを含む最大容量。 */
@@ -261,8 +262,10 @@ void  hjp_set_clipboard_text(const char *text);
 void hjp_start_text_input(void);
 void hjp_stop_text_input(void);
 void hjp_reset_input(HjpWindow *window);
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(_WIN32)
 void hjp_set_text_input_rect(HjpWindow *window, float x, float y, float w, float h);
+#endif
+#ifdef __APPLE__
 void hjp_set_text_input_context(HjpWindow *window, uint32_t id, const char *text,
                                int start, int end, int capacity);
 void hjp_accessibility_begin(HjpWindow *window);

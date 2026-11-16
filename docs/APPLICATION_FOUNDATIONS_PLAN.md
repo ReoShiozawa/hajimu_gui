@@ -22,6 +22,13 @@
 
 旧進捗やAPI名の存在だけを、上記の完成根拠にしない。検証が未完了の部分は明示する。
 
+### WindowsのIMM32入力接続 (14.39.0)
+
+- 確定/未確定文字を長さ取得後に全件読取し、UTF-16からUTF-8へ厳密変換。未確定のカーソル/変換対象範囲を共通入力へ配送し、候補矩形をIMM32へ渡す。
+- 結果と次の未確定文字を一括で準備し、両方が成功してから配送する。結果は元のフォーカスIDに一度だけ適用し、無効/背景では編集しない。入力停止/フォーカス喪失/破棄で取消。
+- `tests/check-win-ime.sh` はIMMを再現しつつ実Win32の変換/メッセージ処理を検査する。Windows CIの対象で、実IMEエンジンの操作検査とは区別する。
+- 実IMEの候補/再変換、TSF専用・CS_INSERTCHAR/CS_NOMOVECARET経路、フォーカス変更をまたぐ一般イベント順序、Linuxの未確定文字と全OS実操作は残る。優先度2/3の完了とはしない。
+
 ### LinuxのXIM確定文字の読取 (14.38.0)
 
 - [Xlibの仕様](https://xorg.freedesktop.org/releases/X11R6.9.0/doc/html/Xutf8LookupString.3.html)に従い、XBufferOverflowで返された必要容量を使い同じキーイベントを一度だけ再取得する。XLookupChars/KeySym/Both/Noneを区別する。

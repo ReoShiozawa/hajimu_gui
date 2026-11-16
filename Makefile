@@ -45,7 +45,7 @@ ifeq ($(OS),Windows_NT)
     CFLAGS  = -Wall -Wextra -O2 -I$(HAJIMU_INCLUDE) -Isrc
     CFLAGS += -D_WIN32_WINNT=0x0601 -DWIN32_LEAN_AND_MEAN
     CFLAGS += -shared
-    LDFLAGS = -lopengl32 -lgdi32 -luser32 -lshell32 -lkernel32 -lpthread -static-libgcc
+    LDFLAGS = -lopengl32 -lgdi32 -luser32 -lshell32 -lkernel32 -limm32 -lpthread -static-libgcc
 else ifeq ($(DETECTED_OS),Darwin)
     SRC_PLATFORM = src/hjp_platform_macos.m
     CFLAGS  = -Wall -Wextra -O2 -I$(HAJIMU_INCLUDE) -Isrc -fPIC -DGL_SILENCE_DEPRECATION -fobjc-arc
@@ -160,7 +160,7 @@ build-windows:
 	  -I$(HAJIMU_INC) -Isrc \
 	  -D_WIN32_WINNT=0x0601 -DWIN32_LEAN_AND_MEAN \
 	  $(SRC_ALL) src/hjp_platform_win32.c \
-	  -lopengl32 -lgdi32 -luser32 -lshell32 -lkernel32 -lpthread -static-libgcc \
+	  -lopengl32 -lgdi32 -luser32 -lshell32 -lkernel32 -limm32 -lpthread -static-libgcc \
 	  -o $(DIST)/$(PLUGIN_NAME)-windows-x64.hjp
 	cp vendor/utf8proc/LICENSE.md $(DIST)/$(PLUGIN_NAME)-windows-x64.utf8proc-license.txt
 	@echo "  Windows: $(DIST)/$(PLUGIN_NAME)-windows-x64.hjp"

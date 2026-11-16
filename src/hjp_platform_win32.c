@@ -34,6 +34,8 @@
 #include <windowsx.h>
 #include <GL/gl.h>
 #include <shellapi.h>
+#include <imm.h>
+#include <math.h>
 
 /* WGL拡張 */
 #include "hjp_platform.h"
@@ -50,6 +52,7 @@
 #include <stdint.h>
 #include <limits.h>
 #include "hjp_native_queue.h"
+#include "hjp_win_ime.h"
 static int hjp_window_serial;
 
 /* MSVC: 自動リンク */
@@ -59,6 +62,7 @@ static int hjp_window_serial;
 #  pragma comment(lib, "user32.lib")
 #  pragma comment(lib, "shell32.lib")
 #  pragma comment(lib, "kernel32.lib")
+#  pragma comment(lib, "imm32.lib")
 #endif
 
 /* 型サイズの静的アサート */
@@ -105,6 +109,8 @@ struct HjpWindow {
     int     fb_width, fb_height;
     int     id;
     WCHAR   surrogate_high; /* ウィンドウ単位のUTF-16未完ペア */
+    bool    ime_composing;
+    RECT    ime_rect;
     bool    fullscreen;
     RECT     pre_fullscreen_rect;  /* フルスクリーン前のウィンドウ位置 */
     LONG_PTR pre_fullscreen_style;  /* Win64: LONG_PTR で GWL_STYLE を保持 */
@@ -186,6 +192,34 @@ static HjpKeymod get_modifiers(void) {
 /* =====================================================================
  * ウィンドウプロシージャ
  * ===================================================================*/
+static void hjp_win_ime_place(HjpWindow *window) {
+    if (!window || GetFocus() != window->hwnd || !g_hjp.text_input_active) return;
+    HIMC context = ImmGetContext(window->hwnd);
+    if (!context) return;
+    CANDIDATEFORM candidate = {0};
+    candidate.dwStyle = CFS_EXCLUDE;
+    candidate.ptCurrentPos = (POINT){window->ime_rect.left, window->ime_rect.top};
+    candidate.rcArea = window->ime_rect;
+    COMPOSITIONFORM composition = {0};
+    composition.dwStyle = CFS_POINT; composition.ptCurrentPos = candidate.ptCurrentPos;
+    ImmSetCandidateWindow(context, &candidate);
+    ImmSetCompositionWindow(context, &composition);
+    ImmReleaseContext(window->hwnd, context);
+}
+
+static void hjp_win_ime_clear(HjpWindow *window, bool cancel) {
+    if (!window) return;
+    bool active = window->ime_composing;
+    window->ime_composing = false; window->surrogate_high = 0;
+    if (active && cancel) {
+        HIMC context = ImmGetContext(window->hwnd);
+        if (context) { ImmNotifyIME(context, NI_COMPOSITIONSTR, CPS_CANCEL, 0); ImmReleaseContext(window->hwnd, context); }
+    }
+    HjpEvent event = {.type = HJP_EVENT_TEXTEDITING};
+    event.source.window = window; event.source.generation = window->id;
+    push_event(&event);
+}
+
 static LRESULT CALLBACK hjp_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     HjpEvent ev;
     memset(&ev, 0, sizeof(ev));
@@ -220,7 +254,7 @@ static LRESULT CALLBACK hjp_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
             break;
 
         case WM_KILLFOCUS:
-            if (owner) owner->surrogate_high = 0;
+            hjp_win_ime_clear(owner, true);
             ev.type = HJP_EVENT_WINDOWEVENT;
             ev.window.event = HJP_WINDOWEVENT_FOCUS_LOST;
             push_event(&ev);
@@ -303,21 +337,64 @@ static LRESULT CALLBACK hjp_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
 
         case WM_KEYDOWN:
         case WM_SYSKEYDOWN:
+            if (wp < 512) g_hjp.keys[wp] = 1;
+            if (owner && owner->ime_composing) break;
             ev.type = HJP_EVENT_KEYDOWN;
             ev.key.sym = vk_to_hjp(wp);
             ev.key.mod = get_modifiers();
             push_event(&ev);
-            if (wp < 512) g_hjp.keys[wp] = 1;
             break;
 
         case WM_KEYUP:
         case WM_SYSKEYUP:
+            if (wp < 512) g_hjp.keys[wp] = 0;
+            if (owner && owner->ime_composing) break;
             ev.type = HJP_EVENT_KEYUP;
             ev.key.sym = vk_to_hjp(wp);
             ev.key.mod = get_modifiers();
             push_event(&ev);
-            if (wp < 512) g_hjp.keys[wp] = 0;
             break;
+
+        case WM_IME_SETCONTEXT:
+            if (g_hjp.text_input_active) lp &= ~ISC_SHOWUICOMPOSITIONWINDOW;
+            return DefWindowProcW(hwnd, msg, wp, lp);
+        case WM_IME_STARTCOMPOSITION:
+            if (owner && g_hjp.text_input_active) {
+                owner->ime_composing = true; owner->surrogate_high = 0;
+                hjp_win_ime_place(owner);
+                return 0;
+            }
+            break;
+        case WM_IME_COMPOSITION: {
+            if (!owner || !g_hjp.text_input_active) break;
+            bool result = (lp & GCS_RESULTSTR) != 0;
+            bool marked = (lp & (GCS_COMPSTR | GCS_COMPATTR | GCS_CURSORPOS | GCS_COMPCLAUSE)) != 0;
+            if (!result && !marked) {
+                if (lp == 0) { hjp_win_ime_clear(owner, false); return 0; }
+                break;
+            }
+            if (hjp_native_free(&g_hjp.queue) < (result ? 2u : 1u)) return 0;
+            HIMC context = ImmGetContext(hwnd);
+            if (!context) return 0;
+            HjpEvent committed = {.type = HJP_EVENT_TEXTINPUT}, pending = {.type = HJP_EVENT_TEXTEDITING};
+            committed.source = pending.source = ev.source;
+            bool ready = (!result || hjp_win_ime_read(context, GCS_RESULTSTR, &committed)) &&
+                         (!marked || hjp_win_ime_read(context, GCS_COMPSTR, &pending));
+            ImmReleaseContext(hwnd, context);
+            if (!ready) { hjp_native_dispose(&committed); hjp_native_dispose(&pending); return 0; }
+            if (result) push_event(&committed);
+            push_event(&pending);
+            owner->ime_composing = marked;
+            return 0;
+        }
+        case WM_IME_ENDCOMPOSITION:
+            if (owner && (owner->ime_composing || g_hjp.text_input_active)) {
+                hjp_win_ime_clear(owner, false); return 0;
+            }
+            break;
+        case WM_IME_CHAR:
+            /* GCS_RESULTSTRで配送済み。DefWindowProcによるWM_CHARへの再配送を避ける。 */
+            return 0;
 
         case WM_CHAR: {
             /* WM_CHAR は常に UTF-16 コードユニット (WCHAR 1文字分) を届ける。
@@ -325,6 +402,7 @@ static LRESULT CALLBACK hjp_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
              * Win64 でも WPARAM は下位16bit に値を持つ。 */
             WCHAR ch = (WCHAR)(wp & 0xFFFF);
             if (!owner) return 0;
+            if (!g_hjp.text_input_active || owner->ime_composing) { owner->surrogate_high = 0; return 0; }
 
             /* 上位サロゲート (D800–DBFF) を蓄積 */
             if (ch >= 0xD800 && ch <= 0xDBFF) {
@@ -555,6 +633,7 @@ HjpWindow *hjp_window_create(const char *title, int x, int y, int w, int h, uint
 
 void hjp_window_destroy(HjpWindow *win) {
     if (!win) return;
+    hjp_win_ime_clear(win, true);
     hjp_native_unregister(&g_hjp.queue, win);
     SetWindowLongPtrW(win->hwnd, GWLP_USERDATA, 0);
     wglMakeCurrent(NULL, NULL);
@@ -795,11 +874,28 @@ void hjp_set_clipboard_text(const char *text) {
  * ===================================================================*/
 
 void hjp_start_text_input(void) { g_hjp.text_input_active = true; }
-void hjp_stop_text_input(void)  { g_hjp.text_input_active = false; }
+void hjp_stop_text_input(void) {
+    g_hjp.text_input_active = false;
+    HWND focused = GetFocus();
+    for (int i = 0; i < HJP_NATIVE_WINDOWS; i++) {
+        HjpWindow *owner = g_hjp.queue.lanes[i].window;
+        if (owner && owner->hwnd == focused) { hjp_win_ime_clear(owner, true); break; }
+    }
+}
+void hjp_set_text_input_rect(HjpWindow *window, float x, float y, float w, float h) {
+    if (!window || window->width <= 0 || window->height <= 0 ||
+        !isfinite(x) || !isfinite(y) || !isfinite(w) || !isfinite(h) || w <= 0 || h <= 0) return;
+    double left = fmax(0, fmin((double)x, (double)window->width - 1));
+    double top = fmax(0, fmin((double)y, (double)window->height - 1));
+    window->ime_rect = (RECT){(LONG)left, (LONG)top,
+        (LONG)fmin((double)window->width, left + w), (LONG)fmin((double)window->height, top + h)};
+    hjp_win_ime_place(window);
+}
 void hjp_reset_input(HjpWindow *window) {
     memset(g_hjp.keys, 0, sizeof(g_hjp.keys));
     g_hjp.mouseButtons = 0;
     if (window) {
+        hjp_win_ime_clear(window, true);
         window->surrogate_high = 0;
         if (GetCapture() == window->hwnd) ReleaseCapture();
     }

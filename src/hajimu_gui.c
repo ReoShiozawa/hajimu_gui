@@ -237,6 +237,8 @@ typedef struct {
     char text_input[4096];      /* 同一フレームの複数の確定イベントを保持 */
     int  text_input_len;        /* 今フレームの入力バイト数     */
     const char *text_input_external; /* 大きい入力はアプリ所有領域を借用 */
+    bool ime_committed;
+    uint32_t ime_target;
     bool key_backspace;         /* Backspace 押下                 */
     bool key_delete;            /* Delete 押下                    */
     bool key_return;            /* Enter / Return 押下            */
@@ -1301,7 +1303,7 @@ static void gui_nav_text(uint32_t id, float x, float y, float w, float h) {
         g_cur->focused = 0;
         hjp_stop_text_input();
     }
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(_WIN32)
     if (g_cur->focused == id) hjp_set_text_input_rect(g_cur->window, x + GUI_INPUT_PAD, y, 1, h);
 #endif
 }
@@ -1544,6 +1546,8 @@ static Value fn_draw_loop(int argc, Value *argv) {
         app->in.pmy = app->in.my;
         app->in.text_input_len = 0;
         app->in.text_input_external = NULL;
+        app->in.ime_committed = false;
+        app->in.ime_target = 0;
         app->in.text_input[0]  = '\0';
         app->in.key_backspace  = false;
         app->in.key_delete     = false;
@@ -1629,7 +1633,11 @@ static Value fn_draw_loop(int argc, Value *argv) {
                 }
                 break;
             case HJP_EVENT_TEXTINPUT: {
-                gui_input_append(app, hjp_input_text(&ev));
+                if (ev.text.ime_result && !app->focused) break;
+                if (gui_input_append(app, hjp_input_text(&ev)) && ev.text.ime_result) {
+                    app->in.ime_committed = true;
+                    app->in.ime_target = app->focused;
+                }
                 break;
             }
             case HJP_EVENT_TEXTEDITING:
@@ -3121,9 +3129,17 @@ static void gui_publish_text_context(GuiTextBuf *tb, uint32_t id, bool secure) {
 /* テキストバッファにキー入力を反映（フォーカス中のみ呼ばれる）。 */
 static void gui_text_buf_edit(GuiTextBuf *tb, bool allow_copy) {
     GuiInput *in = &g_cur->in;
-    if (g_cur->closing || g_disabled || g_cur->composition[0] ||
+    if (g_cur->closing || g_disabled ||
         (g_cur->modal_title[0] && !g_cur->modal_entered)) return;
     bool changed = false;
+    if (in->ime_committed) {
+        if (in->ime_target && in->ime_target != tb->id) return;
+        if (in->text_input_len) changed = gui_text_replace_selection(tb, gui_input_text(in), in->text_input_len);
+        in->ime_committed = false;
+        in->ime_target = 0;
+        in->text_input_len = 0;
+    }
+    if (g_cur->composition[0]) return;
     if (in->key_a) {
         tb->sel_start = 0; tb->sel_end = tb->cursor = tb->len;
         tb->preferred_x_valid = false;
@@ -3374,7 +3390,7 @@ static Value fn_text_input(int argc, Value *argv) {
             hjpFillColor(vg, TH_TEXT); hjpFill(vg);
         }
     }
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(_WIN32)
     if (focused) {
         float cx = fx + GUI_INPUT_PAD + hjpTextBounds(vg, 0, 0, display, display + visual_cursor, NULL);
         hjp_set_text_input_rect(g_cur->window, fminf(cx, fx + fw - GUI_INPUT_PAD), y, 1, GUI_INPUT_H);
@@ -3801,7 +3817,7 @@ static Value fn_textarea(int argc, Value *argv) {
     if (focused) {
         float cx = tx + hjpTextBounds(vg, 0, 0, rows[caret_row].start, display + caret, NULL);
         float cy = ty + caret_y - tb->scroll_y;
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(_WIN32)
         hjp_set_text_input_rect(g_cur->window, fminf(cx, tx + fmaxf(0, tw - 1)), cy, 1, line_h);
 #endif
         uint32_t t = hjp_get_ticks();
@@ -25985,7 +26001,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.38.0",
+        .version        = "14.39.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,
