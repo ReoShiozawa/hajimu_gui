@@ -116,6 +116,7 @@ int main(int argc, char **argv) {
                     assert(hjp__popEvent(&e) && e.type == HJP_EVENT_TEXTSELECTION);
                     assert(e.edit.id == 901 && e.edit.start == 5 && e.edit.end == 11);
                     assert(hjp__popEvent(&e) && e.type == HJP_EVENT_TEXTEDITING);
+                    assert(e.text.has_selection && e.text.selection_start == 3 && e.text.selection_end == 6);
                     [view insertText:@"日本語" replacementRange:NSMakeRange(NSNotFound, 0)];
                     assert(hjp__popEvent(&e) && e.type == HJP_EVENT_TEXTREPLACE);
                     assert(e.edit.start == 5 && e.edit.end == 11 && !strcmp(e.edit.text, "日本語"));
@@ -343,6 +344,14 @@ int main(int argc, char **argv) {
                     assert(hjp__popEvent(&e) && e.type == HJP_EVENT_TEXTEDITING);
                     assert(!strcmp(hjp_composition_text(&e), largeCommit.UTF8String));
                     hjp_native_dispose(&e);
+                    [view setMarkedText:@"😀語" selectedRange:NSMakeRange(1, 0)
+                        replacementRange:NSMakeRange(NSNotFound, 0)];
+                    assert([view.composition isEqualToString:largeCommit] && !hjp__popEvent(&e));
+                    [view setMarkedText:@"😀語" selectedRange:NSMakeRange(2, 1)
+                        replacementRange:NSMakeRange(NSNotFound, 0)];
+                    assert(hjp__popEvent(&e) && e.type == HJP_EVENT_TEXTSELECTION);
+                    assert(hjp__popEvent(&e) && e.type == HJP_EVENT_TEXTEDITING);
+                    assert(e.text.has_selection && e.text.selection_start == 4 && e.text.selection_end == 7);
                     [view clearComposition];
                     assert(hjp__popEvent(&e) && e.type == HJP_EVENT_TEXTEDITING && !hjp_composition_text(&e)[0]);
                     [longField setAccessibilityValue:largeCommit];

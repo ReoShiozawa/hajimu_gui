@@ -680,8 +680,16 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
     if (range.location == NSNotFound) return;
     NSString *next = [aString isKindOfClass:[NSAttributedString class]] ? [aString string] : aString;
     if (![next isKindOfClass:NSString.class]) return;
+    NSUInteger start = MIN(selectedRange.location, next.length);
+    NSRange selection = NSMakeRange(start, MIN(selectedRange.length, next.length - start));
+    NSData *prefix = [[next substringToIndex:start] dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *selected = [[next substringWithRange:selection] dataUsingEncoding:NSUTF8StringEncoding];
+    if (!prefix || !selected) return;
     HjpEvent e = {0}; e.type = HJP_EVENT_TEXTEDITING;
     if (!hjp_composition_set_text(&e, next.UTF8String)) return;
+    e.text.has_selection = true;
+    e.text.selection_start = (int)prefix.length;
+    e.text.selection_end = (int)(prefix.length + selected.length);
     if (self.documentID && ![self emitDocumentEdit:range text:@"" selectionOnly:YES]) {
         hjp_document_dispose(&e); return;
     }
@@ -690,9 +698,7 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
     self.documentAnchor = range.location;
     self.documentCursor = NSMaxRange(range);
     self.composition = next;
-    NSUInteger length = self.composition.length;
-    NSUInteger start = MIN(selectedRange.location, length);
-    self.compositionSelection = NSMakeRange(start, MIN(selectedRange.length, length - start));
+    self.compositionSelection = selection;
     hjp__pushWindowEvent(self.ownerWindow, &e);
 }
 - (void)clearComposition {

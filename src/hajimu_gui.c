@@ -286,6 +286,7 @@ typedef struct {
     float    scroll_y;          /* 複数行入力の表示位置 */
     bool     view_initialized, view_focused;
     int      view_cursor, view_length;
+    uint64_t view_composition_version;
     float    preferred_x;       /* 上下移動で短い行を経由しても列を保持 */
     bool     preferred_x_valid;
     bool     ax_visible, ax_enabled, ax_secure;
@@ -354,6 +355,7 @@ typedef struct {
     char composition_inline[128];
     char *composition;
     size_t composition_capacity;
+    int composition_start, composition_end;
     uint32_t text_drag;
     bool text_context_published;
     uint32_t text_context_id;
@@ -488,7 +490,25 @@ static void gui_ime_update(GuiApp *app, const char *text) {
     if (strlen(app->composition) == length && !memcmp(app->composition, text, length)) return;
     memcpy(app->composition, text, length);
     app->composition[length] = '\0';
+    app->composition_start = app->composition_end = (int)length;
     app->composition_version++;
+}
+
+static bool gui_ime_event(GuiApp *app, const HjpEvent *event) {
+    const char *text = hjp_composition_text(event);
+    size_t length = strnlen(text, GUI_TEXT_LIMIT);
+    int start = event->text.selection_start, end = event->text.selection_end;
+    if (length >= GUI_TEXT_LIMIT) return false;
+    if (event->text.has_selection && (start < 0 || end < start || (size_t)end > length ||
+        ((unsigned char)text[start] & 0xc0) == 0x80 || ((unsigned char)text[end] & 0xc0) == 0x80)) return false;
+    uint64_t previous = app->composition_version;
+    gui_ime_update(app, text);
+    if (strcmp(app->composition, text)) return false;
+    if (event->text.has_selection && (start != app->composition_start || end != app->composition_end)) {
+        app->composition_start = start; app->composition_end = end;
+        if (app->composition_version == previous) app->composition_version++;
+    }
+    return true;
 }
 static void gui_accessible(uint32_t id, const char *name, int role, float x, float y,
     float w, float h, bool enabled, bool selected);
@@ -1581,7 +1601,7 @@ static Value fn_draw_loop(int argc, Value *argv) {
                 break;
             }
             case HJP_EVENT_TEXTEDITING:
-                gui_ime_update(app, hjp_composition_text(&ev));
+                gui_ime_event(app, &ev);
                 break;
             case HJP_EVENT_TEXTREPLACE:
             case HJP_EVENT_TEXTSELECTION:
@@ -3266,6 +3286,8 @@ static Value fn_text_input(int argc, Value *argv) {
     char *display = malloc((size_t)tb->len + (focused ? strlen(g_cur->composition) : 0) + 1);
     if (!display) { hjpRestore(vg); gui_advance(row_h); return hajimu_string(tb->buf); }
     int visual_cursor = gui_text_display(tb, focused ? g_cur->composition : "", display);
+    if (focused && g_cur->composition[0])
+        visual_cursor += g_cur->composition_end - (int)strlen(g_cur->composition);
     if (display[0]) {
         hjpFillColor(vg, TH_TEXT);
         hjpText(vg, fx + GUI_INPUT_PAD, y + GUI_INPUT_H * 0.5f,
@@ -3276,8 +3298,8 @@ static Value fn_text_input(int argc, Value *argv) {
                 placeholder, NULL);
     }
 
-    /* カーソル描画 */
-    if (focused) {
+    /* 変換中のカーソルは未確定背景を描画した後に重ねる。 */
+    if (focused && !g_cur->composition[0]) {
         uint32_t t = hjp_get_ticks();
         if ((t / GUI_CURSOR_BLINK_MS) % 2 == 0) {
             float cx_pos = fx + GUI_INPUT_PAD;
@@ -3299,11 +3321,22 @@ static Value fn_text_input(int argc, Value *argv) {
         float cw = hjpTextBounds(vg, 0, 0, g_cur->composition, NULL, NULL);
         hjpBeginPath(vg); hjpRect(vg, cx, y + 2, cw, GUI_INPUT_H - 4);
         hjpFillColor(vg, TH_WIDGET_ACTIVE); hjpFill(vg);
+        float left = cx + hjpTextBounds(vg, 0, 0, g_cur->composition,
+                                        g_cur->composition + g_cur->composition_start, NULL);
+        float right = cx + hjpTextBounds(vg, 0, 0, g_cur->composition,
+                                         g_cur->composition + g_cur->composition_end, NULL);
+        if (right > left) {
+            hjpBeginPath(vg); hjpRect(vg, left, y + 2, right - left, GUI_INPUT_H - 4);
+            hjpFillColor(vg, hjpRGBA(70, 130, 210, 100)); hjpFill(vg);
+        }
         hjpFillColor(vg, TH_TEXT);
         hjpText(vg, cx, y + GUI_INPUT_H * 0.5f, g_cur->composition, NULL);
-        hjpBeginPath(vg); hjpMoveTo(vg, cx, y + GUI_INPUT_H - 5);
-        hjpLineTo(vg, cx + cw, y + GUI_INPUT_H - 5);
-        hjpStrokeColor(vg, TH_ACCENT); hjpStrokeWidth(vg, 1); hjpStroke(vg);
+        hjpBeginPath(vg); hjpRect(vg, cx, y + GUI_INPUT_H - 5, cw, 1);
+        hjpFillColor(vg, TH_ACCENT); hjpFill(vg);
+        if ((hjp_get_ticks() / GUI_CURSOR_BLINK_MS) % 2 == 0) {
+            hjpBeginPath(vg); hjpRect(vg, right, y + 6, 1.5f, GUI_INPUT_H - 12);
+            hjpFillColor(vg, TH_TEXT); hjpFill(vg);
+        }
     }
 #ifdef __APPLE__
     if (focused) {
@@ -3664,13 +3697,16 @@ static Value fn_textarea(int argc, Value *argv) {
         gui_advance(fh + GUI_FONT_SIZE * 1.4f + 8);
         return hajimu_string(tb->buf);
     }
-    int caret = gui_text_display(tb, focused ? g_cur->composition : "", display);
+    int marked_limit = gui_text_display(tb, focused ? g_cur->composition : "", display);
+    int caret = marked_limit;
+    if (focused && g_cur->composition[0]) caret += g_cur->composition_end - (int)strlen(g_cur->composition);
     int count = gui_textarea_rows(vg, display, tw, rows, row_capacity);
     int caret_row = gui_textarea_caret_row(rows, count, display + caret);
     float visible_h = fh - GUI_INPUT_PAD * 2;
     float caret_y = caret_row * line_h;
     if (focused && (!tb->view_initialized || !tb->view_focused ||
-                    tb->cursor != tb->view_cursor || tb->len != tb->view_length)) {
+                    tb->cursor != tb->view_cursor || tb->len != tb->view_length ||
+                    g_cur->composition_version != tb->view_composition_version)) {
         if (caret_y < tb->scroll_y) tb->scroll_y = caret_y;
         if (caret_y + line_h > tb->scroll_y + visible_h)
             tb->scroll_y = caret_y + line_h - visible_h;
@@ -3684,16 +3720,29 @@ static Value fn_textarea(int argc, Value *argv) {
     }
     tb->view_initialized = true; tb->view_focused = focused;
     tb->view_cursor = tb->cursor; tb->view_length = tb->len;
+    tb->view_composition_version = g_cur->composition_version;
     int selected_start, selected_end;
     gui_text_selection(tb, &selected_start, &selected_end);
     const char *marked_start = display + (focused && g_cur->composition[0] ? selected_start : tb->cursor);
-    const char *marked_end = display + caret;
+    const char *marked_end = display + marked_limit;
     for (int i = 0; i < count; i++) {
         float cy = ty + i * line_h - tb->scroll_y;
         if (cy + line_h <= ty || cy >= ty + visible_h) continue;
         if (focused && !g_cur->composition[0] && selected_start != selected_end) {
             const char *a = rows[i].start > display + selected_start ? rows[i].start : display + selected_start;
             const char *b = rows[i].end < display + selected_end ? rows[i].end : display + selected_end;
+            if (a < b) {
+                float left = tx + hjpTextBounds(vg, 0, 0, rows[i].start, a, NULL);
+                float right = tx + hjpTextBounds(vg, 0, 0, rows[i].start, b, NULL);
+                hjpBeginPath(vg); hjpRect(vg, left, cy, right - left, line_h);
+                hjpFillColor(vg, hjpRGBA(70, 130, 210, 100)); hjpFill(vg);
+            }
+        }
+        if (focused && g_cur->composition[0] && g_cur->composition_start < g_cur->composition_end) {
+            const char *a = marked_start + g_cur->composition_start;
+            const char *b = marked_start + g_cur->composition_end;
+            if (a < rows[i].start) a = rows[i].start;
+            if (b > rows[i].end) b = rows[i].end;
             if (a < b) {
                 float left = tx + hjpTextBounds(vg, 0, 0, rows[i].start, a, NULL);
                 float right = tx + hjpTextBounds(vg, 0, 0, rows[i].start, b, NULL);
@@ -3708,9 +3757,8 @@ static Value fn_textarea(int argc, Value *argv) {
         if (focused && a < b) {
             float left = tx + hjpTextBounds(vg, 0, 0, rows[i].start, a, NULL);
             float right = tx + hjpTextBounds(vg, 0, 0, rows[i].start, b, NULL);
-            hjpBeginPath(vg); hjpMoveTo(vg, left, cy + line_h - 2);
-            hjpLineTo(vg, right, cy + line_h - 2);
-            hjpStrokeColor(vg, TH_ACCENT); hjpStrokeWidth(vg, 1); hjpStroke(vg);
+            hjpBeginPath(vg); hjpRect(vg, left, cy + line_h - 2, right - left, 1);
+            hjpFillColor(vg, TH_ACCENT); hjpFill(vg);
         }
     }
 
@@ -15496,8 +15544,16 @@ static Value fn_input_formatter(int argc, Value *argv) {
 
 static Value fn_ime_state(int argc, Value *argv) {
     (void)argc; (void)argv;
-    return gui_dict2("変換中", hajimu_bool(g_cur && g_cur->composition[0]),
-                     "未確定文字列", hajimu_string(g_cur ? g_cur->composition : ""));
+    const char *text = g_cur ? g_cur->composition : "";
+    Value state = gui_dict2("変換中", hajimu_bool(*text != '\0'), "未確定文字列", hajimu_string(text));
+    int start = 0, end = 0, length = (int)strlen(text);
+    for (int offset = 0; offset < length; offset = utf8_next(text, offset, length)) {
+        if (g_cur && offset < g_cur->composition_start) start++;
+        if (g_cur && offset < g_cur->composition_end) end++;
+    }
+    dict_set(&state, "選択開始", hajimu_number(start));
+    dict_set(&state, "選択終了", hajimu_number(end));
+    return state;
 }
 
 /* 呼出元フレームで最新の変更を配送し、コールバックは保持しない。 */
@@ -25900,7 +25956,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.35.0",
+        .version        = "14.36.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,
