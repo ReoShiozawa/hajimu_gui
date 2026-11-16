@@ -203,8 +203,7 @@ int main(int argc, char **argv) {
                     assert(NSEqualRanges(field.accessibilitySelectedTextRange, NSMakeRange(3, 2)));
                     [field setAccessibilitySelectedTextRange:NSMakeRange(2, 0)];
                     assert(!hjp__popEvent(&e));
-                    NSMutableString *overLimit = [NSMutableString string];
-                    for (int p = 0; p < 2048; p++) [overLimit appendString:@"x"];
+                    NSString *overLimit = [@"" stringByPaddingToLength:HJP_TEXT_DOCUMENT_LIMIT withString:@"x" startingAtIndex:0];
                     [field setAccessibilityValue:overLimit];
                     assert(!hjp__popEvent(&e));
                     for (int q = 0; q < HJP_MAX_EVENTS - 1; q++) hjp__pushEvent(&occupied);
@@ -317,6 +316,21 @@ int main(int argc, char **argv) {
                     hjp_accessibility_end(win);
                     assert(view.accessibilityChildren.count == 0 && view.accessibleCache.count == 0);
                     assert(![button accessibilityPerformPress]);
+                    while (hjp__popEvent(&e)) hjp_native_dispose(&e);
+                    NSString *longDocument = [@"" stringByPaddingToLength:4000 withString:@"日本語" startingAtIndex:0];
+                    int longBytes = (int)[longDocument lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+                    hjp_set_text_input_context(win, 950, longDocument.UTF8String, longBytes, longBytes, HJP_TEXT_DOCUMENT_LIMIT);
+                    assert(view.documentID == 950 && [view.inputDocument isEqualToString:longDocument]);
+                    hjp_accessibility_begin(win);
+                    assert(hjp_accessibility_text(win, 950, "長文", "", longDocument.UTF8String,
+                        longBytes, longBytes, 10, 10, 200, 30, true, true, false, true));
+                    hjp_accessibility_end(win);
+                    HjpAccessibilityTextElement *longField = (HjpAccessibilityTextElement *)view.accessibilityChildren[0];
+                    assert([longField.accessibilityValue isEqualToString:longDocument]);
+                    [longField setAccessibilitySelectedTextRange:NSMakeRange(3999, 1)];
+                    assert(hjp__popEvent(&e) && e.type == HJP_EVENT_ACCESSIBILITY_FOCUS);
+                    assert(hjp__popEvent(&e) && e.type == HJP_EVENT_ACCESSIBILITY_TEXTSELECTION && e.edit.end == longBytes);
+                    assert(view.documentID == 950 && [view.inputDocument isEqualToString:longDocument]);
                     while (hjp__popEvent(&e)) hjp_native_dispose(&e);
                     hjp_set_text_input_context(win, 901, "AB", 1, 1, 2048);
                     [view setMarkedText:@"に" selectedRange:NSMakeRange(1, 0)

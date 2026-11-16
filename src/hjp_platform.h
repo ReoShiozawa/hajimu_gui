@@ -166,6 +166,9 @@ typedef struct {
     char text[128];
 } HjpTextInputEvent;
 
+/* 通常の編集欄とOS文書接続で共用する、NULを含む最大容量。 */
+#define HJP_TEXT_DOCUMENT_LIMIT (1024 * 1024)
+
 typedef struct {
     HjpKeycode  sym;
     HjpKeymod   mod;

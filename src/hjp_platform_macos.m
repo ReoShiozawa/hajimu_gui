@@ -336,7 +336,7 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
     else if (!self.secure && view.documentID != self.widgetID) {
         int start = (int)[[self.snapshotText substringToIndex:self.snapshotSelection.location] lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
         int end = start + (int)[[self.snapshotText substringWithRange:self.snapshotSelection] lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
-        hjp_set_text_input_context(view.ownerWindow, self.widgetID, self.snapshotText.UTF8String, start, end, 2048);
+        hjp_set_text_input_context(view.ownerWindow, self.widgetID, self.snapshotText.UTF8String, start, end, HJP_TEXT_DOCUMENT_LIMIT);
     }
     [view.window makeKeyWindow];
     [view.window makeFirstResponder:view];
@@ -373,7 +373,7 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
 - (void)setAccessibilityValue:(id)value {
     if (![self editableSnapshot] || ![value isKindOfClass:NSString.class]) return;
     NSData *data = [value dataUsingEncoding:NSUTF8StringEncoding];
-    if (!data || data.length >= 2048) return;
+    if (!data || data.length >= HJP_TEXT_DOCUMENT_LIMIT) return;
     const unsigned char *bytes = data.bytes;
     size_t chunks = 0;
     for (size_t offset = 0; offset < data.length; chunks++) {
@@ -398,7 +398,7 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
         hjp__pushEvent(&event);
         offset += n;
     } while (offset < data.length);
-    hjp_set_text_input_context(self.ownerView.ownerWindow, self.widgetID, [value UTF8String], (int)data.length, (int)data.length, 2048);
+    hjp_set_text_input_context(self.ownerView.ownerWindow, self.widgetID, [value UTF8String], (int)data.length, (int)data.length, HJP_TEXT_DOCUMENT_LIMIT);
 }
 - (void)setAccessibilitySelectedTextRange:(NSRange)range {
     if (![self editableSnapshot] || range.location > self.snapshotText.length ||
@@ -416,7 +416,7 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
     event.edit.end = event.edit.cursor = (int)(prefix.length + selected.length);
     hjp__pushEvent(&event);
     hjp_set_text_input_context(self.ownerView.ownerWindow, self.widgetID, self.snapshotText.UTF8String,
-                               event.edit.start, event.edit.end, 2048);
+                               event.edit.start, event.edit.end, HJP_TEXT_DOCUMENT_LIMIT);
 }
 - (void)setAccessibilitySelectedText:(NSString *)text {
     if (![self editableSnapshot] || ![text isKindOfClass:NSString.class]) return;

@@ -117,7 +117,8 @@ static float g_custom_font_size = 0;
 #define GUI_INPUT_H         fmaxf(32.0f, GUI_FONT_SIZE * 1.4f + 8.0f)
 #define GUI_INPUT_PAD        8.0f    /* 入力フィールド内余白 */
 #define GUI_COMBO_ITEM_H    fmaxf(28.0f, GUI_FONT_SIZE * 1.4f + 4.0f)
-#define GUI_MAX_TEXT_BUF   2048      /* テキストバッファ最大長 */
+#define GUI_MAX_TEXT_BUF   2048      /* 通常入力の初期容量 */
+#define GUI_TEXT_LIMIT    HJP_TEXT_DOCUMENT_LIMIT
 #define GUI_MAX_TEXT_SLOTS   64      /* 同時テキスト入力数 */
 #define GUI_TEXTAREA_LINES   10      /* テキストエリア行数デフォルト */
 #define GUI_CURSOR_BLINK_MS 530      /* カーソル点滅間隔 */
@@ -273,12 +274,15 @@ typedef struct {
 typedef struct {
     uint32_t id;                /* ウィジェット ID                  */
     uint64_t modal_epoch;       /* 0は通常領域、その他は予約の世代 */
-    char     buf[GUI_MAX_TEXT_BUF]; /* UTF-8 テキスト         */
+    char    *buf;               /* UTF-8本文。必要量に応じて拡張 */
+    int      capacity;
     int      len;               /* バイト長                         */
     int      cursor;            /* カーソル位置 (バイトオフセット) */
     int      sel_start;         /* 選択開始 (バイト)             */
     int      sel_end;           /* 選択終了 (バイト)             */
     float    scroll_y;          /* 複数行入力の表示位置 */
+    bool     view_initialized, view_focused;
+    int      view_cursor, view_length;
     float    preferred_x;       /* 上下移動で短い行を経由しても列を保持 */
     bool     preferred_x_valid;
     bool     ax_visible, ax_enabled, ax_secure;
@@ -1893,6 +1897,9 @@ static Value fn_app_quit(int argc, Value *argv) {
     if (app->loop_active || g_cur == app) return hajimu_null();
     hjp_event_queue_clear(&app->events);
     gui_histories_close(app);
+    for (int i = 0; i < app->text_buf_count; i++) free(app->text_bufs[i].buf);
+    memset(app->text_bufs, 0, sizeof(app->text_bufs));
+    app->text_buf_count = 0;
 #ifndef _WIN32
     hjp_tasks_close(app);
 #endif
@@ -2819,6 +2826,23 @@ static int utf8_next(const char *s, int pos, int len) {
 }
 
 /* --- テキストバッファ管理 --- */
+#ifndef HJP_GUI_TEXT_REALLOC
+#define HJP_GUI_TEXT_REALLOC realloc
+#endif
+
+static bool gui_text_reserve(GuiTextBuf *tb, int required) {
+    if (required < 1 || required > GUI_TEXT_LIMIT) return false;
+    if (required <= tb->capacity) return true;
+    int capacity = tb->capacity ? tb->capacity : GUI_MAX_TEXT_BUF;
+    while (capacity < required) capacity *= 2;
+    bool empty = tb->buf == NULL;
+    char *buffer = HJP_GUI_TEXT_REALLOC(tb->buf, (size_t)capacity);
+    if (!buffer) return false;
+    if (empty) buffer[0] = '\0';
+    tb->buf = buffer;
+    tb->capacity = capacity;
+    return true;
+}
 
 /* ID でバッファを検索、なければ新規作成 */
 static GuiTextBuf *gui_get_text_buf(uint32_t id, const char *init_val) {
@@ -2836,18 +2860,17 @@ static GuiTextBuf *gui_get_text_buf(uint32_t id, const char *init_val) {
     }
     /* 新規作成 */
     if (app->text_buf_count >= GUI_MAX_TEXT_SLOTS) return NULL;
-    GuiTextBuf *tb = &app->text_bufs[app->text_buf_count++];
+    size_t length = init_val ? strnlen(init_val, GUI_TEXT_LIMIT) : 0;
+    if (length >= GUI_TEXT_LIMIT) return NULL;
+    GuiTextBuf *tb = &app->text_bufs[app->text_buf_count];
     memset(tb, 0, sizeof(*tb));
+    if (!gui_text_reserve(tb, (int)length + 1)) return NULL;
+    app->text_buf_count++;
     tb->id = id;
     tb->modal_epoch = epoch;
     if (init_val && *init_val) {
-        int length = (int)strnlen(init_val, GUI_MAX_TEXT_BUF + 4);
-        int n = length < GUI_MAX_TEXT_BUF ? length :
-            hjp_grapheme_floor(init_val, length, GUI_MAX_TEXT_BUF - 1);
-        memcpy(tb->buf, init_val, n);
-        tb->buf[n] = '\0';
-        tb->len = n;
-        tb->cursor = n;
+        memcpy(tb->buf, init_val, length + 1);
+        tb->len = tb->cursor = (int)length;
     }
     return tb;
 }
@@ -2885,10 +2908,12 @@ static void gui_text_move(GuiTextBuf *tb, int cursor, bool extend) {
 /* 見た目の1文字の中央を境に挿入位置を決め、結合列の途中は返さない。 */
 static int gui_text_hit_offset(Hjpcontext *vg, const char *start, const char *end,
                                float x, bool masked) {
-    int offsets[GUI_MAX_TEXT_BUF + 1], count = 1;
     int length = (int)(end - start);
+    int *offsets = malloc(((size_t)length + 1) * sizeof(*offsets));
+    if (!offsets) return 0;
+    int count = 1;
     offsets[0] = 0;
-    while (offsets[count - 1] < length && count < GUI_MAX_TEXT_BUF + 1) {
+    while (offsets[count - 1] < length) {
         offsets[count] = hjp_grapheme_step(start, length, offsets[count - 1]);
         count++;
     }
@@ -2899,10 +2924,12 @@ static int gui_text_hit_offset(Hjpcontext *vg, const char *start, const char *en
         float width = masked ? dot * mid : hjpTextBounds(vg, 0, 0, start, start + offsets[mid], NULL);
         if (width < x) lo = mid + 1; else hi = mid;
     }
-    if (!lo) return 0;
+    if (!lo) { free(offsets); return 0; }
     float right = masked ? dot * lo : hjpTextBounds(vg, 0, 0, start, start + offsets[lo], NULL);
     float left = masked ? dot * (lo - 1) : hjpTextBounds(vg, 0, 0, start, start + offsets[lo - 1], NULL);
-    return offsets[x < (left + right) * 0.5f ? lo - 1 : lo];
+    int result = offsets[x < (left + right) * 0.5f ? lo - 1 : lo];
+    free(offsets);
+    return result;
 }
 
 static bool gui_text_hover(float x, float y, float w, float h) {
@@ -2935,14 +2962,9 @@ static void gui_text_mouse(GuiTextBuf *tb, uint32_t id, bool hovered, int offset
 static bool gui_text_replace_selection(GuiTextBuf *tb, const char *text, int length) {
     int start, end;
     gui_text_selection(tb, &start, &end);
-    int available = GUI_MAX_TEXT_BUF - 1 - (tb->len - (end - start));
-    int n = length < available ? length : available;
-    if (n < length) {
-        /* 次の符号位置まで見れば、上限をまたぐ結合列を安全に除外できる。 */
-        int probe = length < n + 4 ? length : n + 4;
-        n = hjp_grapheme_floor(text, probe, n);
-    }
-    if (length && !n) return false;
+    if (length < 0 || length > GUI_TEXT_LIMIT - 1 - (tb->len - (end - start))) return false;
+    int n = length;
+    if (!gui_text_reserve(tb, tb->len - (end - start) + n + 1)) return false;
     memmove(tb->buf + start + n, tb->buf + end, tb->len - end + 1);
     if (n) memcpy(tb->buf + start, text, n);
     tb->len += n - (end - start);
@@ -3012,7 +3034,7 @@ static void gui_publish_text_context(GuiTextBuf *tb, uint32_t id, bool secure) {
     end = tb->sel_start == tb->sel_end ? tb->cursor : tb->sel_end;
     if (!secure || g_cur->text_context_id != id)
         hjp_set_text_input_context(g_cur->window, secure ? 0 : id, secure ? "" : tb->buf,
-                                   secure ? 0 : start, secure ? 0 : end, GUI_MAX_TEXT_BUF);
+                                   secure ? 0 : start, secure ? 0 : end, GUI_TEXT_LIMIT);
     g_cur->text_context_id = id;
     g_cur->text_context_published = true;
 #else
@@ -3033,16 +3055,19 @@ static void gui_text_buf_edit(GuiTextBuf *tb, bool allow_copy) {
     int start, end;
     gui_text_selection(tb, &start, &end);
     if (allow_copy && (in->key_c || in->key_x) && start != end) {
-        char copied[GUI_MAX_TEXT_BUF];
-        memcpy(copied, tb->buf + start, end - start);
-        copied[end - start] = '\0';
-        hjp_set_clipboard_text(copied);
-        if (in->key_x) changed |= gui_text_replace_selection(tb, "", 0);
+        char *copied = malloc((size_t)(end - start) + 1);
+        if (copied) {
+            memcpy(copied, tb->buf + start, end - start);
+            copied[end - start] = '\0';
+            hjp_set_clipboard_text(copied);
+            if (in->key_x) changed |= gui_text_replace_selection(tb, "", 0);
+            free(copied);
+        }
     }
     if (in->key_v) {
         char *clip = hjp_get_clipboard_text();
         if (clip) {
-            if (*clip) changed |= gui_text_replace_selection(tb, clip, (int)strnlen(clip, GUI_MAX_TEXT_BUF + 4));
+            if (*clip) changed |= gui_text_replace_selection(tb, clip, (int)strnlen(clip, GUI_TEXT_LIMIT));
             hjp_free(clip);
         }
     }
@@ -3218,7 +3243,8 @@ static Value fn_text_input(int argc, Value *argv) {
         }
     }
 
-    char display[GUI_MAX_TEXT_BUF + sizeof(g_cur->composition)];
+    char *display = malloc((size_t)tb->len + sizeof(g_cur->composition) + 1);
+    if (!display) { hjpRestore(vg); gui_advance(row_h); return hajimu_string(tb->buf); }
     int visual_cursor = gui_text_display(tb, focused ? g_cur->composition : "", display);
     if (display[0]) {
         hjpFillColor(vg, TH_TEXT);
@@ -3268,6 +3294,7 @@ static Value fn_text_input(int argc, Value *argv) {
     hjpRestore(vg);
 
     gui_accessible_text(tb, id, label, fx, y, fw, GUI_INPUT_H, false, false);
+    free(display);
     g_cur->last = (GuiLastWidget){fx, y, fw, GUI_INPUT_H, hov};
     gui_advance(row_h);
     return hajimu_string(tb->buf);
@@ -3341,20 +3368,21 @@ static Value fn_password_input(int argc, Value *argv) {
             chars++;
         }
         /* ● をバッファへ */
-        char mask[GUI_MAX_TEXT_BUF * 3];
+        char *mask = malloc((size_t)chars * 3 + 1);
         int mp = 0;
-        for (int i = 0; i < chars && mp < (int)sizeof(mask) - 4; i++) {
+        for (int i = 0; mask && i < chars; i++) {
             /* ● = U+25CF = E2 97 8F */
             mask[mp++] = (char)0xE2;
             mask[mp++] = (char)0x97;
             mask[mp++] = (char)0x8F;
         }
-        mask[mp] = '\0';
+        if (mask) mask[mp] = '\0';
         hjpFillColor(vg, TH_TEXT);
         hjpFontFaceId(vg, g_cur->font_id);
         hjpFontSize(vg, GUI_FONT_SIZE);
         hjpTextAlign(vg, HJP_ALIGN_LEFT | HJP_ALIGN_MIDDLE);
-        hjpText(vg, fx + GUI_INPUT_PAD, y + GUI_INPUT_H * 0.5f, mask, NULL);
+        if (mask) hjpText(vg, fx + GUI_INPUT_PAD, y + GUI_INPUT_H * 0.5f, mask, NULL);
+        free(mask);
     }
 
     /* カーソル */
@@ -3367,13 +3395,8 @@ static Value fn_password_input(int argc, Value *argv) {
                 p = hjp_grapheme_step(tb->buf, tb->len, p);
                 chars_before++;
             }
-            char tmp[GUI_MAX_TEXT_BUF * 3]; int tp = 0;
-            for (int i = 0; i < chars_before && tp < (int)sizeof(tmp) - 4; i++) {
-                tmp[tp++] = (char)0xE2; tmp[tp++] = (char)0x97; tmp[tp++] = (char)0x8F;
-            }
-            tmp[tp] = '\0';
-            float cx_pos = fx + GUI_INPUT_PAD;
-            if (tp > 0) cx_pos += hjpTextBounds(vg, 0, 0, tmp, tmp + tp, NULL);
+            float cx_pos = fx + GUI_INPUT_PAD + chars_before *
+                hjpTextBounds(vg, 0, 0, "\xe2\x97\x8f", NULL, NULL);
             hjpBeginPath(vg);
             hjpRect(vg, cx_pos, y + 6.0f, 1.5f, GUI_INPUT_H - 12.0f);
             hjpFillColor(vg, TH_TEXT);
@@ -3502,8 +3525,9 @@ static void gui_textarea_navigate(GuiTextBuf *tb, uint32_t id, bool hovered,
         return;
     }
     Hjpcontext *vg = g_cur->vg;
-    HjptextRow rows[GUI_MAX_TEXT_BUF + 1];
-    int count = gui_textarea_rows(vg, tb->buf, width, rows, GUI_MAX_TEXT_BUF + 1);
+    HjptextRow *rows = malloc(((size_t)tb->len + 1) * sizeof(*rows));
+    if (!rows) return;
+    int count = gui_textarea_rows(vg, tb->buf, width, rows, tb->len + 1);
     float line_h = GUI_FONT_SIZE * 1.4f;
     if (hovered || g_cur->text_drag == id) {
         if (g_cur->text_drag == id && g_cur->in.down) {
@@ -3531,6 +3555,7 @@ static void gui_textarea_navigate(GuiTextBuf *tb, uint32_t id, bool hovered,
         tb->preferred_x_valid = true;
         g_cur->in.key_up = g_cur->in.key_down = false;
     }
+    free(rows);
 }
 
 /* ---------------------------------------------------------------
@@ -3611,19 +3636,34 @@ static Value fn_textarea(int argc, Value *argv) {
     float ty = y + GUI_INPUT_PAD;
     float tw = fw - GUI_INPUT_PAD * 2;
 
-    char display[GUI_MAX_TEXT_BUF + sizeof(g_cur->composition)];
+    int row_capacity = tb->len + (int)sizeof(g_cur->composition) + 1;
+    char *display = malloc((size_t)row_capacity);
+    HjptextRow *rows = malloc((size_t)row_capacity * sizeof(*rows));
+    if (!display || !rows) {
+        free(display); free(rows); hjpRestore(vg);
+        gui_advance(fh + GUI_FONT_SIZE * 1.4f + 8);
+        return hajimu_string(tb->buf);
+    }
     int caret = gui_text_display(tb, focused ? g_cur->composition : "", display);
-    HjptextRow rows[GUI_MAX_TEXT_BUF + sizeof(g_cur->composition)];
-    int count = gui_textarea_rows(vg, display, tw, rows, sizeof(rows) / sizeof(rows[0]));
+    int count = gui_textarea_rows(vg, display, tw, rows, row_capacity);
     int caret_row = gui_textarea_caret_row(rows, count, display + caret);
     float visible_h = fh - GUI_INPUT_PAD * 2;
     float caret_y = caret_row * line_h;
-    if (focused) {
+    if (focused && (!tb->view_initialized || !tb->view_focused ||
+                    tb->cursor != tb->view_cursor || tb->len != tb->view_length)) {
         if (caret_y < tb->scroll_y) tb->scroll_y = caret_y;
         if (caret_y + line_h > tb->scroll_y + visible_h)
             tb->scroll_y = caret_y + line_h - visible_h;
     }
     tb->scroll_y = fmaxf(0, fminf(tb->scroll_y, count * line_h - visible_h));
+    if (hov && g_cur->in.scroll_y && !g_cur->composition[0]) {
+        float previous = tb->scroll_y;
+        tb->scroll_y = fmaxf(0, fminf(tb->scroll_y - g_cur->in.scroll_y * line_h * 3,
+                                     fmaxf(0, count * line_h - visible_h)));
+        if (tb->scroll_y != previous) g_cur->in.scroll_y = 0;
+    }
+    tb->view_initialized = true; tb->view_focused = focused;
+    tb->view_cursor = tb->cursor; tb->view_length = tb->len;
     int selected_start, selected_end;
     gui_text_selection(tb, &selected_start, &selected_end);
     const char *marked_start = display + (focused && g_cur->composition[0] ? selected_start : tb->cursor);
@@ -3672,6 +3712,7 @@ static Value fn_textarea(int argc, Value *argv) {
     hjpRestore(vg);
 
     gui_accessible_text(tb, id, label, x, y, fw, fh, false, true);
+    free(rows); free(display);
     float total_h = (y + fh + 4.0f) - (y - GUI_FONT_SIZE * 1.4f - 4.0f);
     g_cur->last = (GuiLastWidget){x, y - GUI_FONT_SIZE * 1.4f - 4.0f, fw, total_h, hov};
     gui_advance(fh + GUI_FONT_SIZE * 1.4f + 8.0f);
@@ -4828,9 +4869,11 @@ static Value fn_modal_reserve(int argc, Value *argv) {
             int old = --g_cur->modal_count;
             /* 覆われた親は保持し、閉じた段だけを消して次回の初期値を反映する。 */
             int write = 0, previous = g_cur->text_buf_count;
-            for (int read = 0; read < previous; read++)
+            for (int read = 0; read < previous; read++) {
                 if (g_cur->text_bufs[read].modal_epoch != g_cur->modals[old].epoch)
                     g_cur->text_bufs[write++] = g_cur->text_bufs[read];
+                else free(g_cur->text_bufs[read].buf);
+            }
             memset(g_cur->text_bufs + write, 0, (size_t)(previous - write) * sizeof(GuiTextBuf));
             g_cur->text_buf_count = write;
             g_cur->nav_focus = g_cur->modals[old].restore_nav;
@@ -15336,27 +15379,35 @@ static Value fn_text_find_replace(int argc, Value *argv) {
     if (!tb) return hajimu_number(0);
 
     int count = 0;
-    int flen = (int)strlen(find);
-    int rlen = (int)strlen(replace);
+    int flen = (int)strnlen(find, GUI_TEXT_LIMIT);
+    int rlen = (int)strnlen(replace, GUI_TEXT_LIMIT);
     if (flen == 0) return hajimu_number(0);
+    if (flen >= GUI_TEXT_LIMIT || rlen >= GUI_TEXT_LIMIT) return hajimu_number(-1);
 
-    char result[GUI_MAX_TEXT_BUF];
+    size_t required = (size_t)tb->len;
+    for (const char *p = tb->buf; (p = strstr(p, find)); p += flen) {
+        if ((size_t)rlen > GUI_TEXT_LIMIT - 1 || required - flen > GUI_TEXT_LIMIT - 1 - (size_t)rlen)
+            return hajimu_number(-1);
+        required = required - flen + rlen;
+    }
+    char *result = malloc(required + 1);
+    if (!result) return hajimu_number(-1);
     int ri = 0;
     for (int i = 0; tb->buf[i]; ) {
         if (strncmp(&tb->buf[i], find, flen) == 0) {
-            if (rlen > GUI_MAX_TEXT_BUF - 1 - ri) return hajimu_number(-1);
             memcpy(&result[ri], replace, rlen);
             ri += rlen;
             i += flen;
             count++;
         } else {
-            if (ri >= GUI_MAX_TEXT_BUF - 1) return hajimu_number(-1);
             result[ri++] = tb->buf[i];
             i++;
         }
     }
     result[ri] = '\0';
-    snprintf(tb->buf, GUI_MAX_TEXT_BUF, "%s", result);
+    if (!gui_text_reserve(tb, ri + 1)) { free(result); return hajimu_number(-1); }
+    memcpy(tb->buf, result, (size_t)ri + 1);
+    free(result);
     tb->len = ri;
     gui_text_collapse(tb, tb->cursor);
     return hajimu_number(count);
@@ -15396,12 +15447,17 @@ static Value fn_input_formatter(int argc, Value *argv) {
     /* 未確定文書や非対話領域は書き換えない。容量不足も本文ごと保持する。 */
     if (g_cur->closing || g_disabled || g_cur->composition[0] ||
         (g_cur->modal_title[0] && !g_cur->modal_entered)) return hajimu_null();
-    char digits[GUI_MAX_TEXT_BUF], formatted[GUI_MAX_TEXT_BUF];
+    char *digits = malloc((size_t)tb->len + 1);
+    if (!digits) return hajimu_null();
     int count = 0;
     for (int i = 0; i < tb->len; i++)
         if (tb->buf[i] >= '0' && tb->buf[i] <= '9') digits[count++] = tb->buf[i];
     int required = count + (currency && count ? (count - 1) / 3 : 0);
-    if (required >= GUI_MAX_TEXT_BUF) return hajimu_null();
+    if (required >= GUI_TEXT_LIMIT) { free(digits); return hajimu_null(); }
+    char *formatted = malloc((size_t)required + 1);
+    if (!formatted || !gui_text_reserve(tb, required + 1)) {
+        free(digits); free(formatted); return hajimu_null();
+    }
     int written = 0;
     for (int i = 0; i < count; i++) {
         if (currency && i && (count - i) % 3 == 0) formatted[written++] = ',';
@@ -15414,6 +15470,7 @@ static Value fn_input_formatter(int argc, Value *argv) {
         gui_text_collapse(tb, tb->cursor);
         tb->scroll_y = 0;
     }
+    free(digits); free(formatted);
     return hajimu_null();
 }
 
@@ -25823,7 +25880,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.32.0",
+        .version        = "14.33.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,

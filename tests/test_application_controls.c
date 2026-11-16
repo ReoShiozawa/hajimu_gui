@@ -1,4 +1,7 @@
 #include <sys/wait.h>
+#include <stdlib.h>
+static void *control_text_realloc(void *buffer, size_t size);
+#define HJP_GUI_TEXT_REALLOC control_text_realloc
 static pid_t control_waitpid(pid_t pid, int *status, int flags);
 static int control_kill(pid_t group, int signal);
 #define HJP_TASK_WAITPID control_waitpid
@@ -13,6 +16,10 @@ static int deferred_polls;
 static GuiApp *closing_capture_app;
 static bool closing_capture_requested;
 static int control_kill_error;
+static bool control_text_allocation_failure;
+static void *control_text_realloc(void *buffer, size_t size) {
+    return control_text_allocation_failure ? NULL : realloc(buffer, size);
+}
 static int control_kill(pid_t group, int signal) {
     if (control_kill_error) { errno = control_kill_error; return -1; }
     return kill(group, signal);
@@ -41,6 +48,23 @@ static void frame(bool down, bool released, int mx) {
     g_cur->in.released = released;
     g_next_widget_w = 0;
     hjpBeginFrame(g_cur->vg, 640, 400, 1);
+}
+
+static GuiTextBuf control_text_buffer(const char *text) {
+    GuiTextBuf tb = {0};
+    int length = (int)strlen(text);
+    assert(gui_text_reserve(&tb, length + 1));
+    memcpy(tb.buf, text, (size_t)length + 1);
+    tb.len = tb.cursor = length;
+    return tb;
+}
+
+static void control_text_restore(GuiTextBuf *tb, const GuiTextBuf *source) {
+    free(tb->buf);
+    *tb = *source;
+    tb->buf = NULL; tb->capacity = 0;
+    assert(gui_text_reserve(tb, source->len + 1));
+    memcpy(tb->buf, source->buf, (size_t)source->len + 1);
 }
 
 static int ime_notifications;
@@ -119,7 +143,8 @@ static void check_textarea_layout(void) {
     assert(rows[0].next == rows[1].start);
     assert(gui_textarea_caret_row(rows, count, rows[1].start) == 1);
     assert(gui_textarea_caret_row(rows, count, wrapped + strlen(wrapped)) == count - 1);
-    GuiTextBuf buffer = {.len = 6, .cursor = 3};
+    GuiTextBuf buffer = control_text_buffer("前後");
+    buffer.cursor = 3;
     memcpy(buffer.buf, "前後", 7);
     char display[GUI_MAX_TEXT_BUF + 128];
     int caret = gui_text_display(&buffer, "日本語", display);
@@ -140,6 +165,14 @@ static void check_textarea_layout(void) {
     frame(false, false, 500);
     fn_textarea(3, args);
     assert(tb->scroll_y == 0);
+    frame(false, false, 20);
+    g_cur->in.my = 50; g_cur->in.scroll_y = -1;
+    fn_textarea(3, args);
+    assert(tb->scroll_y > 0 && g_cur->in.scroll_y == 0);
+    float wheel_scroll = tb->scroll_y;
+    frame(false, false, 500);
+    fn_textarea(3, args);
+    assert(tb->scroll_y == wheel_scroll);
     gui_ime_update(g_cur, "未確定");
     frame(false, false, 500);
     fn_textarea(3, args);
@@ -161,6 +194,7 @@ static void check_textarea_layout(void) {
     assert(tb->len == saved_len && g_cur->in.key_return);
     gui_ime_update(g_cur, "");
     g_cur->focused = 0;
+    free(buffer.buf);
     hjpCancelFrame(vg);
 }
 
@@ -172,12 +206,13 @@ static void check_text_formatting(void) {
     assert(!strcmp(tb->buf, "1,234,567") && tb->len == 9 && tb->cursor <= tb->len);
     fn_input_formatter(2, args);
     assert(!strcmp(tb->buf, "1,234,567") && tb->len == 9);
-    memset(tb->buf, '9', GUI_MAX_TEXT_BUF - 1);
-    tb->buf[GUI_MAX_TEXT_BUF - 1] = '\0';
-    tb->len = tb->cursor = GUI_MAX_TEXT_BUF - 1;
+    assert(gui_text_reserve(tb, GUI_TEXT_LIMIT));
+    memset(tb->buf, '9', GUI_TEXT_LIMIT - 1);
+    tb->buf[GUI_TEXT_LIMIT - 1] = '\0';
+    tb->len = tb->cursor = GUI_TEXT_LIMIT - 1;
     tb->sel_start = 1; tb->sel_end = tb->len;
     fn_input_formatter(2, args);
-    assert(tb->len == GUI_MAX_TEXT_BUF - 1 && tb->cursor == tb->len && tb->sel_start == 1);
+    assert(tb->len == GUI_TEXT_LIMIT - 1 && tb->cursor == tb->len && tb->sel_start == 1);
     for (int i = 0; i < tb->len; i++) assert(tb->buf[i] == '9');
     strcpy(tb->buf, "日本123円"); tb->len = tb->cursor = (int)strlen(tb->buf);
     tb->sel_start = 0; tb->sel_end = tb->len;
@@ -201,7 +236,7 @@ static void check_text_formatting(void) {
 }
 
 static void check_text_selection(void) {
-    GuiTextBuf tb = {.len = 7, .cursor = 7};
+    GuiTextBuf tb = control_text_buffer("a日本");
     memcpy(tb.buf, "a日本", 8);
     g_cur->in = (GuiInput){.key_left = true, .mod_shift = true};
     gui_text_buf_process(&tb);
@@ -233,19 +268,20 @@ static void check_text_selection(void) {
     gui_text_buf_process(&tb);
     assert(tb.len == 0 && tb.cursor == 0);
 
-    memset(tb.buf, 'a', GUI_MAX_TEXT_BUF - 1);
-    tb.buf[GUI_MAX_TEXT_BUF - 1] = '\0';
-    tb.len = tb.cursor = GUI_MAX_TEXT_BUF - 1;
+    assert(gui_text_reserve(&tb, GUI_TEXT_LIMIT));
+    memset(tb.buf, 'a', GUI_TEXT_LIMIT - 1);
+    tb.buf[GUI_TEXT_LIMIT - 1] = '\0';
+    tb.len = tb.cursor = GUI_TEXT_LIMIT - 1;
     tb.sel_start = tb.sel_end = tb.cursor;
     assert(!gui_text_replace_selection(&tb, "語", 3));
     tb.sel_start = tb.cursor - 3;
     tb.sel_end = tb.cursor;
     assert(gui_text_replace_selection(&tb, "語", 3));
-    assert(tb.len == GUI_MAX_TEXT_BUF - 1 && !strcmp(tb.buf + tb.len - 3, "語"));
+    assert(tb.len == GUI_TEXT_LIMIT - 1 && !strcmp(tb.buf + tb.len - 3, "語"));
     tb.sel_start = 0; tb.sel_end = tb.len;
     g_cur->in = (GuiInput){.key_x = true};
     gui_text_buf_edit(&tb, false);
-    assert(tb.len == GUI_MAX_TEXT_BUF - 1);
+    assert(tb.len == GUI_TEXT_LIMIT - 1);
 
     Value label = hajimu_string("selection-api");
     GuiTextBuf *field = gui_get_text_buf(gui_hash(label.string.data), "a日本b");
@@ -265,14 +301,67 @@ static void check_text_selection(void) {
     assert(fn_text_find_replace(3, replace).number == 1);
     assert(field->len == 5 && !strcmp(field->buf, "a語b"));
     assert(field->cursor == 4 && field->sel_start == field->sel_end);
-    char too_large[GUI_MAX_TEXT_BUF + 1];
-    memset(too_large, 'a', GUI_MAX_TEXT_BUF);
-    too_large[GUI_MAX_TEXT_BUF] = '\0';
+    char *too_large = malloc(GUI_TEXT_LIMIT + 1);
+    assert(too_large);
+    memset(too_large, 'a', GUI_TEXT_LIMIT);
+    too_large[GUI_TEXT_LIMIT] = '\0';
     replace[1] = hajimu_string("語");
     replace[2] = hajimu_string(too_large);
     assert(fn_text_find_replace(3, replace).number == -1);
     assert(field->len == 5 && !strcmp(field->buf, "a語b"));
+    free(too_large); free(tb.buf);
     g_cur->in = (GuiInput){0};
+}
+
+static void check_long_text(void) {
+    frame(false, false, 500);
+    char *text = malloc(24001);
+    assert(text);
+    for (int i = 0; i < 2000; i++) memcpy(text + i * 12, "日本語の", 12);
+    text[24000] = '\0';
+    GuiTextBuf *tb = gui_get_text_buf(gui_hash("long-text"), text);
+    assert(tb && tb->len == 24000 && !strcmp(tb->buf, text) && tb->capacity >= 24001);
+    Value args[] = {hajimu_string("long-text"), hajimu_string(text), hajimu_number(4)};
+    Value result = fn_textarea(3, args);
+    assert(result.type == VALUE_STRING && !strcmp(result.string.data, text));
+    frame(false, false, 500);
+    g_cur->focused = tb->id;
+    gui_text_collapse(tb, tb->len);
+    g_cur->in = (GuiInput){.key_backspace = true};
+    gui_text_buf_process(tb);
+    assert(tb->len == 23997 && tb->cursor == tb->len);
+    gui_text_collapse(tb, 0);
+    assert(gui_text_replace_selection(tb, "先頭\n", 7));
+    assert(tb->len == 24004 && !strncmp(tb->buf, "先頭\n日本語", 16));
+    Value replace[] = {args[0], hajimu_string("日本語の"), hajimu_string("日本語の文章")};
+    assert(fn_text_find_replace(3, replace).number == 1999);
+    assert(tb->len > 32000 && strlen(tb->buf) == (size_t)tb->len);
+    /* 実クリップボードは元へ戻し、長い貼付けと選択置換を検査する。 */
+    char *clipboard = hjp_get_clipboard_text();
+    hjp_set_clipboard_text(text);
+    tb->sel_start = 0; tb->sel_end = tb->cursor = tb->len;
+    g_cur->in = (GuiInput){.key_v = true};
+    gui_text_buf_process(tb);
+    hjp_set_clipboard_text(clipboard ? clipboard : "");
+    hjp_free(clipboard);
+    assert(tb->len == 24000 && !strcmp(tb->buf, text));
+    GuiTextBuf small = control_text_buffer("保持");
+    small.sel_start = 0; small.sel_end = small.cursor = small.len;
+    control_text_allocation_failure = true;
+    assert(!gui_text_replace_selection(&small, text, 24000));
+    assert(!strcmp(small.buf, "保持") && small.cursor == 6 && small.sel_start == 0);
+    int slots = g_cur->text_buf_count;
+    assert(!gui_get_text_buf(gui_hash("allocation-failure"), text) && g_cur->text_buf_count == slots);
+    control_text_allocation_failure = false;
+    char *oversized = malloc(GUI_TEXT_LIMIT + 1);
+    assert(oversized);
+    memset(oversized, 'x', GUI_TEXT_LIMIT); oversized[GUI_TEXT_LIMIT] = '\0';
+    assert(!gui_text_replace_selection(&small, oversized, GUI_TEXT_LIMIT));
+    assert(!strcmp(small.buf, "保持") && small.sel_start == 0);
+    assert(!gui_get_text_buf(gui_hash("oversized-initial"), oversized));
+    free(oversized); free(small.buf); free(text);
+    g_cur->in = (GuiInput){0}; g_cur->focused = 0;
+    hjpCancelFrame(g_cur->vg);
 }
 
 static void check_grapheme_editing(void) {
@@ -286,24 +375,25 @@ static void check_grapheme_editing(void) {
     frame(false, false, 500);
     Hjpcontext *vg = g_cur->vg;
     for (size_t i = 0; i < sizeof(clusters) / sizeof(clusters[0]); i++) {
-        GuiTextBuf original = {0};
-        snprintf(original.buf, sizeof(original.buf), "A%sZ", clusters[i]);
+        GuiTextBuf original = control_text_buffer("");
+        snprintf(original.buf, original.capacity, "A%sZ", clusters[i]);
         original.len = (int)strlen(original.buf); original.cursor = original.len - 1;
-        GuiTextBuf tb = original;
+        GuiTextBuf tb = {0};
+        control_text_restore(&tb, &original);
         g_cur->in = (GuiInput){.key_left = true}; gui_text_buf_process(&tb);
         assert(tb.cursor == 1);
         g_cur->in = (GuiInput){.key_right = true, .mod_shift = true}; gui_text_buf_process(&tb);
         assert(tb.sel_start == 1 && tb.sel_end == original.len - 1);
         assert(gui_text_replace_selection(&tb, "X", 1) && !strcmp(tb.buf, "AXZ"));
-        tb = original;
+        control_text_restore(&tb, &original);
         g_cur->in = (GuiInput){.key_backspace = true}; gui_text_buf_process(&tb);
         assert(!strcmp(tb.buf, "AZ") && tb.cursor == 1);
-        tb = original; tb.cursor = 1;
+        control_text_restore(&tb, &original); tb.cursor = 1;
         g_cur->in = (GuiInput){.key_delete = true}; gui_text_buf_process(&tb);
         assert(!strcmp(tb.buf, "AZ") && tb.cursor == 1);
         /* 公開APIなどが結合列の内部へ位置指定した後の通常削除も分断しない。 */
         for (int backward = 0; backward < 2; backward++) {
-            tb = original; tb.cursor = utf8_next(tb.buf, 1, tb.len);
+            control_text_restore(&tb, &original); tb.cursor = utf8_next(tb.buf, 1, tb.len);
             g_cur->in = (GuiInput){.key_delete = !backward, .key_backspace = backward};
             gui_text_buf_process(&tb);
             assert(!strcmp(tb.buf, "AZ") && tb.cursor == 1);
@@ -323,6 +413,7 @@ static void check_grapheme_editing(void) {
             assert(hjp_grapheme_floor(original.buf, original.len, (int)(rows[row].next - original.buf)) == rows[row].next - original.buf);
         }
         if (!strcmp(clusters[i], "\r\n")) assert(rows[0].next == original.buf + 3);
+        free(tb.buf); free(original.buf);
     }
     Value label = hajimu_string("grapheme-codepoint-api");
     GuiTextBuf *field = gui_get_text_buf(gui_hash(label.string.data), "e\xcc\x81Z");
@@ -330,11 +421,13 @@ static void check_grapheme_editing(void) {
     assert(fn_text_cursor_pos(2, pos).number == 1 && field->cursor == 1);
     Value selection[] = {label, hajimu_number(1), hajimu_number(2)};
     assert(fn_text_select_range(3, selection).boolean && field->sel_start == 1 && field->sel_end == 3);
-    GuiTextBuf full = {0};
-    memset(full.buf, 'a', GUI_MAX_TEXT_BUF - 2);
-    full.len = full.cursor = GUI_MAX_TEXT_BUF - 2;
+    GuiTextBuf full = control_text_buffer("");
+    assert(gui_text_reserve(&full, GUI_TEXT_LIMIT));
+    memset(full.buf, 'a', GUI_TEXT_LIMIT - 2);
+    full.buf[GUI_TEXT_LIMIT - 2] = '\0';
+    full.len = full.cursor = GUI_TEXT_LIMIT - 2;
     assert(!gui_text_replace_selection(&full, "e\xcc\x81", 3));
-    assert(full.len == GUI_MAX_TEXT_BUF - 2);
+    assert(full.len == GUI_TEXT_LIMIT - 2);
     full.sel_start = full.cursor - 1; full.sel_end = full.cursor;
     assert(!gui_text_replace_selection(&full, "e\xcc\x81", 3));
     assert(full.sel_end - full.sel_start == 1 && full.buf[full.sel_start] == 'a');
@@ -342,11 +435,13 @@ static void check_grapheme_editing(void) {
     memset(initial, 'a', GUI_MAX_TEXT_BUF - 2);
     strcpy(initial + GUI_MAX_TEXT_BUF - 2, "e\xcc\x81Z");
     GuiTextBuf *clipped = gui_get_text_buf(gui_hash("grapheme-capacity"), initial);
-    assert(clipped->len == GUI_MAX_TEXT_BUF - 2);
-    GuiTextBuf joined = {.buf = "e\xcc\x81", .len = 3, .cursor = 1};
+    assert(clipped->len == (int)strlen(initial) && !strcmp(clipped->buf, initial));
+    GuiTextBuf joined = control_text_buffer("e\xcc\x81");
+    joined.cursor = 1;
     g_cur->in = (GuiInput){.text_input_len = 1, .text_input = "a"};
     gui_text_buf_process(&joined);
     assert(!strcmp(joined.buf, "ea\xcc\x81") && joined.cursor == 4);
+    free(full.buf); free(joined.buf);
     g_cur->in = (GuiInput){0};
     hjpCancelFrame(vg);
 }
@@ -363,7 +458,8 @@ static void check_text_navigation(void) {
     assert(gui_text_hit_offset(vg, text, text + 8, first + (second - first) * 0.25f, false) == 1);
     assert(gui_text_hit_offset(vg, text, text + 8, first + (second - first) * 0.75f, false) == 4);
     assert(gui_text_hit_offset(vg, text, text + 8, 10000, false) == 8);
-    GuiTextBuf tb = {.len = 14, .cursor = 5};
+    GuiTextBuf tb = control_text_buffer("abcde\nx\nabcde");
+    tb.cursor = 5;
     memcpy(tb.buf, "abcde\nx\nabcde", 14);
     tb.len = (int)strlen(tb.buf);
     uint32_t id = 123456;
@@ -411,6 +507,7 @@ static void check_text_navigation(void) {
     assert(modifiers.mod_shift);
     gui_input_modifiers(&modifiers, 0);
     assert(!modifiers.mod_shift && !modifiers.mod_ctrl);
+    free(tb.buf);
     g_cur->focused = 0;
     g_cur->in = (GuiInput){0};
     hjpCancelFrame(vg);
@@ -1197,6 +1294,7 @@ int main(void) {
     check_textarea_layout();
     check_text_formatting();
     check_text_selection();
+    check_long_text();
     check_grapheme_editing();
     check_text_navigation();
     check_document_edits();
@@ -1215,7 +1313,7 @@ int main(void) {
     memset(oversized, 'a', GUI_MAX_TEXT_BUF - 2);
     memcpy(oversized + GUI_MAX_TEXT_BUF - 2, "日本", 7);
     GuiTextBuf *limited = gui_get_text_buf(gui_hash("utf8-initial-limit"), oversized);
-    assert(limited->len == GUI_MAX_TEXT_BUF - 2);
+    assert(limited->len == (int)strlen(oversized) && !strcmp(limited->buf, oversized));
     assert(fn_focus_traversal(0, NULL).boolean);
     frame(false, false, 500);
     gui_nav_begin();
@@ -1345,7 +1443,7 @@ int main(void) {
     gui_nav_end();
     g_cur->nav_enabled = false;
     frame(false, false, 500);
-    GuiTextBuf composing = {0};
+    GuiTextBuf composing = control_text_buffer("");
     strcpy(composing.buf, "kept");
     composing.len = composing.cursor = 4;
     strcpy(g_cur->composition, "変換中");
@@ -1358,11 +1456,15 @@ int main(void) {
     g_cur->in.text_input_len = 9;
     gui_text_buf_process(&composing);
     assert(strcmp(composing.buf, "kept日本語") == 0);
-    memset(&composing, 0, sizeof(composing));
-    memset(composing.buf, 'a', GUI_MAX_TEXT_BUF - 3);
-    composing.len = composing.cursor = GUI_MAX_TEXT_BUF - 3;
+    free(composing.buf);
+    composing = control_text_buffer("");
+    assert(gui_text_reserve(&composing, GUI_TEXT_LIMIT));
+    memset(composing.buf, 'a', GUI_TEXT_LIMIT - 3);
+    composing.buf[GUI_TEXT_LIMIT - 3] = '\0';
+    composing.len = composing.cursor = GUI_TEXT_LIMIT - 3;
     gui_text_buf_process(&composing);
-    assert(composing.len == GUI_MAX_TEXT_BUF - 3);
+    assert(composing.len == GUI_TEXT_LIMIT - 3);
+    free(composing.buf);
     *gui_list_scroll(1) = 80;
     assert(*gui_list_scroll(65) == 0);
     *gui_list_scroll(65) = 160;
