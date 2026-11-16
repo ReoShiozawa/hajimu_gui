@@ -166,9 +166,10 @@ int main(int argc, char **argv) {
                     [view insertText:commit replacementRange:NSMakeRange(NSNotFound, 0)];
                     bytes = 0;
                     while (hjp__popEvent(&e)) if (e.type == HJP_EVENT_TEXTREPLACE) {
-                        assert([[NSString alloc] initWithUTF8String:e.edit.text] != nil);
-                        assert(e.edit.start == (int)(1 + bytes) && e.edit.end == e.edit.start);
-                        bytes += strlen(e.edit.text);
+                        assert([[NSString alloc] initWithUTF8String:hjp_document_text(&e)] != nil);
+                        assert(e.edit.start == 1 && e.edit.end == 1);
+                        bytes += strlen(hjp_document_text(&e));
+                        hjp_native_dispose(&e);
                     }
                     assert(bytes == strlen(commit.UTF8String));
                     hjp_set_text_input_context(win, 902, "AB", 1, 1, 2048);
@@ -186,8 +187,9 @@ int main(int argc, char **argv) {
                     while (hjp__popEvent(&e)) {}
                     hjp_set_text_input_context(win, 903, "日本", 0, 3, 8);
                     [view insertText:@"語語" replacementRange:NSMakeRange(NSNotFound, 0)];
-                    assert([view.inputDocument isEqualToString:@"語本"]);
-                    while (hjp__popEvent(&e)) {}
+                    assert([view.inputDocument isEqualToString:@"日本"]);
+                    assert(NSEqualRanges(view.documentSelection, NSMakeRange(0, 1)));
+                    assert(!hjp__popEvent(&e));
                     hjp_set_text_input_context(win, 0, "", 0, 0, 0);
                     assert(!view.documentID && view.inputDocument.length == 0);
                     hjp_accessibility_begin(win);
@@ -240,8 +242,9 @@ int main(int argc, char **argv) {
                     while (hjp__popEvent(&e)) {
                         assert(e.type == HJP_EVENT_ACCESSIBILITY_TEXTREPLACE);
                         assert(e.edit.start == (int)bytes && e.edit.end == (bytes ? (int)bytes : -1));
-                        assert([[NSString alloc] initWithUTF8String:e.edit.text] != nil);
-                        bytes += strlen(e.edit.text);
+                        assert([[NSString alloc] initWithUTF8String:hjp_document_text(&e)] != nil);
+                        bytes += strlen(hjp_document_text(&e));
+                        hjp_native_dispose(&e);
                     }
                     assert(bytes == strlen(commit.UTF8String));
                     hjp_accessibility_begin(win);
@@ -332,6 +335,24 @@ int main(int argc, char **argv) {
                     assert(hjp__popEvent(&e) && e.type == HJP_EVENT_ACCESSIBILITY_TEXTSELECTION && e.edit.end == longBytes);
                     assert(view.documentID == 950 && [view.inputDocument isEqualToString:longDocument]);
                     while (hjp__popEvent(&e)) hjp_native_dispose(&e);
+                    NSString *largeCommit = [@"" stringByPaddingToLength:30000 withString:@"日本語" startingAtIndex:0];
+                    [longField setAccessibilityValue:largeCommit];
+                    assert(hjp__popEvent(&e) && e.type == HJP_EVENT_ACCESSIBILITY_FOCUS);
+                    assert(hjp__popEvent(&e) && e.type == HJP_EVENT_ACCESSIBILITY_TEXTREPLACE);
+                    assert(e.edit.end == -1 && !strcmp(hjp_document_text(&e), largeCommit.UTF8String));
+                    hjp_native_dispose(&e);
+                    assert(!hjp__popEvent(&e));
+                    hjp_set_text_input_context(win, 950, "AB", 0, 2, HJP_TEXT_DOCUMENT_LIMIT);
+                    [view insertText:largeCommit replacementRange:NSMakeRange(NSNotFound, 0)];
+                    assert([view.inputDocument isEqualToString:largeCommit]);
+                    assert(hjp__popEvent(&e) && e.type == HJP_EVENT_TEXTREPLACE);
+                    assert(e.edit.start == 0 && e.edit.end == 2 && !strcmp(hjp_document_text(&e), largeCommit.UTF8String));
+                    hjp_native_dispose(&e);
+                    assert(!hjp__popEvent(&e));
+                    hjp_set_text_input_context(win, 950, "AB", 0, 2, 2048);
+                    [view insertText:largeCommit replacementRange:NSMakeRange(NSNotFound, 0)];
+                    assert([view.inputDocument isEqualToString:@"AB"] && NSEqualRanges(view.documentSelection, NSMakeRange(0, 2)));
+                    assert(!hjp__popEvent(&e));
                     hjp_set_text_input_context(win, 901, "AB", 1, 1, 2048);
                     [view setMarkedText:@"に" selectedRange:NSMakeRange(1, 0)
                         replacementRange:NSMakeRange(NSNotFound, 0)];

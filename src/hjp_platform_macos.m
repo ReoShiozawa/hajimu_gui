@@ -374,30 +374,15 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
     if (![self editableSnapshot] || ![value isKindOfClass:NSString.class]) return;
     NSData *data = [value dataUsingEncoding:NSUTF8StringEncoding];
     if (!data || data.length >= HJP_TEXT_DOCUMENT_LIMIT) return;
-    const unsigned char *bytes = data.bytes;
-    size_t chunks = 0;
-    for (size_t offset = 0; offset < data.length; chunks++) {
-        size_t n = MIN(data.length - offset, (size_t)127);
-        while (n && offset + n < data.length && (bytes[offset + n] & 0xc0) == 0x80) n--;
-        offset += n;
-    }
-    if (!chunks) chunks = 1;
-    int freeEvents = (int)hjp_native_free(&g_hjp.queue);
-    if (chunks + 1 > (size_t)freeEvents || ![self queueFocus]) return;
-    size_t offset = 0;
-    do {
-        HjpEvent event = {0};
-        event.type = HJP_EVENT_ACCESSIBILITY_TEXTREPLACE;
-        event.edit.window = self.ownerView.ownerWindow;
-        event.edit.generation = self.ownerView.ownerWindow->windowId;
-        event.edit.id = self.widgetID;
-        event.edit.start = (int)offset; event.edit.end = offset ? (int)offset : -1;
-        size_t n = MIN(data.length - offset, sizeof(event.edit.text) - 1);
-        while (n && offset + n < data.length && (bytes[offset + n] & 0xc0) == 0x80) n--;
-        if (n) memcpy(event.edit.text, bytes + offset, n);
-        hjp__pushEvent(&event);
-        offset += n;
-    } while (offset < data.length);
+    HjpEvent event = {0};
+    event.type = HJP_EVENT_ACCESSIBILITY_TEXTREPLACE;
+    event.edit.window = self.ownerView.ownerWindow;
+    event.edit.generation = self.ownerView.ownerWindow->windowId;
+    event.edit.id = self.widgetID;
+    event.edit.end = -1;
+    if (hjp_native_free(&g_hjp.queue) < 2 || !hjp_document_set_text(&event, [value UTF8String])) return;
+    if (![self queueFocus]) { hjp_document_dispose(&event); return; }
+    if (!hjp__pushEvent(&event)) return;
     hjp_set_text_input_context(self.ownerView.ownerWindow, self.widgetID, [value UTF8String], (int)data.length, (int)data.length, HJP_TEXT_DOCUMENT_LIMIT);
 }
 - (void)setAccessibilitySelectedTextRange:(NSRange)range {
@@ -595,37 +580,19 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
     if (!prefix || !removed) return NO; /* UTF-16サロゲートの途中を拒否する。 */
     const char *utf8 = text.UTF8String;
     if (!utf8) return NO;
-    size_t remaining = strlen(utf8), offset = 0;
-    size_t required = 1;
-    if (!selectionOnly && remaining) {
-        required = 0;
-        for (size_t position = 0; position < remaining; required++) {
-            size_t n = MIN(remaining - position, (size_t)127);
-            while (n && ((unsigned char)utf8[position + n] & 0xc0) == 0x80) n--;
-            position += n;
-        }
-    }
     int freeEvents = (int)hjp_native_free(&g_hjp.queue);
     /* 後続の未確定状態通知も含め、置換の一部だけを配送しない。 */
-    if (required + 1 > (size_t)freeEvents) return NO;
-    do {
-        HjpEvent event = {0};
-        event.type = selectionOnly ? HJP_EVENT_TEXTSELECTION : HJP_EVENT_TEXTREPLACE;
-        event.edit.window = self.ownerWindow;
-        event.edit.generation = self.ownerWindow->windowId;
-        event.edit.id = self.documentID;
-        event.edit.start = (int)(prefix.length + offset);
-        event.edit.end = event.edit.start + (offset ? 0 : (int)removed.length);
-        event.edit.cursor = event.edit.end;
-        size_t n = MIN(remaining, sizeof(event.edit.text) - 1);
-        while (n && ((unsigned char)utf8[offset + n] & 0xc0) == 0x80) n--;
-        if (n) memcpy(event.edit.text, utf8 + offset, n);
-        hjp__pushEvent(&event);
-        offset += n;
-        remaining -= n;
-        if (selectionOnly) break;
-    } while (remaining);
-    return YES;
+    if (freeEvents < 2) return NO;
+    HjpEvent event = {0};
+    event.type = selectionOnly ? HJP_EVENT_TEXTSELECTION : HJP_EVENT_TEXTREPLACE;
+    event.edit.window = self.ownerWindow;
+    event.edit.generation = self.ownerWindow->windowId;
+    event.edit.id = self.documentID;
+    event.edit.start = (int)prefix.length;
+    event.edit.end = event.edit.start + (int)removed.length;
+    event.edit.cursor = event.edit.end;
+    if (!selectionOnly && !hjp_document_set_text(&event, utf8)) return NO;
+    return hjp__pushEvent(&event);
 }
 
 - (void)insertText:(id)aString replacementRange:(NSRange)replacementRange {
@@ -640,10 +607,7 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
         NSUInteger available = (NSUInteger)MAX(0, self.documentCapacity - 1) > retained ? self.documentCapacity - 1 - retained : 0;
         const char *bytes = str.UTF8String;
         if (!bytes) return;
-        size_t n = MIN(strlen(bytes), available);
-        while (n && ((unsigned char)bytes[n] & 0xc0) == 0x80) n--;
-        if (str.length && !n) { [self clearComposition]; return; }
-        str = [[NSString alloc] initWithBytes:bytes length:n encoding:NSUTF8StringEncoding];
+        if (strlen(bytes) > available) return;
         if (![self emitDocumentEdit:range text:str selectionOnly:NO]) return;
         self.inputDocument = [document stringByReplacingCharactersInRange:range withString:str];
         self.documentSelection = NSMakeRange(range.location + str.length, 0);

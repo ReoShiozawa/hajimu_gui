@@ -1,6 +1,7 @@
 #ifndef HJP_EVENT_QUEUE_H
 #define HJP_EVENT_QUEUE_H
 #include "hjp_platform.h"
+#include "hjp_document_event.h"
 #include <string.h>
 
 #define HJP_DEFERRED_EVENTS 64
@@ -12,6 +13,7 @@ typedef struct {
 } HjpEventQueue;
 
 static void hjp_event_dispose(HjpEvent *event) {
+    hjp_document_dispose(event);
     if (event->type == HJP_EVENT_DROPFILE && event->drop.file) hjp_free(event->drop.file);
     *event = (HjpEvent){0};
 }

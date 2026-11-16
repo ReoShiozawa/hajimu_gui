@@ -196,6 +196,7 @@ typedef struct {
             int generation;
             int start, end, cursor; /* 確定本文上のUTF-8バイト範囲 */
             char text[128];
+            char *owned_text; /* 長い置換の所有文字列。イベント破棄時に解放 */
         } edit;
         HjpDropEvent         drop;
     };

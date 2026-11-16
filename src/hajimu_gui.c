@@ -2997,7 +2997,8 @@ static bool gui_apply_document_event(GuiApp *app, const HjpEvent *event) {
             tb->preferred_x_valid = false;
             return true;
         }
-        if (gui_text_replace_selection(tb, event->edit.text, (int)strlen(event->edit.text))) return true;
+        const char *text = hjp_document_text(event);
+        if (gui_text_replace_selection(tb, text, (int)strlen(text))) return true;
         tb->sel_start = previous_start; tb->sel_end = previous_end; tb->cursor = previous_cursor;
         return false;
     }
@@ -25880,7 +25881,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.33.0",
+        .version        = "14.34.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,

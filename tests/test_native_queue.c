@@ -83,5 +83,33 @@ int main(void) {
         assert(hjp_native_register(&q, (HjpWindow *)&owners[i], (int)i + 1));
     assert(!hjp_native_register(&q, (HjpWindow *)&owners[HJP_NATIVE_WINDOWS], 100));
     hjp_native_clear(&q);
+    assert(hjp_native_register(&q, (HjpWindow *)&owners[0], 1));
+    char long_text[8192];
+    memset(long_text, 'x', sizeof(long_text) - 1); long_text[sizeof(long_text) - 1] = '\0';
+    for (int i = 0; i < 1000; i++) {
+        event = input(0, HJP_EVENT_TEXTREPLACE);
+        assert(hjp_document_set_text(&event, long_text));
+        assert(hjp_native_push(&q, &event));
+        assert(hjp_native_pop(&q, &result) && !strcmp(hjp_document_text(&result), long_text));
+        hjp_native_dispose(&result);
+    }
+    event = input(0, HJP_EVENT_TEXTREPLACE);
+    assert(hjp_document_set_text(&event, long_text));
+    assert(hjp_native_push(&q, &event));
+    hjp_native_unregister(&q, (HjpWindow *)&owners[0]);
+    assert(!hjp_native_pop(&q, &result));
+    event = input(0, HJP_EVENT_TEXTREPLACE);
+    assert(hjp_document_set_text(&event, long_text));
+    assert(!hjp_native_push(&q, &event));
+    hjp_native_clear(&q);
+    assert(hjp_native_register(&q, (HjpWindow *)&owners[0], 1));
+    for (unsigned i = 0; i < HJP_NATIVE_EVENTS; i++) {
+        event = input(0, HJP_EVENT_TEXTREPLACE);
+        assert(hjp_document_set_text(&event, long_text));
+        assert(hjp_native_push(&q, &event) == (i < HJP_NATIVE_EVENTS - 1));
+    }
+    assert(hjp_native_pop(&q, &result) && result.type == HJP_EVENT_INPUT_RESET);
+    assert(!hjp_native_pop(&q, &result));
+    hjp_native_clear(&q);
     puts("native queue passed: 10000 wraps, per-window reset/loss, close/resize retention, ownership, generations, bounded registration");
 }
