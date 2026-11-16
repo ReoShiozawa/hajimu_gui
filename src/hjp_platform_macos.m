@@ -78,7 +78,7 @@ static bool hjp__pushEvent(HjpEvent *e) {
     return hjp_native_push(&g_hjp.queue, e);
 }
 static void hjp__pushWindowEvent(HjpWindow *window, HjpEvent *event) {
-    if (!window) { if (event->type == HJP_EVENT_DROPFILE) free(event->drop.file); return; }
+    if (!window) { hjp_native_dispose(event); return; }
     event->source.window = window;
     event->source.generation = window->windowId;
     hjp__pushEvent(event);
@@ -678,24 +678,21 @@ static int hjp__macKeyToScancode(unsigned short keyCode) {
 - (void)setMarkedText:(id)aString selectedRange:(NSRange)selectedRange replacementRange:(NSRange)replacementRange {
     NSRange range = self.documentID ? [self committedRange:replacementRange] : NSMakeRange(0, 0);
     if (range.location == NSNotFound) return;
-    if (self.documentID && ![self emitDocumentEdit:range text:@"" selectionOnly:YES]) return;
+    NSString *next = [aString isKindOfClass:[NSAttributedString class]] ? [aString string] : aString;
+    if (![next isKindOfClass:NSString.class]) return;
+    HjpEvent e = {0}; e.type = HJP_EVENT_TEXTEDITING;
+    if (!hjp_composition_set_text(&e, next.UTF8String)) return;
+    if (self.documentID && ![self emitDocumentEdit:range text:@"" selectionOnly:YES]) {
+        hjp_document_dispose(&e); return;
+    }
     self.compositionBase = range;
     self.documentSelection = range;
     self.documentAnchor = range.location;
     self.documentCursor = NSMaxRange(range);
-    self.composition = [aString isKindOfClass:[NSAttributedString class]] ? [aString string] : aString;
+    self.composition = next;
     NSUInteger length = self.composition.length;
     NSUInteger start = MIN(selectedRange.location, length);
     self.compositionSelection = NSMakeRange(start, MIN(selectedRange.length, length - start));
-    HjpEvent e = {0};
-    e.type = HJP_EVENT_TEXTEDITING;
-    const char *utf8 = self.composition.UTF8String;
-    size_t n = utf8 ? strlen(utf8) : 0;
-    if (n >= sizeof(e.text.text)) {
-        n = sizeof(e.text.text) - 1;
-        while (n && ((unsigned char)utf8[n] & 0xc0) == 0x80) n--;
-    }
-    if (n) memcpy(e.text.text, utf8, n);
     hjp__pushWindowEvent(self.ownerWindow, &e);
 }
 - (void)clearComposition {

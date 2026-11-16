@@ -119,6 +119,9 @@ static float g_custom_font_size = 0;
 #define GUI_COMBO_ITEM_H    fmaxf(28.0f, GUI_FONT_SIZE * 1.4f + 4.0f)
 #define GUI_MAX_TEXT_BUF   2048      /* 通常入力の初期容量 */
 #define GUI_TEXT_LIMIT    HJP_TEXT_DOCUMENT_LIMIT
+#ifndef HJP_GUI_TEXT_REALLOC
+#define HJP_GUI_TEXT_REALLOC realloc
+#endif
 #define GUI_MAX_TEXT_SLOTS   64      /* 同時テキスト入力数 */
 #define GUI_TEXTAREA_LINES   10      /* テキストエリア行数デフォルト */
 #define GUI_CURSOR_BLINK_MS 530      /* カーソル点滅間隔 */
@@ -348,7 +351,9 @@ typedef struct {
     int modal_count;
     uint64_t modal_epoch_counter;
     bool modal_focus_pending, modal_focus_validate;
-    char composition[128];
+    char composition_inline[128];
+    char *composition;
+    size_t composition_capacity;
     uint32_t text_drag;
     bool text_context_published;
     uint32_t text_context_id;
@@ -463,10 +468,22 @@ static void gui_input_modifiers(GuiInput *input, HjpKeymod modifiers) {
     input->mod_shift = (modifiers & HJP_KMOD_SHIFT) != 0;
 }
 static void gui_ime_update(GuiApp *app, const char *text) {
-    size_t length = strlen(text);
-    if (length >= sizeof(app->composition)) {
-        length = sizeof(app->composition) - 1;
-        while (length && ((unsigned char)text[length] & 0xc0) == 0x80) length--;
+    size_t length = strnlen(text, GUI_TEXT_LIMIT);
+    if (length >= GUI_TEXT_LIMIT) return;
+    if (!app->composition) {
+        app->composition = app->composition_inline;
+        app->composition_capacity = sizeof(app->composition_inline);
+    }
+    if (length + 1 > app->composition_capacity) {
+        bool local = app->composition == app->composition_inline;
+        size_t capacity = app->composition_capacity;
+        while (capacity < length + 1) capacity *= 2;
+        char *buffer = HJP_GUI_TEXT_REALLOC(local ? NULL : app->composition, capacity);
+        if (!buffer) return;
+        app->composition = buffer;
+        app->composition_capacity = capacity;
+        /* 再確保後の内容比較に、未初期化の新規バッファを使わない。 */
+        if (local) memcpy(buffer, app->composition_inline, sizeof(app->composition_inline));
     }
     if (strlen(app->composition) == length && !memcmp(app->composition, text, length)) return;
     memcpy(app->composition, text, length);
@@ -1408,6 +1425,8 @@ static Value fn_app_create(int argc, Value *argv) {
     /* アプリ構造体を初期化 */
     GuiApp *app = &g_apps[idx];
     memset(app, 0, sizeof(*app));
+    app->composition = app->composition_inline;
+    app->composition_capacity = sizeof(app->composition_inline);
     g_dialog_depth[idx] = 0;
     memset(g_dialog_scrolls[idx], 0, sizeof(g_dialog_scrolls[idx]));
     app->window     = win;
@@ -1562,7 +1581,7 @@ static Value fn_draw_loop(int argc, Value *argv) {
                 break;
             }
             case HJP_EVENT_TEXTEDITING:
-                gui_ime_update(app, ev.text.text);
+                gui_ime_update(app, hjp_composition_text(&ev));
                 break;
             case HJP_EVENT_TEXTREPLACE:
             case HJP_EVENT_TEXTSELECTION:
@@ -1897,6 +1916,10 @@ static Value fn_app_quit(int argc, Value *argv) {
     if (app->loop_active || g_cur == app) return hajimu_null();
     hjp_event_queue_clear(&app->events);
     gui_histories_close(app);
+    if (app->composition != app->composition_inline) free(app->composition);
+    app->composition = app->composition_inline;
+    app->composition_inline[0] = '\0';
+    app->composition_capacity = sizeof(app->composition_inline);
     for (int i = 0; i < app->text_buf_count; i++) free(app->text_bufs[i].buf);
     memset(app->text_bufs, 0, sizeof(app->text_bufs));
     app->text_buf_count = 0;
@@ -2826,10 +2849,6 @@ static int utf8_next(const char *s, int pos, int len) {
 }
 
 /* --- テキストバッファ管理 --- */
-#ifndef HJP_GUI_TEXT_REALLOC
-#define HJP_GUI_TEXT_REALLOC realloc
-#endif
-
 static bool gui_text_reserve(GuiTextBuf *tb, int required) {
     if (required < 1 || required > GUI_TEXT_LIMIT) return false;
     if (required <= tb->capacity) return true;
@@ -3244,7 +3263,7 @@ static Value fn_text_input(int argc, Value *argv) {
         }
     }
 
-    char *display = malloc((size_t)tb->len + sizeof(g_cur->composition) + 1);
+    char *display = malloc((size_t)tb->len + (focused ? strlen(g_cur->composition) : 0) + 1);
     if (!display) { hjpRestore(vg); gui_advance(row_h); return hajimu_string(tb->buf); }
     int visual_cursor = gui_text_display(tb, focused ? g_cur->composition : "", display);
     if (display[0]) {
@@ -3637,7 +3656,7 @@ static Value fn_textarea(int argc, Value *argv) {
     float ty = y + GUI_INPUT_PAD;
     float tw = fw - GUI_INPUT_PAD * 2;
 
-    int row_capacity = tb->len + (int)sizeof(g_cur->composition) + 1;
+    int row_capacity = tb->len + (focused ? (int)strlen(g_cur->composition) : 0) + 1;
     char *display = malloc((size_t)row_capacity);
     HjptextRow *rows = malloc((size_t)row_capacity * sizeof(*rows));
     if (!display || !rows) {
@@ -25881,7 +25900,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.34.0",
+        .version        = "14.35.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,

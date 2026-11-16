@@ -112,10 +112,18 @@ static void check_ime_notifications(void) {
     for (int i = 0; i < 100; i++) memcpy(long_text + i * 3, "あ", 3);
     long_text[300] = '\0';
     gui_ime_update(g_cur, long_text);
-    assert(strlen(g_cur->composition) == 126);
+    assert(!strcmp(g_cur->composition, long_text));
+    ime_expected = long_text;
+    assert(fn_ime_composition(1, &callback).boolean);
     uint64_t version = g_cur->composition_version;
     gui_ime_update(g_cur, long_text);
     assert(g_cur->composition_version == version);
+    char larger[601];
+    memset(larger, 'a', 600); larger[600] = '\0';
+    control_text_allocation_failure = true;
+    gui_ime_update(g_cur, larger);
+    control_text_allocation_failure = false;
+    assert(!strcmp(g_cur->composition, long_text) && g_cur->composition_version == version);
     gui_ime_update(g_cur, "");
     g_cur->composition_notified = g_cur->composition_version;
     GuiApp *app = g_cur;
@@ -311,6 +319,44 @@ static void check_text_selection(void) {
     assert(field->len == 5 && !strcmp(field->buf, "a語b"));
     free(too_large); free(tb.buf);
     g_cur->in = (GuiInput){0};
+}
+
+static void check_long_composition(void) {
+    frame(false, false, 500);
+    char marked[9001];
+    for (int i = 0; i < 1000; i++) memcpy(marked + i * 9, "日本語", 9);
+    marked[9000] = '\0';
+    Value args[] = {hajimu_string("long-composition"), hajimu_string("前後"), hajimu_number(4)};
+    uint32_t id = gui_hash(args[0].string.data);
+    GuiTextBuf *tb = gui_get_text_buf(id, "前後");
+    gui_text_collapse(tb, 3);
+    g_cur->focused = id;
+    gui_ime_update(g_cur, marked);
+    assert(!strcmp(g_cur->composition, marked));
+    char display[9007];
+    assert(gui_text_display(tb, g_cur->composition, display) == 9003);
+    assert(!strncmp(display, "前日本語", 12) && !strcmp(display + 9003, "後"));
+    Value result = fn_textarea(3, args);
+    assert(!strcmp(result.string.data, "前後") && tb->len == 6 && tb->cursor == 3);
+    const char *capture = getenv("GUI_IME_CAPTURE");
+    if (capture && *capture) {
+        hjpCancelFrame(g_cur->vg);
+        hjp_gl_get_drawable_size(g_cur->window, &g_cur->fb_w, &g_cur->fb_h);
+        glViewport(0, 0, g_cur->fb_w, g_cur->fb_h);
+        glClearColor(g_cur->bg.r, g_cur->bg.g, g_cur->bg.b, g_cur->bg.a);
+        glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        hjpBeginFrame(g_cur->vg, 640, 400, (float)g_cur->fb_w / 640);
+        g_cur->lay = (GuiLayout){.x = 16, .y = 16, .w = 600};
+        fn_textarea(3, args);
+        hjpEndFrame(g_cur->vg);
+        assert(gui_write_screenshot(g_cur, capture));
+    }
+    frame(false, false, 500);
+    result = fn_text_input(2, args);
+    assert(!strcmp(result.string.data, "前後"));
+    gui_ime_update(g_cur, "");
+    g_cur->focused = 0; g_cur->in = (GuiInput){0};
+    hjpCancelFrame(g_cur->vg);
 }
 
 static void check_long_text(void) {
@@ -1307,6 +1353,7 @@ int main(void) {
     check_textarea_layout();
     check_text_formatting();
     check_text_selection();
+    check_long_composition();
     check_long_text();
     check_grapheme_editing();
     check_text_navigation();
@@ -1682,6 +1729,7 @@ int main(void) {
     pid_t shutdown_pid = hjp_task_find(shutdown_task, g_cur)->pid;
     g_cur = NULL;
     fn_app_quit(1, &app);
+    assert(g_apps[(int)app.number].composition == g_apps[(int)app.number].composition_inline);
     assert(g_histories[history_slot].id == 0);
     assert(waitpid(shutdown_pid, NULL, WNOHANG) == -1 && errno == ECHILD);
     puts("application controls passed: registration, UTF-8, text selection/navigation, clicks, list isolation/LRU, visible rows, disabled wheel, shrink");

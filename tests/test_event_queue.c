@@ -17,15 +17,16 @@ int main(void) {
     char long_text[8192];
     memset(long_text, 'x', sizeof(long_text) - 1); long_text[sizeof(long_text) - 1] = '\0';
     for (int i = 0; i < 1000; i++) {
-        HjpEvent edit = {.type = HJP_EVENT_TEXTREPLACE}, received;
-        assert(hjp_document_set_text(&edit, long_text));
+        HjpEvent edit = {.type = i % 2 ? HJP_EVENT_TEXTREPLACE : HJP_EVENT_TEXTEDITING}, received;
+        assert(i % 2 ? hjp_document_set_text(&edit, long_text) : hjp_composition_set_text(&edit, long_text));
         assert(hjp_event_queue_push(&queue, &edit));
-        assert(hjp_event_queue_pop(&queue, &received) && !strcmp(hjp_document_text(&received), long_text));
+        assert(hjp_event_queue_pop(&queue, &received));
+        assert(!strcmp(i % 2 ? hjp_document_text(&received) : hjp_composition_text(&received), long_text));
         hjp_event_dispose(&received);
     }
     for (int i = 0; i <= HJP_DEFERRED_EVENTS; i++) {
-        HjpEvent edit = {.type = HJP_EVENT_TEXTREPLACE};
-        assert(hjp_document_set_text(&edit, long_text));
+        HjpEvent edit = {.type = HJP_EVENT_TEXTEDITING};
+        assert(hjp_composition_set_text(&edit, long_text));
         hjp_event_queue_push(&queue, &edit);
     }
     hjp_event_queue_clear(&queue);

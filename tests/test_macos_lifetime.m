@@ -336,6 +336,15 @@ int main(int argc, char **argv) {
                     assert(view.documentID == 950 && [view.inputDocument isEqualToString:longDocument]);
                     while (hjp__popEvent(&e)) hjp_native_dispose(&e);
                     NSString *largeCommit = [@"" stringByPaddingToLength:30000 withString:@"日本語" startingAtIndex:0];
+                    [view setMarkedText:largeCommit selectedRange:NSMakeRange(30000, 0)
+                        replacementRange:NSMakeRange(NSNotFound, 0)];
+                    assert([view.composition isEqualToString:largeCommit]);
+                    assert(hjp__popEvent(&e) && e.type == HJP_EVENT_TEXTSELECTION);
+                    assert(hjp__popEvent(&e) && e.type == HJP_EVENT_TEXTEDITING);
+                    assert(!strcmp(hjp_composition_text(&e), largeCommit.UTF8String));
+                    hjp_native_dispose(&e);
+                    [view clearComposition];
+                    assert(hjp__popEvent(&e) && e.type == HJP_EVENT_TEXTEDITING && !hjp_composition_text(&e)[0]);
                     [longField setAccessibilityValue:largeCommit];
                     assert(hjp__popEvent(&e) && e.type == HJP_EVENT_ACCESSIBILITY_FOCUS);
                     assert(hjp__popEvent(&e) && e.type == HJP_EVENT_ACCESSIBILITY_TEXTREPLACE);

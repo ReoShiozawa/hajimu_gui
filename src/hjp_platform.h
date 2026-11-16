@@ -164,6 +164,7 @@ typedef struct {
 
 typedef struct {
     char text[128];
+    char *owned_text; /* 長い未確定文字。イベント破棄時に解放 */
 } HjpTextInputEvent;
 
 /* 通常の編集欄とOS文書接続で共用する、NULを含む最大容量。 */
