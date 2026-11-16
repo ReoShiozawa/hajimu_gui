@@ -2346,7 +2346,8 @@ static Value fn_detail_row(int argc, Value *argv) {
     float x, y, w;
     gui_pos(&x, &y, &w);
     w = fmaxf(0, w);
-    float h = GUI_FONT_SIZE * 2.8f + 20;
+    bool has_detail = argv[2].string.data[0] != '\0';
+    float h = has_detail ? GUI_FONT_SIZE * 2.8f + 20 : GUI_FONT_SIZE * 1.4f + 16;
     bool selected = argc > 3 && argv[3].type == VALUE_BOOL && argv[3].boolean;
     bool hov, pressed;
     bool clicked = gui_widget_logic(gui_hash(argv[0].string.data), x, y, w, h, &hov, &pressed);
@@ -2364,9 +2365,11 @@ static Value fn_detail_row(int argc, Value *argv) {
         hjpFontSize(vg, GUI_FONT_SIZE);
         hjpFillColor(vg, g_disabled ? TH_TEXT_DIM : TH_TEXT);
         gui_single_line(vg, argv[1].string.data, x + 12, y + 8, w - 24, GUI_FONT_SIZE * 1.4f, false);
-        hjpFillColor(vg, TH_TEXT_DIM);
-        gui_single_line(vg, argv[2].string.data, x + 12, y + 10 + GUI_FONT_SIZE * 1.4f,
-                        w - 24, GUI_FONT_SIZE * 1.4f, false);
+        if (has_detail) {
+            hjpFillColor(vg, TH_TEXT_DIM);
+            gui_single_line(vg, argv[2].string.data, x + 12, y + 10 + GUI_FONT_SIZE * 1.4f,
+                            w - 24, GUI_FONT_SIZE * 1.4f, false);
+        }
     }
     clicked = gui_nav_control(gui_hash(argv[0].string.data), x, y, w, h) || clicked;
     gui_accessible(gui_hash(argv[0].string.data), argv[1].string.data, 0, x, y, w, h, !g_disabled, selected);
@@ -26270,7 +26273,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.42.0",
+        .version        = "14.43.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,

@@ -1772,6 +1772,38 @@ static void check_combo_popup(void) {
     hjpCancelFrame(g_cur->vg);
 }
 
+static void check_compact_rows(void) {
+    Value row[] = {hajimu_string("scene:7"), hajimu_string("同じ名前"), hajimu_string(""), hajimu_bool(true)};
+    Value other[] = {hajimu_string("scene:8"), row[1], row[2], hajimu_bool(false)};
+    g_cur->active = g_cur->focused = g_cur->nav_focus = 0;
+    g_cur->nav_enabled = true;
+    /* 選択表示だけでは操作を通知しない。同名でもIDで別々にフォーカスする。 */
+    frame(false, false, 500); gui_nav_begin();
+    assert(!fn_detail_row(4, row).boolean);
+    float compact_height = g_cur->last.h;
+    assert(fabsf(compact_height - (GUI_FONT_SIZE * 1.4f + 16)) < 0.01f);
+    assert(!fn_detail_row(4, other).boolean);
+    assert(g_cur->nav_current_count == 2); gui_nav_end();
+    frame(true, false, 30); gui_nav_begin();
+    assert(!fn_detail_row(4, row).boolean); gui_nav_end();
+    assert(g_cur->active == gui_hash("scene:7"));
+    /* 押下中の名前変更でも対象を失わず、離したフレームだけ通知する。 */
+    row[1] = hajimu_string("変更後のとても長いタイトルが右側にはみ出さないことを確認");
+    frame(false, true, 30); gui_nav_begin();
+    assert(fn_detail_row(4, row).boolean); gui_nav_end();
+    frame(false, false, 500); gui_nav_begin();
+    assert(!fn_detail_row(4, row).boolean); gui_nav_end();
+    frame(false, false, 500); g_cur->in.key_return = true; gui_nav_begin();
+    assert(fn_detail_row(4, row).boolean);
+    assert(!fn_detail_row(4, row).boolean); gui_nav_end();
+    frame(false, false, 500); g_cur->in.key_return = true; gui_nav_begin();
+    g_disabled = true; assert(!fn_detail_row(4, row).boolean); g_disabled = false; gui_nav_end();
+    frame(false, false, 500); g_cur->in.key_return = true; gui_nav_begin();
+    g_cur->nav_focus = gui_hash("scene:7"); gui_ime_update(g_cur, "変換中");
+    assert(!fn_detail_row(4, row).boolean); gui_nav_end(); gui_ime_update(g_cur, "");
+    g_cur->nav_enabled = false; g_cur->nav_focus = 0;
+}
+
 int main(void) {
     /* 仮想macOSのソフトウェアGLは2.1止まりの場合がある。実装失敗と区別する。 */
     if (getenv("CONTROL_ALLOW_UNSUPPORTED_GL")) {
@@ -1828,6 +1860,7 @@ int main(void) {
     check_raw_input_loop(true);
     check_navigation_loop();
     check_popup_loop();
+    check_compact_rows();
     check_modal_stack();
     check_modal_forms();
     check_responsive_fields();
