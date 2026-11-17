@@ -96,6 +96,9 @@ int main(void) {
     assert(!mkfifo(pipe, 0600)); assert(!hjp_file_copy(pipe, target, NULL, NULL)); assert(!unlink(pipe));
     assert(!unlink(alias) && !symlink(source, alias));
     assert(!hjp_file_publish(alias, target, false)); compare_files(source, target);
+    assert(hjp_file_copy(source, alias, NULL, NULL));
+    assert(!lstat(alias, &mode) && S_ISREG(mode.st_mode));
+    compare_files(source, alias); compare_files(source, target);
 #endif
     assert(hjp_file_remove(alias));
     assert(!hjp_file_copy(stage, target, NULL, NULL)); compare_files(source, target);

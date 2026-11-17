@@ -13,6 +13,12 @@
 #include <io.h>
 #else
 #include <unistd.h>
+#ifdef __APPLE__
+#include <sys/stdio.h>
+#elif defined(__linux__) && defined(_GNU_SOURCE)
+#include <sys/syscall.h>
+#include <linux/fs.h>
+#endif
 #endif
 
 typedef bool (*HjpCopyProgress)(uint64_t done, uint64_t total, void *context);
@@ -71,7 +77,6 @@ static bool hjp_file_stamp(FILE *file, HjpFileStamp *stamp) {
 #endif
     return true;
 }
-/* 公開先が既にある場合、上書き禁止ではその内容を変更しない。 */
 static FILE *hjp_file_read_regular(const char *path, HjpFileStamp *stamp) {
 #ifdef _WIN32
     FILE *file = hjp_file_open(path, false);
@@ -84,6 +89,7 @@ static FILE *hjp_file_read_regular(const char *path, HjpFileStamp *stamp) {
     if (!hjp_file_stamp(file, stamp)) { fclose(file); return NULL; }
     return file;
 }
+/* 公開先が既にある場合、上書き禁止ではその内容を変更しない。 */
 static bool hjp_file_publish(const char *source, const char *target, bool overwrite) {
     if (!source || !target || !source[0] || !target[0] || !strcmp(source, target)) return false;
 #ifdef _WIN32
@@ -97,6 +103,13 @@ static bool hjp_file_publish(const char *source, const char *target, bool overwr
     struct stat info;
     if (lstat(source, &info) || !S_ISREG(info.st_mode)) return false;
     if (overwrite) return rename(source, target) == 0;
+#if defined(__APPLE__) && defined(RENAME_EXCL)
+    if (!renamex_np(source, target, RENAME_EXCL)) return true;
+    if (errno != ENOSYS && errno != EINVAL && errno != ENOTSUP) return false;
+#elif defined(__linux__) && defined(_GNU_SOURCE) && defined(SYS_renameat2)
+    if (!syscall(SYS_renameat2, AT_FDCWD, source, AT_FDCWD, target, RENAME_NOREPLACE)) return true;
+    if (errno != ENOSYS && errno != EINVAL && errno != EOPNOTSUPP) return false;
+#endif
     if (link(source, target)) return false;
     /* 公開済みなら成功。一時名の削除失敗で公開結果を失敗扱いにしない。 */
     (void)unlink(source); return true;

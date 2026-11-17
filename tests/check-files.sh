@@ -7,8 +7,10 @@ mkdir "$TMP/data"
 set --
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*) directory=$(cygpath -m "$TMP/data"); set -- -D_WIN32_WINNT=0x0601 -static-libgcc ;;
-  *) directory="$TMP/data"; if [ "${FILE_SANITIZE:-0}" = 1 ]; then set -- -fsanitize=address,undefined -fno-omit-frame-pointer; fi ;;
+  Darwin) directory="$TMP/data"; set -- -D_DARWIN_C_SOURCE ;;
+  *) directory="$TMP/data"; set -- -D_GNU_SOURCE ;;
 esac
+if [ "${FILE_SANITIZE:-0}" = 1 ]; then set -- "$@" -fsanitize=address,undefined -fno-omit-frame-pointer; fi
 ${CC:-cc} -std=c11 -D_POSIX_C_SOURCE=200809L -O1 -g -Wall -Wextra -Werror "$@" \
   "$ROOT/tests/test_files.c" -o "$TMP/files.exe"
 HJP_FILE_TEST_DIR="$directory" "$TMP/files.exe"
