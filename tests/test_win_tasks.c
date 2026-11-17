@@ -4,8 +4,16 @@
 #include <wchar.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <stdbool.h>
 
 static int failure_stage;
+static bool tracing;
+static void trace_stage(const char *stage) {
+    if (!tracing) return;
+    DWORD count; assert(GetProcessHandleCount(GetCurrentProcess(), &count));
+    fprintf(stderr, "task stage=%s handles=%lu\n", stage, (unsigned long)count);
+}
+#define HJP_TASK_TRACE trace_stage
 static BOOL assign_job(HANDLE job, HANDLE process) {
     if (failure_stage == 1) { SetLastError(ERROR_ACCESS_DENIED); return FALSE; }
     return AssignProcessToJobObject(job, process);
@@ -29,6 +37,8 @@ static void write_bytes(HANDLE handle, const void *bytes, DWORD size) {
 }
 static int child(int argc, wchar_t **argv) {
     if (!wcscmp(argv[1], L"--args")) {
+        char *path = hjp_task_executable_path();
+        assert(path && strstr(path, "日本語 空白.exe")); free(path);
         assert(argc == 8);
         assert(!wcscmp(argv[2], L""));
         assert(!wcscmp(argv[3], L"日本語 空白"));
@@ -134,7 +144,9 @@ int wmain(int argc, wchar_t **argv) {
     assert(SetEnvironmentVariableW(L"HAJIMU_PROGRESS_HANDLE", L"456"));
 
     char *arguments[] = {executable, "--args", "", "日本語 空白", "quote\"inside", "C:\\末尾の空白 \\", "\\\\\"", "&echo not-a-shell|{};%PATH%", NULL};
+    tracing = true;
     HjpTask *task = start_task(arguments, true, false); wait_task(task);
+    tracing = false;
     assert(task->state == HJP_TASK_SUCCEEDED); release_task(task);
     DWORD after_first; assert(GetProcessHandleCount(GetCurrentProcess(), &after_first));
     fprintf(stderr, "handles baseline=%lu first-task=%lu\n", (unsigned long)baseline, (unsigned long)after_first);

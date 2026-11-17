@@ -2,6 +2,9 @@
 #define HJP_TASKS_WIN32_H
 #include <stdio.h>
 #include <wchar.h>
+#ifndef HJP_TASK_TRACE
+#define HJP_TASK_TRACE(stage) ((void)0)
+#endif
 
 #ifndef HJP_TASK_CREATE_PROCESS
 #define HJP_TASK_CREATE_PROCESS CreateProcessW
@@ -24,6 +27,17 @@ static wchar_t *hjp_task_wide(const char *text) {
         free(wide); return NULL;
     }
     return wide;
+}
+static char *hjp_task_executable_path(void) {
+    wchar_t *wide = calloc(32768, sizeof(*wide));
+    if (!wide) return NULL;
+    DWORD length = GetModuleFileNameW(NULL, wide, 32768);
+    int size = length && length < 32768 ? WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, -1, NULL, 0, NULL, NULL) : 0;
+    char *text = size > 0 ? malloc((size_t)size) : NULL;
+    if (text && !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, -1, text, size, NULL, NULL)) {
+        free(text); text = NULL;
+    }
+    free(wide); return text;
 }
 static bool hjp_task_command_char(wchar_t *command, size_t *length, wchar_t c) {
     if (*length >= 32766) return false;
@@ -141,9 +155,12 @@ static int hjp_task_start_with_io(const void *owner, char *const *args, bool cap
     SIZE_T attribute_size = 0;
     bool attribute_ready = false;
     if (!command || !name || !executable) goto cleanup;
+    HJP_TASK_TRACE("converted");
     DWORD path_length = SearchPathW(NULL, name, L".exe", 32768, executable, NULL);
     if (!path_length || path_length >= 32768) goto cleanup;
+    HJP_TASK_TRACE("resolved");
     for (int i = 0; i < 3; i++) if ((i < 2 ? capture : progress) && !hjp_task_pipe(pipes[i])) goto cleanup;
+    HJP_TASK_TRACE("pipes");
     /* 標準入力はNUL。親の端末から入力を奪わない。 */
     SECURITY_ATTRIBUTES security = {sizeof(security), NULL, TRUE};
     standard[0] = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -154,6 +171,7 @@ static int hjp_task_start_with_io(const void *owner, char *const *args, bool cap
         if (!hjp_task_pipe_open(standard[i])) goto cleanup;
     }
     HANDLE inherited[] = {standard[0], standard[1], standard[2], pipes[2][1]};
+    HJP_TASK_TRACE("standard");
     InitializeProcThreadAttributeList(NULL, 1, 0, &attribute_size);
     startup.lpAttributeList = malloc(attribute_size);
     if (!startup.lpAttributeList || !InitializeProcThreadAttributeList(startup.lpAttributeList, 1, 0, &attribute_size)) goto cleanup;
@@ -162,17 +180,20 @@ static int hjp_task_start_with_io(const void *owner, char *const *args, bool cap
         inherited, (progress ? 4 : 3) * sizeof(HANDLE), NULL, NULL)) goto cleanup;
     environment = hjp_task_environment(pipes[2][1]);
     if (!environment) goto cleanup;
+    HJP_TASK_TRACE("environment");
     job = CreateJobObjectW(NULL, NULL);
     if (!job) goto cleanup;
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) goto cleanup;
+    HJP_TASK_TRACE("job");
     startup.StartupInfo.cb = sizeof(startup);
     startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
     startup.StartupInfo.hStdInput = standard[0]; startup.StartupInfo.hStdOutput = standard[1]; startup.StartupInfo.hStdError = standard[2];
     if (!HJP_TASK_CREATE_PROCESS(executable, command, NULL, NULL, TRUE,
         CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
         environment, NULL, &startup.StartupInfo, &process)) goto cleanup;
+    HJP_TASK_TRACE("process");
     /* 実行前にJobへ収容する。失敗時は追跡不能なプロセスとして実行しない。 */
     if (!HJP_TASK_ASSIGN_JOB(job, process.hProcess) || HJP_TASK_RESUME_THREAD(process.hThread) == (DWORD)-1) goto cleanup;
     *slot = (HjpTask){.id = hjp_task_next_id++, .state = HJP_TASK_RUNNING,
@@ -193,6 +214,7 @@ cleanup:
     }
     if (attribute_ready) DeleteProcThreadAttributeList(startup.lpAttributeList);
     free(startup.lpAttributeList); free(environment); free(command); free(name); free(executable);
+    HJP_TASK_TRACE("cleanup");
     return slot->id ? slot->id : -1;
 }
 static bool hjp_task_cancel(HjpTask *task) {
