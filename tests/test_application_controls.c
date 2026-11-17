@@ -1868,6 +1868,165 @@ static void check_focus_reveal(void) {
     g_cur->nav_focus = g_cur->focused = 0; g_cur->nav_enabled = false;
 }
 
+static void draw_tab_fields(Value fields[3][2], int skip) {
+    Value area[] = {hajimu_number(276), hajimu_number(100), hajimu_string("tab-reveal-fields")};
+    Value slot = fn_scroll_begin(3, area); assert(slot.number >= 0);
+    for (int i = 0; i < 3; i++) {
+        if (i != skip) fields[i][1] = fn_text_input(2, fields[i]);
+        if (i < 2) g_cur->lay.y += 350;
+    }
+    fn_scroll_end(1, &slot);
+}
+
+static void check_tab_reveal(void) {
+    Value mode[] = {hajimu_bool(true), hajimu_bool(true)};
+    assert(fn_focus_traversal(2, mode).boolean && g_cur->nav_reveal_enabled);
+    Value fields[3][2] = {{hajimu_string("tab-first"), hajimu_string("前")},
+        {hajimu_string("tab-second"), hajimu_string("")}, {hajimu_string("tab-third"), hajimu_string("")}};
+    uint32_t a = gui_hash("tab-first"), b = gui_hash("tab-second"), c = gui_hash("tab-third");
+    g_cur->focused = g_cur->nav_focus = a;
+    for (int step = 0; step < 19; step++) {
+        frame(false, false, 500);
+        if (step == 0 || step == 4 || step == 7 || step == 10 || step == 13 || step == 14 || step == 17 || step == 18) {
+            g_cur->in.key_tab = true;
+            g_cur->in.mod_shift = step == 4 || step == 7 || step == 17;
+        }
+        if (step < 4) {
+            const char *text[] = {"追", "続", "末", "後"};
+            strcpy(g_cur->in.text_input, text[step]); g_cur->in.text_input_len = (int)strlen(text[step]);
+        }
+        gui_nav_begin(); draw_tab_fields(fields, -1); gui_nav_end();
+        if (step == 0 || step == 13) assert(g_cur->focus_seek_target == b && g_cur->focused == a);
+        if (step == 1) assert(g_cur->focus_wait_target == b && g_cur->focused == a);
+        if (step == 2 || step == 3 || step == 4 || step == 5) assert(g_cur->focused == b);
+        if (step == 4 || step == 10) assert(g_cur->focus_seek_target == a);
+        if (step == 6 || step == 7 || step == 8 || step == 12 || step == 13 || step == 14 || step == 15)
+            assert(g_cur->focused == a);
+        if (step == 7 || step == 14) assert(g_cur->focus_seek_target == c);
+        if (step == 9 || step == 10 || step == 11 || step == 16 || step == 17 || step == 18) assert(g_cur->focused == c);
+        if (step == 17) assert(g_cur->focus_seek_target == b);
+        if (step == 18) assert(!g_cur->focus_seek_target && !g_cur->focus_wait_target);
+    }
+    assert(!strcmp(fields[0][1].string.data, "前追続末") && !strcmp(fields[1][1].string.data, "後"));
+    frame(false, false, 500); g_cur->in.key_tab = g_cur->in.mod_shift = true;
+    gui_nav_begin(); draw_tab_fields(fields, -1); gui_nav_end(); assert(g_cur->focus_seek_target == b);
+    frame(true, false, 500); gui_nav_begin(); draw_tab_fields(fields, -1); gui_nav_end();
+    assert(!g_cur->focus_seek_target && !g_cur->focus_wait_target && g_cur->focused != b);
+    Value request[] = {hajimu_number(0), hajimu_bool(true)};
+    for (int i = 0; i < 2; i++) {
+        frame(false, false, 500); gui_nav_begin();
+        if (!i) fn_focus_set(2, request);
+        draw_tab_fields(fields, -1); gui_nav_end();
+    }
+    assert(g_cur->focused == a);
+    for (int step = 0; step < 5; step++) {
+        frame(false, false, 500); if (step == 0 || step == 2) g_cur->in.key_tab = true;
+        if (step == 3) { strcpy(g_cur->in.text_input, "保"); g_cur->in.text_input_len = (int)strlen("保"); }
+        gui_nav_begin(); draw_tab_fields(fields, -1); gui_nav_end();
+        if (step == 1) assert(g_cur->focus_wait_target == b);
+        if (step == 2) assert(g_cur->focus_seek_target == c && g_cur->focused == a);
+        if (step == 3) assert(g_cur->focus_wait_target == c && g_cur->focused == a);
+        if (step == 4) assert(g_cur->focused == c && !strcmp(fields[0][1].string.data, "前追続末保"));
+    }
+    for (int i = 0; i < 2; i++) {
+        frame(false, false, 500); gui_nav_begin(); if (!i) fn_focus_set(2, request);
+        draw_tab_fields(fields, -1); gui_nav_end();
+    }
+    assert(g_cur->focused == a);
+    frame(false, false, 500); g_cur->in.key_tab = true;
+    gui_nav_begin(); draw_tab_fields(fields, -1); gui_nav_end(); assert(g_cur->focus_seek_target == b);
+    frame(false, false, 500); gui_nav_begin(); draw_tab_fields(fields, 1); gui_nav_end();
+    assert(!g_cur->focus_seek_target && !g_cur->focus_wait_target && g_cur->focused == a);
+    mode[1] = hajimu_bool(false); assert(fn_focus_traversal(2, mode).boolean && !g_cur->nav_reveal_enabled);
+    frame(false, false, 500); g_cur->in.key_tab = true;
+    gui_nav_begin(); draw_tab_fields(fields, -1); gui_nav_end(); assert(g_cur->focused == a && !g_cur->focus_seek_target);
+
+    mode[1] = hajimu_bool(true); fn_focus_traversal(2, mode);
+    GuiScrollState *state = gui_scroll_state(gui_hash("tab-many"), 0, false); assert(state);
+    state->position = 9000 * 40;
+    g_cur->focused = 0; g_cur->nav_focus = 50000 + 9001;
+    Value area[] = {hajimu_number(276), hajimu_number(80), hajimu_string("tab-many")};
+    for (int step = 0; step < 4; step++) {
+        frame(false, false, 500); if (!step) g_cur->in.key_tab = true;
+        else g_cur->in.key_return = true;
+        if (step == 2) { g_cur->in.key_return = false; g_cur->in.last_key = ' '; }
+        gui_nav_begin(); Value slot = fn_scroll_begin(3, area);
+        int activated = -1;
+        for (int i = 0; i < 10000; i++) {
+            if (gui_nav_control(50000 + i, g_cur->lay.x + 12, g_cur->lay.y, 100, 30)) {
+                assert(activated < 0); activated = i;
+            }
+            g_cur->lay.y += 40;
+        }
+        fn_scroll_end(1, &slot); assert(g_cur->nav_current_count < 10); gui_nav_end();
+        if (!step) assert(g_cur->focus_seek_target == 50000 + 9002);
+        if (step == 1) assert(g_cur->focus_wait_target == 50000 + 9002);
+        if (step >= 2) assert(g_cur->nav_focus == 50000 + 9002);
+        assert(activated == (step == 3 ? 9002 : -1));
+    }
+    Value nested[] = {hajimu_string("tab-nested-target"), hajimu_string("")};
+    Value outer[] = {hajimu_string("tab-nested-outer"), hajimu_number(276), hajimu_number(140)};
+    area[1] = hajimu_number(100); area[2] = hajimu_string("tab-nested-inner");
+    Value first[] = {hajimu_string("tab-nested-first"), hajimu_string("")};
+    g_cur->nav_focus = g_cur->focused = gui_hash("tab-nested-first");
+    for (int step = 0; step < 3; step++) {
+        frame(false, false, 500); if (!step) g_cur->in.key_tab = true;
+        gui_nav_begin(); first[1] = fn_text_input(2, first);
+        assert(fn_child_begin(3, outer).boolean); g_cur->lay.y += 300;
+        Value slot = fn_scroll_begin(3, area); g_cur->lay.y += 200;
+        nested[1] = fn_text_input(2, nested); fn_scroll_end(1, &slot); fn_child_end(0, NULL); gui_nav_end();
+        if (!step) assert(g_cur->focus_seek_target == gui_hash("tab-nested-target"));
+        if (step == 2) assert(g_cur->focused == gui_hash("tab-nested-target"));
+    }
+    Value invalid[] = {hajimu_bool(true), hajimu_number(1)};
+    assert(!fn_focus_traversal(2, invalid).boolean && g_cur->nav_enabled && g_cur->nav_reveal_enabled);
+    invalid[0] = hajimu_string("legacy-group"); assert(!fn_focus_traversal(1, invalid).boolean);
+    mode[0] = hajimu_bool(false); fn_focus_traversal(2, mode);
+    assert(!g_cur->nav_enabled && !g_cur->nav_reveal_enabled && !g_cur->focus_seek_target);
+    g_cur->focused = g_cur->nav_focus = 0;
+}
+
+static Value tab_reveal_loop_app, tab_reveal_loop_fields[3][2];
+static int tab_reveal_loop_frames;
+static Value tab_reveal_loop_callback(Value *callback, int argc, Value *argv) {
+    (void)callback; (void)argv; assert(argc == 0);
+    int step = tab_reveal_loop_frames++;
+    draw_tab_fields(tab_reveal_loop_fields, -1);
+    assert(!strcmp(tab_reveal_loop_fields[0][1].string.data, "first先"));
+    if (step == 3) {
+        assert(g_cur->focused == gui_hash("tab-second"));
+        HjpEvent event = source_event(g_cur, HJP_EVENT_KEYDOWN);
+        event.key.sym = HJPK_TAB; event.key.mod = HJP_KMOD_SHIFT; hjp_test_native_event(&event);
+    }
+    if (step == 7) {
+        assert(g_cur->focused == gui_hash("tab-first")); fn_app_quit(1, &tab_reveal_loop_app);
+    }
+    return hajimu_null();
+}
+
+static void check_tab_reveal_loop(void) {
+    GuiApp *original = g_cur; hjpCancelFrame(original->vg);
+    HajimuRuntime *runtime = __hajimu_runtime, test_runtime = {.call = tab_reveal_loop_callback};
+    Value create[] = {hajimu_string("Tab reveal native queue"), hajimu_number(640), hajimu_number(400)};
+    tab_reveal_loop_app = fn_app_create(3, create); assert(tab_reveal_loop_app.type == VALUE_NUMBER);
+    g_cur = &g_apps[(int)tab_reveal_loop_app.number]; g_id_scope_depth = 0;
+    const char *names[] = {"tab-first", "tab-second", "tab-third"};
+    for (int i = 0; i < 3; i++) {
+        tab_reveal_loop_fields[i][0] = hajimu_string(names[i]);
+        tab_reveal_loop_fields[i][1] = hajimu_string(i ? "" : "first");
+    }
+    Value mode[] = {hajimu_bool(true), hajimu_bool(true)}; fn_focus_traversal(2, mode);
+    g_cur->focused = g_cur->nav_focus = gui_hash("tab-first");
+    assert(gui_get_text_buf(g_cur->focused, "first"));
+    HjpEvent event = source_event(g_cur, HJP_EVENT_TEXTINPUT);
+    assert(hjp_input_set_text(&event, "先")); hjp_test_native_event(&event);
+    event = source_event(g_cur, HJP_EVENT_KEYDOWN); event.key.sym = HJPK_TAB; hjp_test_native_event(&event);
+    tab_reveal_loop_frames = 0; __hajimu_runtime = &test_runtime; g_cur = NULL;
+    Value draw[] = {tab_reveal_loop_app, {.type = VALUE_FUNCTION}}; fn_draw_loop(2, draw);
+    assert(tab_reveal_loop_frames == 8); fn_app_quit(1, &tab_reveal_loop_app);
+    __hajimu_runtime = runtime; g_cur = original; hjp_gl_make_current(original->window, original->gl);
+}
+
 static void check_keyboard_choices(void) {
     Value choices = hajimu_array();
     hajimu_array_push(&choices, hajimu_string("左"));
@@ -2264,6 +2423,8 @@ int main(void) {
     check_navigation_modals();
     check_focus_request();
     check_focus_reveal();
+    check_tab_reveal();
+    check_tab_reveal_loop();
     check_keyboard_choices();
     check_combo_popup();
     assert(fn_focus_traversal(0, NULL).boolean);

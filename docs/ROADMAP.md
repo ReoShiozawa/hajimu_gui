@@ -3049,7 +3049,7 @@ Photoshop/Illustrator・Office・CAD 由来のクリエイティブ/デザイン
 
 WAI-ARIA・Flutter・a11y ツール由来のアクセシビリティ強化。
 
-- [x] フォーカストラバーサル（Flutter FocusTraversalGroup — フォーカス遷移グループ）
+- [ ] フォーカストラバーサルのID/順序配列によるグループ指定（未対応。14.50.0では真偽値によるTab/表示移動を実装）
 - [x] カスタムジェスチャー（Qt QGestureRecognizer — カスタムジェスチャー認識）
 - [x] スキップリンク（WAI-ARIA — ナビゲーションスキップリンク）
 - [x] 色覚シミュレーション（a11y tools — 色覚特性シミュレータ）

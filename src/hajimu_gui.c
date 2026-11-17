@@ -369,12 +369,14 @@ typedef struct {
     bool combo_seen;
     uint32_t nav_focus;
     bool nav_enabled;
+    bool nav_reveal_enabled, nav_tab_found, nav_transition;
+    uint32_t nav_anchor, nav_tab_first, nav_tab_last, nav_tab_previous, nav_tab_target, nav_tab_seen;
     int nav_direction;
     bool nav_autofocus;
     bool focus_request;
     bool focus_reveal, focus_shifted, focus_path_valid;
     int focus_offset;
-    uint32_t focus_target, focus_wait_target, focus_retry;
+    uint32_t focus_target, focus_wait_target, focus_retry, focus_seek_target, focus_seek;
     float focus_y, focus_h;
     int focus_path_count;
     struct {
@@ -607,6 +609,7 @@ static void gui_histories_close(const void *owner) {
 static void gui_focus_cancel(GuiApp *app) {
     app->focus_request = app->focus_reveal = false;
     app->focus_target = app->focus_wait_target = app->focus_retry = 0;
+    app->focus_seek_target = app->focus_seek = app->nav_anchor = 0;
 }
 static void gui_begin_close(GuiApp *app) {
     gui_focus_cancel(app);
@@ -1294,6 +1297,16 @@ static void gui_nav_focus_entry(int index) {
 
 /* 入力欄の編集後に、今フレームの有効な部品だけで移動する。 */
 static void gui_nav_move(int direction) {
+    if (g_cur && g_cur->nav_reveal_enabled && g_cur->nav_tab_first) {
+        uint32_t target = g_cur->nav_tab_target;
+        if (!target) target = direction < 0 ? g_cur->nav_tab_last : g_cur->nav_tab_first;
+        for (int i = 0; i < g_cur->nav_current_count; i++)
+            if (g_cur->nav_current[i].id == target && g_cur->nav_current[i].visible) {
+                gui_nav_focus_entry(i); return;
+            }
+        g_cur->focus_seek_target = target;
+        return;
+    }
     if (!g_cur || g_cur->nav_current_count == 0) return;
     int index = -1;
     for (int i = 0; i < g_cur->nav_current_count; i++)
@@ -1303,6 +1316,38 @@ static void gui_nav_move(int direction) {
         index = (index + (direction < 0 ? -1 : 1) + g_cur->nav_current_count) % g_cur->nav_current_count;
         if (g_cur->nav_current[index].visible) { gui_nav_focus_entry(index); break; }
     }
+}
+
+/* Tabの前後候補だけを記録し、画面外の全矩形や祖先列は保持しない。 */
+static void gui_nav_tab_candidate(uint32_t id) {
+    if (!g_cur->nav_reveal_enabled || !g_cur->nav_direction || g_cur->nav_tab_seen == id) return;
+    if (id == g_cur->nav_anchor && g_cur->nav_tab_found) return;
+    g_cur->nav_tab_seen = id;
+    if (!g_cur->nav_tab_first) g_cur->nav_tab_first = id;
+    if (id == g_cur->nav_anchor) {
+        g_cur->nav_tab_found = true;
+        if (g_cur->nav_direction < 0) g_cur->nav_tab_target = g_cur->nav_tab_previous;
+    } else if (g_cur->nav_tab_found && g_cur->nav_direction > 0 && !g_cur->nav_tab_target)
+        g_cur->nav_tab_target = id;
+    g_cur->nav_tab_previous = g_cur->nav_tab_last = id;
+}
+
+/* 内側の領域は親のスクロールで動くため、縦の可視性は最外側だけを見る。 */
+static bool gui_focus_reveal_candidate(float x, float w) {
+    float left = 0, right = g_cur->win_w, top = 0, bottom = g_cur->win_h;
+    int depth = g_dialog_depth[g_cur - g_apps], count = 0;
+    if (depth) {
+        GuiDialogScope *scope = &g_dialog_scopes[g_cur - g_apps][depth - 1];
+        left = fmaxf(left, scope->content_x); right = fminf(right, scope->content_x + scope->content_w);
+        top = fmaxf(top, scope->content_y); bottom = fminf(bottom, scope->content_y + scope->content_h);
+    }
+    for (int i = 0; i < GUI_MAX_SCROLL; i++) if (g_scrolls[i].active) {
+        GuiScrollRegion *region = &g_scrolls[i];
+        if (!region->state_id) return false;
+        if (!count++) { top = fmaxf(top, region->y); bottom = fminf(bottom, region->y + region->h); }
+        left = fmaxf(left, region->x); right = fminf(right, region->x + region->w);
+    }
+    return count > 0 && bottom > top && right > left && x < right && x + w > left;
 }
 
 static void gui_focus_capture(float x, float y, float w, float h) {
@@ -1345,12 +1390,20 @@ static void gui_nav_begin(void) {
     g_cur->focus_request = false;
     g_cur->focus_target = 0;
     g_cur->focus_retry = g_cur->focus_wait_target;
-    if (g_cur->closing || g_cur->composition[0] || g_cur->in.clicked || g_cur->in.scroll_y || g_cur->in.key_tab)
+    g_cur->focus_seek = g_cur->focus_seek_target;
+    g_cur->nav_transition = g_cur->focus_retry || g_cur->focus_seek;
+    g_cur->nav_anchor = g_cur->focus_retry ? g_cur->focus_retry : g_cur->focus_seek;
+    if (!g_cur->nav_anchor) g_cur->nav_anchor = g_cur->nav_focus;
+    if (g_cur->closing || g_cur->composition[0] || g_cur->in.clicked || g_cur->in.scroll_y || g_cur->in.key_tab) {
         g_cur->focus_retry = 0;
-    g_cur->focus_wait_target = 0;
+        g_cur->focus_seek = 0;
+    }
+    g_cur->focus_wait_target = g_cur->focus_seek_target = 0;
     g_cur->focus_reveal = g_cur->focus_shifted = false;
     g_cur->focus_path_count = 0;
     g_cur->nav_direction = 0;
+    g_cur->nav_tab_first = g_cur->nav_tab_last = g_cur->nav_tab_previous = g_cur->nav_tab_target = g_cur->nav_tab_seen = 0;
+    g_cur->nav_tab_found = false;
     g_cur->nav_mouse_pending = g_cur->in.clicked;
     g_cur->nav_mouse_claimed = false;
     if (g_cur->combo_open && !g_cur->composition[0] && g_cur->in.last_key == HJPK_ESCAPE) {
@@ -1412,6 +1465,7 @@ static void gui_nav_end(void) {
     g_cur->focus_request = false;
     g_cur->focus_target = 0;
     g_cur->focus_retry = 0;
+    g_cur->focus_seek = 0;
     if (g_cur->nav_enabled && !g_cur->closing && !g_cur->composition[0] && !requested) {
         if (g_cur->nav_direction) {
             gui_nav_move(g_cur->nav_direction);
@@ -1426,14 +1480,15 @@ static void gui_nav_end(void) {
     bool found = false;
     for (int i = 0; i < g_cur->nav_current_count; i++)
         if (g_cur->nav_current[i].visible && g_cur->nav_current[i].id == g_cur->nav_focus) found = true;
-    if (!found && !(g_cur->modal_focus_pending && !g_cur->modal_focus_validate)) {
+    bool transition_pending = g_cur->focus_seek_target || g_cur->focus_wait_target;
+    if (!found && !transition_pending && !(g_cur->modal_focus_pending && !g_cur->modal_focus_validate)) {
         if (g_cur->focused && g_cur->focused == g_cur->nav_focus) {
             g_cur->focused = 0;
             hjp_stop_text_input();
         }
         g_cur->nav_focus = 0;
     }
-    if (g_cur->modal_focus_pending && g_cur->modal_focus_validate) {
+    if (g_cur->modal_focus_pending && g_cur->modal_focus_validate && !transition_pending) {
         g_cur->focused = 0;
         g_cur->modal_focus_pending = false;
         hjp_stop_text_input();
@@ -1444,18 +1499,23 @@ static bool gui_nav_register(uint32_t id, float x, float y, float w, float h) {
     if (!isfinite(x) || !isfinite(y) || !isfinite(w) || !isfinite(h)) return false;
     float vx = x, vy = y, vw = w, vh = h;
     bool visible = gui_visible_rect(&vx, &vy, &vw, &vh);
-    if (!visible && !(g_cur->focus_request && g_cur->focus_reveal && !g_cur->focus_target)) return false;
     if ((!g_cur->nav_enabled && !g_cur->focus_request && !g_cur->focus_retry) || g_cur->closing || g_disabled || w <= 0 || h <= 0 ||
         (g_cur->modal_title[0] && !g_cur->modal_entered)) return false;
     bool registered = false;
     for (int i = 0; i < g_cur->nav_current_count; i++)
         if (g_cur->nav_current[i].id == id) registered = true;
+    bool revealable = !visible && g_cur->nav_reveal_enabled &&
+        (g_cur->nav_direction || g_cur->focus_seek == id) && gui_focus_reveal_candidate(x, w);
+    if (!registered && (visible || revealable)) gui_nav_tab_candidate(id);
+    bool seeking = g_cur->nav_enabled && g_cur->nav_reveal_enabled && g_cur->focus_seek == id && (visible || revealable);
+    if (!visible && !(g_cur->focus_request && g_cur->focus_reveal && !g_cur->focus_target) && !seeking) return false;
     if (!registered && g_cur->nav_current_count < 512) {
         int index = g_cur->nav_current_count++;
         memset(&g_cur->nav_current[index], 0, sizeof(g_cur->nav_current[index]));
         g_cur->nav_current[index].id = id;
         g_cur->nav_current[index].visible = visible;
         g_cur->nav_current[index].x = x; g_cur->nav_current[index].y = y; g_cur->nav_current[index].h = h;
+        registered = true;
         if (g_cur->focus_request && !g_cur->focus_target) {
             if (g_cur->focus_offset) g_cur->focus_offset--;
             else {
@@ -1463,6 +1523,11 @@ static bool gui_nav_register(uint32_t id, float x, float y, float w, float h) {
                 if (g_cur->focus_reveal) gui_focus_capture(x, y, w, h);
             }
         }
+    }
+    if (seeking && registered) {
+        g_cur->focus_request = g_cur->focus_reveal = true;
+        g_cur->focus_target = id; g_cur->focus_seek = 0;
+        gui_focus_capture(x, y, w, h);
     }
     if (visible && g_cur->focus_retry == id) {
         g_cur->focus_request = true; g_cur->focus_target = id; g_cur->focus_retry = 0;
@@ -1504,7 +1569,7 @@ static bool gui_nav_control(uint32_t id, float x, float y, float w, float h) {
     Hjpcontext *vg = g_cur->vg;
     hjpBeginPath(vg); hjpRoundedRect(vg, x + 2, y + 2, fmaxf(0, w - 4), fmaxf(0, h - 4), 3);
     hjpStrokeColor(vg, TH_ACCENT); hjpStrokeWidth(vg, 2); hjpStroke(vg);
-    if (!g_cur->focused && !g_cur->nav_direction && !g_cur->composition[0] &&
+    if (!g_cur->focused && !g_cur->nav_direction && !g_cur->nav_transition && !g_cur->composition[0] &&
         (g_cur->in.key_return || g_cur->in.last_key == ' ')) {
         g_cur->in.key_return = false;
         g_cur->in.last_key = 0;
@@ -1516,7 +1581,7 @@ static bool gui_nav_control(uint32_t id, float x, float y, float w, float h) {
 /* 選択部品の移動キーは一か所で消費し、入力欄や別の部品へ渡さない。 */
 static int gui_nav_index(int current, int count) {
     GuiInput *in = &g_cur->in;
-    if (count <= 0 || g_cur->focused || g_cur->nav_direction || g_cur->composition[0]) return current;
+    if (count <= 0 || g_cur->focused || g_cur->nav_direction || g_cur->nav_transition || g_cur->composition[0]) return current;
     if (!in->key_up && !in->key_down && !in->key_home && !in->key_end) return current;
     if (current >= count) current = -1;
     int next = current;
@@ -2941,7 +3006,7 @@ static Value fn_slider(int argc, Value *argv) {
     }
 
     bool focused = gui_nav_register(id, field.x, y, track_w, input_h);
-    if (interactive && focused && !g_cur->focused) {
+    if (interactive && focused && !g_cur->focused && !g_cur->nav_direction && !g_cur->nav_transition) {
         if (g_cur->in.key_home) { val = vmin; g_cur->in.key_home = false; }
         if (g_cur->in.key_end) { val = vmax; g_cur->in.key_end = false; }
         if (g_cur->in.key_left || g_cur->in.key_down) {
@@ -10196,6 +10261,7 @@ static Value fn_focus_set(int argc, Value *argv) {
     g_cur->focus_shifted = false;
     g_cur->focus_path_count = 0;
     g_cur->focus_wait_target = g_cur->focus_retry = 0;
+    g_cur->focus_seek_target = g_cur->focus_seek = 0;
     return hajimu_null();
 }
 
@@ -22407,8 +22473,13 @@ static Value fn_dropdown_breadcrumb(int argc, Value *argv) { (void)argc; (void)a
 /* Phase 94 */
 /* 既存アプリのキー処理を変えないよう、明示的に有効化する。 */
 static Value fn_focus_traversal(int argc, Value *argv) {
-    if (!g_cur) return hajimu_bool(false);
-    g_cur->nav_enabled = argc == 0 || argv[0].type != VALUE_BOOL || argv[0].boolean;
+    if (!g_cur || argc < 0 || argc > 2 || (argc >= 1 && argv[0].type != VALUE_BOOL) ||
+        (argc == 2 && argv[1].type != VALUE_BOOL)) return hajimu_bool(false);
+    bool enabled = argc == 0 || argv[0].boolean;
+    bool reveal = enabled && argc == 2 && argv[1].boolean;
+    if (!enabled || (g_cur->nav_reveal_enabled && !reveal)) gui_focus_cancel(g_cur);
+    g_cur->nav_enabled = enabled;
+    g_cur->nav_reveal_enabled = reveal;
     if (!g_cur->nav_enabled) g_cur->nav_focus = 0;
     return hajimu_bool(g_cur->nav_enabled);
 }
@@ -26416,7 +26487,7 @@ static Value fn_api_status(int argc, Value *argv) {
         } else if (found->fn == fn_a11y_name || found->fn == fn_a11y_desc || found->fn == fn_a11y_role || found->fn == fn_sr_announce) {
             state = "部分対応"; reason = "macOSの基本部品と通常入力欄の編集/選択/フォーカス。外部AX・実読み上げ・テーブル/ツリー・他OSは未完了";
         } else if (found->fn == fn_focus_traversal) {
-            state = "部分対応"; reason = "現在の有効部品によるTab移動、モーダル復帰、一覧/コンボのキー選択。全特殊部品/OS実操作は未完了";
+            state = "部分対応"; reason = "有効部品のTab移動と任意のID付き領域の縦移動、モーダル復帰、一覧/コンボのキー選択。未描画仮想行/全特殊部品/OS実操作は未完了";
         } else if (found->fn == fn_combobox) {
             state = "部分対応"; reason = "最大8行の前面候補、上下配置、スクロールと検索語による絞込。全OS実操作/支援技術は未完了";
         }
@@ -26447,7 +26518,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.49.0",
+        .version        = "14.50.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,
