@@ -132,7 +132,7 @@ jobs:
       - name: チェックサム生成
         shell: bash
         run: |
-          for file in dist/*.hjp; do
+          for file in dist/hajimu_gui-${{ matrix.suffix }}.hjp; do
             if command -v sha256sum >/dev/null 2>&1; then
               sha256sum "$file" > "$file.sha256"
             else
@@ -144,16 +144,22 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: hajimu_gui-${{ matrix.suffix }}
-          path: dist/
+          path: |
+            dist/hajimu_gui-${{ matrix.suffix }}.hjp
+            dist/hajimu_gui-${{ matrix.suffix }}.hjp.sha256
+            dist/hajimu_gui-${{ matrix.suffix }}.utf8proc-license.txt
       - name: Sign build provenance and SBOM
         if: github.event_name != 'pull_request'
         uses: ./.github/actions/release-integrity
         with:
-          subject-path: dist/*.hjp
+          subject-path: dist/hajimu_gui-${{ matrix.suffix }}.hjp
           artifact-name: sbom-${{ matrix.suffix }}
 
       - name: GitHub Releases にアップロード
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: dist/*
+          files: |
+            dist/hajimu_gui-${{ matrix.suffix }}.hjp
+            dist/hajimu_gui-${{ matrix.suffix }}.hjp.sha256
+            dist/hajimu_gui-${{ matrix.suffix }}.utf8proc-license.txt

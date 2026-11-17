@@ -5512,7 +5512,7 @@ static Value fn_file_dialog(int argc, Value *argv) {
 }
 
 /* ---------------------------------------------------------------
- * ファイルコピー(コピー元, コピー先) → 真偽
+ * ファイルコピー(コピー元, コピー先[, 進捗関数]) → 真偽
  *
  * はじむ標準の文字列経由コピーでは NUL を含む画像・音声を保持できないため、
  * GUI で選択した素材をそのままプロジェクトへ取り込む用途に提供する。
@@ -5549,7 +5549,7 @@ static Value fn_file_delete(int argc, Value *argv) {
         return hajimu_bool(false);
     }
 
-    /* 通常ファイルとして開いて1バイト読み、ディレクトリを除外する。 */
+    /* 開いたハンドルの属性で通常ファイルか確認し、本文は読まない。 */
     HjpFileStamp stamp;
     FILE *probe = hjp_file_read_regular(path, &stamp);
     if (!probe) {
@@ -5564,11 +5564,11 @@ static Value fn_file_delete(int argc, Value *argv) {
 }
 
 /* ---------------------------------------------------------------
- * ファイル置換(一時ファイル, 保存先) → 真偽
+ * ファイル置換(一時ファイル, 保存先[, 上書き許可]) → 真偽
  *
  * 同じファイルシステム上で一時ファイルを保存先へ原子的に置換する。
  * 保存中の異常で既存ファイルを失わないよう、先に保存先を削除しない。
- * 成功時は一時ファイルがなくなり、失敗時は保存先を変更しない。
+ * 上書き禁止のlink代替経路では、成功後も一時名が残る場合がある。
  * ---------------------------------------------------------------*/
 #ifdef _WIN32
 static wchar_t *gui_file_path_to_wide(const char *path) {
@@ -26207,7 +26207,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.45.0",
+        .version        = "14.46.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,
