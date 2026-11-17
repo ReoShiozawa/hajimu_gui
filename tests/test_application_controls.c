@@ -1259,6 +1259,104 @@ static void check_modal_forms(void) {
     fn_modal_reserve(1, &none); gui_nav_end(); hjpCancelFrame(g_cur->vg);
 }
 
+static void check_scroll_identity(void) {
+    Value a[] = {hajimu_number(240), hajimu_number(100), hajimu_string("identity-a")};
+    Value b[] = {hajimu_number(240), hajimu_number(100), hajimu_string("identity-b")};
+    frame(false, false, 500);
+    Value slot = fn_scroll_begin(3, a); assert(slot.number == 0 && g_scrolls[0].scroll_y == 0);
+    g_scrolls[0].scroll_y = 80; g_cur->lay.y = g_scrolls[0].y + 920; fn_scroll_end(1, &slot);
+    slot = fn_scroll_begin(3, b); assert(slot.number == 0 && g_scrolls[0].scroll_y == 0);
+    g_scrolls[0].scroll_y = 90; g_cur->lay.y = g_scrolls[0].y + 910; fn_scroll_end(1, &slot);
+    frame(false, false, 500);
+    slot = fn_scroll_begin(3, b); assert(g_scrolls[0].scroll_y == 90);
+    g_cur->lay.y += 1000; fn_scroll_end(1, &slot);
+    slot = fn_scroll_begin(3, a); assert(g_scrolls[0].scroll_y == 80);
+    int depth = hjpStateDepth(g_cur->vg);
+    assert(fn_scroll_begin(3, a).number == -1 && hjpStateDepth(g_cur->vg) == depth);
+    g_cur->lay.y += 20; fn_scroll_end(1, &slot);
+    frame(false, false, 500); slot = fn_scroll_begin(3, a);
+    assert(g_scrolls[0].scroll_y == 0); fn_scroll_end(1, &slot);
+
+    Value child[] = {a[2], hajimu_number(240), hajimu_number(100)};
+    frame(false, false, 500); assert(fn_child_begin(3, child).boolean && g_scrolls[0].scroll_y == 0);
+    g_scrolls[0].scroll_y = 40; g_cur->lay.y += 1000; fn_child_end(0, NULL);
+    frame(false, false, 500); assert(fn_child_begin(3, child).boolean && g_scrolls[0].scroll_y == 40);
+    g_cur->lay.y += 1000; fn_child_end(0, NULL);
+    child[0] = b[2]; assert(fn_child_begin(3, child).boolean && g_scrolls[0].scroll_y == 0);
+    fn_child_end(0, NULL);
+    slot = fn_scroll_begin(3, b); assert(g_scrolls[0].scroll_y == 90);
+    g_cur->lay.y += 1000; fn_scroll_end(1, &slot);
+
+    GuiApp *original = g_cur;
+    hjpCancelFrame(original->vg);
+    Value create[] = {hajimu_string("scroll isolation"), hajimu_number(400), hajimu_number(240)};
+    Value other = fn_app_create(3, create); assert(other.type == VALUE_NUMBER);
+    g_cur = &g_apps[(int)other.number]; frame(false, false, 500);
+    slot = fn_scroll_begin(3, b); assert(g_scrolls[0].scroll_y == 0);
+    g_cur->lay.y += 1000; fn_scroll_end(1, &slot); hjpCancelFrame(g_cur->vg);
+    fn_app_quit(1, &other); g_cur = original; hjp_gl_make_current(g_cur->window, g_cur->gl);
+    frame(false, false, 500); slot = fn_scroll_begin(3, b); assert(g_scrolls[0].scroll_y == 90);
+    g_cur->lay.y += 1000; fn_scroll_end(1, &slot);
+
+    Value parent = modal_list("identity-dialog", NULL), none = hajimu_string("");
+    Value dialog[] = {hajimu_string("identity-dialog"), hajimu_bool(true)};
+    for (int pass = 0; pass < 3; pass++) {
+        frame(false, false, 500); gui_nav_begin(); fn_modal_reserve(1, &parent);
+        assert(fn_dialog_begin(2, dialog).boolean);
+        slot = fn_scroll_begin(3, b);
+        assert(g_scrolls[0].scroll_y == (pass == 1 ? 60 : 0));
+        g_scrolls[0].scroll_y = 60; g_cur->lay.y = g_scrolls[0].y + 940;
+        fn_scroll_end(1, &slot); fn_dialog_end(0, NULL); gui_nav_end();
+        if (pass > 0) fn_modal_reserve(1, &none);
+    }
+
+    frame(false, false, 500);
+    a[2] = hajimu_string("identity-protected"); slot = fn_scroll_begin(3, a);
+    GuiScrollState *kept = NULL;
+    for (int i = 0; i < GUI_SCROLL_STATE_MAX; i++)
+        if (g_cur->scroll_states[i].id == gui_hash(a[2].string.data)) kept = &g_cur->scroll_states[i];
+    assert(kept);
+    for (int i = 0; i < GUI_SCROLL_STATE_MAX * 2; i++) {
+        char id[64]; snprintf(id, sizeof(id), "identity-evict-%d", i);
+        assert(gui_scroll_state(gui_hash(id), 0, false));
+    }
+    assert(kept->id == gui_hash(a[2].string.data));
+    fn_modal_reserve(1, &parent); assert(fn_dialog_begin(2, dialog).boolean);
+    for (int i = 0; i < GUI_SCROLL_STATE_MAX * 2; i++) {
+        char id[64]; snprintf(id, sizeof(id), "identity-child-evict-%d", i);
+        assert(gui_scroll_state(gui_hash(id), gui_scroll_epoch(), false));
+    }
+    fn_dialog_end(0, NULL); fn_modal_reserve(1, &none);
+    assert(kept->id == gui_hash(a[2].string.data));
+    g_scrolls[0].scroll_y = 70; g_cur->lay.y = g_scrolls[0].y + 930;
+    fn_scroll_end(1, &slot); assert(kept->position == 70);
+
+    a[2] = hajimu_string("identity-drag-a"); b[2] = hajimu_string("identity-drag-b");
+    frame(true, false, 247); g_cur->in.my = 43;
+    slot = fn_scroll_begin(3, a); g_scrolls[0].scroll_y = 200;
+    g_cur->lay.y = g_scrolls[0].y + 300; fn_scroll_end(1, &slot);
+    assert(g_cur->active && g_scrolls[0].scroll_y == 200 && g_scrolls[0].drag_offset == 3);
+    slot = fn_scroll_begin(3, b); g_cur->lay.y += 500; fn_scroll_end(1, &slot);
+    frame(false, false, 247); g_cur->in.down = true; g_cur->in.my = 53;
+    slot = fn_scroll_begin(3, b); g_cur->lay.y += 500; fn_scroll_end(1, &slot);
+    assert(g_scrolls[0].scroll_y == 0);
+    slot = fn_scroll_begin(3, a); g_cur->lay.y += 500; fn_scroll_end(1, &slot);
+    assert(g_scrolls[0].scroll_y == 0); g_cur->active = 0;
+
+    frame(false, false, 500);
+    GuiLayout before = g_cur->lay; depth = hjpStateDepth(g_cur->vg);
+    a[2] = hajimu_string(""); assert(fn_scroll_begin(3, a).number == -1);
+    a[2] = hajimu_null(); assert(fn_scroll_begin(3, a).number == -1);
+    a[2] = hajimu_string("x"); a[2].string.data = "x\0y"; a[2].string.byte_length = 3;
+    assert(fn_scroll_begin(3, a).number == -1);
+    child[1] = hajimu_number(NAN); assert(!fn_child_begin(3, child).boolean);
+    assert(!memcmp(&before, &g_cur->lay, sizeof(before)) && hjpStateDepth(g_cur->vg) == depth);
+    g_cur->scroll_state_clock = UINT64_MAX;
+    GuiScrollState *wrapped = gui_scroll_state(gui_hash("identity-clock-wrap"), 0, false);
+    assert(wrapped && wrapped->used == 1 && g_cur->scroll_state_clock == 1);
+    hjpCancelFrame(g_cur->vg);
+}
+
 static void check_form_scrolling(void) {
     frame(false, false, 500);
     Value parent[] = {hajimu_string("auto-scroll-parent"), hajimu_number(220), hajimu_number(120)};
@@ -2049,6 +2147,7 @@ int main(void) {
     check_toggle_slider_layout();
     check_text_block_layout();
     check_form_scrolling();
+    check_scroll_identity();
     char oversized[GUI_MAX_TEXT_BUF + 8];
     memset(oversized, 'a', GUI_MAX_TEXT_BUF - 2);
     memcpy(oversized + GUI_MAX_TEXT_BUF - 2, "日本", 7);

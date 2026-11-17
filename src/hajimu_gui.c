@@ -312,6 +312,14 @@ typedef struct {
 } GuiLastWidget;
 
 /* --- アプリケーション本体 --- */
+#define GUI_SCROLL_STATE_MAX 128
+typedef struct {
+    uint32_t id;
+    uint64_t epoch, used;
+    float position, drag_offset;
+    bool child;
+} GuiScrollState;
+
 typedef struct {
     HjpWindow   *window;
     HjpGLContext  gl;
@@ -366,6 +374,8 @@ typedef struct {
     int focus_offset;
     uint32_t focus_target;
     bool nav_mouse_pending, nav_mouse_claimed;
+    GuiScrollState scroll_states[GUI_SCROLL_STATE_MAX];
+    uint64_t scroll_state_clock;
     char modal_title[256];
     bool modal_entered, modal_input_saved;
     bool modal_input_delivered;
@@ -842,6 +852,9 @@ static float g_min_w = 0, g_min_h = 0, g_max_w = 0, g_max_h = 0;
 
 typedef struct {
     float x, y, w, h;        /* 表示領域 */
+    uint32_t state_id;
+    uint64_t state_epoch;
+    bool state_child;
     float scroll_y;           /* 現在のスクロール位置 */
     float drag_offset;        /* つまみ内で押した位置を保持する */
     float content_h;          /* コンテンツ全高 */
@@ -5264,6 +5277,9 @@ static Value fn_modal_reserve(int argc, Value *argv) {
     if (changed) {
         while (g_cur->modal_count > common) {
             int old = --g_cur->modal_count;
+            for (int i = 0; i < GUI_SCROLL_STATE_MAX; i++)
+                if (g_cur->scroll_states[i].epoch == g_cur->modals[old].epoch)
+                    memset(&g_cur->scroll_states[i], 0, sizeof(g_cur->scroll_states[i]));
             /* 覆われた親は保持し、閉じた段だけを消して次回の初期値を反映する。 */
             int write = 0, previous = g_cur->text_buf_count;
             for (int read = 0; read < previous; read++) {
@@ -7585,12 +7601,71 @@ static Value fn_image_button(int argc, Value *argv) {
  * Phase 12: 高度なレイアウト (v1.2.0)
  * ===================================================================*/
 
+static bool gui_scroll_name_valid(Value name) {
+    return name.type == VALUE_STRING && name.string.data && name.string.byte_length > 0 &&
+        strlen(name.string.data) == (size_t)name.string.byte_length;
+}
+
+static uint64_t gui_scroll_epoch(void) {
+    int depth = g_dialog_depth[g_cur - g_apps];
+    return depth ? g_dialog_scopes[g_cur - g_apps][depth - 1].modal_epoch : 0;
+}
+
+static bool gui_scroll_matches(const GuiScrollRegion *region, const GuiScrollState *state) {
+    return region->active && region->state_id == state->id &&
+        region->state_epoch == state->epoch && region->state_child == state->child;
+}
+
+/* 描画中の領域は退避した親ダイアログも含めて追い出さない。 */
+static bool gui_scroll_state_active(const GuiScrollState *state) {
+    for (int i = 0; i < GUI_MAX_SCROLL; i++) if (gui_scroll_matches(&g_scrolls[i], state)) return true;
+    int owner = (int)(g_cur - g_apps);
+    for (int d = 0; d < g_dialog_depth[owner]; d++)
+        for (int i = 0; i < GUI_MAX_SCROLL; i++)
+            if (gui_scroll_matches(&g_dialog_scopes[owner][d].scrolls[i], state)) return true;
+    return false;
+}
+
+static GuiScrollState *gui_scroll_state(uint32_t id, uint64_t epoch, bool child) {
+    GuiScrollState *slot = NULL;
+    for (int i = 0; i < GUI_SCROLL_STATE_MAX; i++) {
+        GuiScrollState *state = &g_cur->scroll_states[i];
+        if (state->id == id && state->epoch == epoch && state->child == child) {
+            if (gui_scroll_state_active(state)) return NULL;
+            slot = state; break;
+        }
+        if (!state->id) { if (!slot || slot->id) slot = state; }
+        else if ((!slot || (slot->id && state->used < slot->used)) && !gui_scroll_state_active(state)) slot = state;
+    }
+    if (!slot) return NULL;
+    if (slot->id != id || slot->epoch != epoch || slot->child != child)
+        *slot = (GuiScrollState){.id = id, .epoch = epoch, .child = child};
+    if (g_cur->scroll_state_clock == UINT64_MAX) {
+        for (int i = 0; i < GUI_SCROLL_STATE_MAX; i++) g_cur->scroll_states[i].used = 0;
+        g_cur->scroll_state_clock = 0;
+    }
+    slot->used = ++g_cur->scroll_state_clock;
+    return slot;
+}
+
+static void gui_scroll_state_save(const GuiScrollRegion *region) {
+    if (!region->state_id) return;
+    for (int i = 0; i < GUI_SCROLL_STATE_MAX; i++) {
+        GuiScrollState *state = &g_cur->scroll_states[i];
+        if (state->id != region->state_id || state->epoch != region->state_epoch || state->child != region->state_child) continue;
+        state->position = region->scroll_y;
+        state->drag_offset = region->drag_offset;
+        return;
+    }
+}
+
 /* ---------------------------------------------------------------
- * スクロール領域開始(幅, 高さ)
+ * スクロール領域開始(幅, 高さ[, ID])
  *   クリッピング+ スクロールバー付き領域を開始。
  * ---------------------------------------------------------------*/
 static Value fn_scroll_begin(int argc, Value *argv) {
     if (!g_cur || argc < 2) return hajimu_null();
+    if (argc > 3 || (argc == 3 && !gui_scroll_name_valid(argv[2]))) return hajimu_number(-1);
 
     float sw = (argv[0].type == VALUE_NUMBER) ? (float)argv[0].number : 200.0f;
     float sh = (argv[1].type == VALUE_NUMBER) ? (float)argv[1].number : 200.0f;
@@ -7616,6 +7691,17 @@ static Value fn_scroll_begin(int argc, Value *argv) {
     if (sh < 1) sh = 1;
 
     GuiScrollRegion *sr = &g_scrolls[slot];
+    if (argc == 3) {
+        uint32_t id = gui_hash(argv[2].string.data);
+        uint64_t epoch = gui_scroll_epoch();
+        GuiScrollState *state = gui_scroll_state(id, epoch, false);
+        if (!state) return hajimu_number(-1);
+        sr->scroll_y = state->position; sr->drag_offset = state->drag_offset;
+        sr->state_id = id; sr->state_epoch = epoch; sr->state_child = false;
+    } else {
+        if (sr->state_id) sr->scroll_y = sr->drag_offset = 0;
+        sr->state_id = 0;
+    }
     sr->x = x; sr->y = y; sr->w = sw; sr->h = sh;
     sr->saved_x = g_cur->lay.x;
     sr->saved_y = g_cur->lay.y;
@@ -7663,7 +7749,8 @@ static Value fn_scroll_end(int argc, Value *argv) {
     hjpFillColor(vg, TH_TRACK);
     hjpFill(vg);
 
-    uint32_t sbid = gui_hash("__scroll__") + (uint32_t)slot;
+    uint32_t sbid = sr->state_id ? sr->state_id ^ (sr->state_child ? 0x5a111bad : 0x9b22d00d) : gui_hash("__scroll__") + (uint32_t)slot;
+    if (!sbid) sbid = 1;
     /* スクロールバーつまみ */
     if (sr->content_h > sr->h) {
         float ratio = sr->h / sr->content_h;
@@ -7714,6 +7801,7 @@ static Value fn_scroll_end(int argc, Value *argv) {
     hjpStroke(vg);
 
     /* レイアウト復元 */
+    gui_scroll_state_save(sr);
     g_cur->layout_scope_depth = sr->saved_scope_depth;
     g_cur->lay.x = sr->saved_x;
     g_cur->lay.y = sr->saved_y;
@@ -9098,14 +9186,15 @@ static Value fn_histogram(int argc, Value *argv) {
 
 /* ---------------------------------------------------------------
  * 子ウィンドウ開始(ID, 幅, 高さ[, 枠線]) → 真偽
- *   スクロール領域の薄いラッパー。常に真を返す。
+ *   スクロール領域の薄いラッパー。IDで表示位置を分離する。
  * ---------------------------------------------------------------*/
 static Value fn_child_begin(int argc, Value *argv) {
-    if (!g_cur || argc < 3) return hajimu_bool(false);
+    if (!g_cur || argc < 3 || argc > 4 || !gui_scroll_name_valid(argv[0])) return hajimu_bool(false);
 
     /* スクロール領域と同様の処理 */
     float cw = (argv[1].type == VALUE_NUMBER) ? (float)argv[1].number : 200;
     float ch = (argv[2].type == VALUE_NUMBER) ? (float)argv[2].number : 200;
+    if (!isfinite(cw) || !isfinite(ch)) return hajimu_bool(false);
     bool border = (argc >= 4 && argv[3].type == VALUE_BOOL) ? argv[3].boolean : true;
 
     int slot = -1;
@@ -9124,6 +9213,12 @@ static Value fn_child_begin(int argc, Value *argv) {
     if (ch < 1) ch = 1;  /* 最低1pxを保証 */
 
     GuiScrollRegion *sr = &g_scrolls[slot];
+    uint32_t id = gui_hash(argv[0].string.data);
+    uint64_t epoch = gui_scroll_epoch();
+    GuiScrollState *state = gui_scroll_state(id, epoch, true);
+    if (!state) return hajimu_bool(false);
+    sr->scroll_y = state->position; sr->drag_offset = state->drag_offset;
+    sr->state_id = id; sr->state_epoch = epoch; sr->state_child = true;
     sr->x = x; sr->y = y; sr->w = cw; sr->h = ch;
     sr->saved_x = g_cur->lay.x;
     sr->saved_y = g_cur->lay.y;
@@ -9168,6 +9263,8 @@ static Value fn_child_end(int argc, Value *argv) {
         if (g_scrolls[i].active) {
             GuiScrollRegion *sr = &g_scrolls[i];
             sr->content_h = (g_cur->lay.y + sr->scroll_y) - sr->y;
+            sr->scroll_y = fmaxf(0, fminf(sr->scroll_y, sr->content_h - sr->h));
+            gui_scroll_state_save(sr);
             hjpRestore(g_cur->vg);
             g_cur->layout_scope_depth = sr->saved_scope_depth;
             g_cur->lay.x = sr->saved_x;
@@ -24984,7 +25081,7 @@ static HajimuPluginFunc gui_functions[] = {
     {"小ボタン",             fn_small_button,  1, 1},
     {"画像ボタン",           fn_image_button,  1, 3},
     /* --- Phase 12: 高度なレイアウト --- */
-    {"スクロール領域開始",   fn_scroll_begin,  2, 2},
+    {"スクロール領域開始",   fn_scroll_begin,  2, 3},
     {"スクロール領域終了",   fn_scroll_end,    1, 1},
     {"グリッド開始",         fn_grid_begin,    1, 2},
     {"グリッド終了",         fn_grid_end,      1, 1},
@@ -26232,7 +26329,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.47.0",
+        .version        = "14.48.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,
