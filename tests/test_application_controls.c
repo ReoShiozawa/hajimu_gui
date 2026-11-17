@@ -1761,6 +1761,105 @@ static void check_focus_request(void) {
     g_cur->nav_focus = g_cur->focused = 0; g_cur->nav_enabled = false;
 }
 
+static void check_focus_reveal(void) {
+    Value request[] = {hajimu_number(0), hajimu_bool(true)};
+    Value before[] = {hajimu_string("rv-before"), hajimu_string("元")};
+    Value upper[] = {hajimu_string("rv-upper"), hajimu_string("上")};
+    Value lower[] = {hajimu_string("rv-lower"), hajimu_string("")};
+    Value area[] = {hajimu_number(276), hajimu_number(100), hajimu_string("reveal-region")};
+    g_cur->nav_enabled = true; g_cur->focused = g_cur->nav_focus = gui_hash("rv-before");
+    for (int step = 0; step < 5; step++) {
+        frame(false, false, 500); gui_nav_begin();
+        if (step == 1 || step == 2) {
+            strcpy(g_cur->in.text_input, step == 1 ? "追" : "次");
+            g_cur->in.text_input_len = (int)strlen(g_cur->in.text_input);
+        }
+        before[1] = fn_text_input(2, before);
+        Value slot = fn_scroll_begin(3, area); assert(slot.number >= 0);
+        if (step == 3) fn_focus_set(2, request);
+        upper[1] = fn_text_input(2, upper);
+        g_cur->lay.y += 500;
+        if (!step) fn_focus_set(2, request);
+        lower[1] = fn_text_input(2, lower);
+        g_cur->lay.y += 80;
+        fn_scroll_end(1, &slot); gui_nav_end();
+        if (!step) {
+            assert(g_scrolls[(int)slot.number].scroll_y > 400);
+            assert(g_cur->focus_wait_target == gui_hash("rv-lower") && g_cur->focused == gui_hash("rv-before"));
+            GuiTextBuf *old = gui_get_text_buf(gui_hash("rv-before"), "");
+            HjpEvent edit = {.type = HJP_EVENT_TEXTREPLACE};
+            edit.edit.window = g_cur->window; edit.edit.generation = hjp_window_get_id(g_cur->window);
+            edit.edit.id = old->id; edit.edit.start = edit.edit.end = old->len;
+            assert(hjp_document_set_text(&edit, "先") && gui_apply_document_event(g_cur, &edit));
+            hjp_event_dispose(&edit);
+        } else if (step == 1 || step == 2) {
+            assert(g_cur->focused == gui_hash("rv-lower") && !g_cur->focus_wait_target);
+            assert(!strcmp(before[1].string.data, "元先追"));
+            assert(!strcmp(lower[1].string.data, step == 1 ? "" : "次"));
+        } else if (step == 3) {
+            assert(g_scrolls[(int)slot.number].scroll_y == 0);
+            assert(g_cur->focus_wait_target == gui_hash("rv-upper") && g_cur->focused == gui_hash("rv-lower"));
+        } else assert(g_cur->focused == gui_hash("rv-upper") && !g_cur->focus_wait_target);
+    }
+    Value outer[] = {hajimu_string("reveal-outer"), hajimu_number(276), hajimu_number(180)};
+    area[2] = hajimu_string("reveal-inner");
+    Value nested[] = {hajimu_string("rv-nested"), hajimu_string("")};
+    g_cur->focused = g_cur->nav_focus = 0;
+    for (int step = 0; step < 2; step++) {
+        frame(false, false, 500); gui_nav_begin(); assert(fn_child_begin(3, outer).boolean);
+        g_cur->lay.y += 400;
+        Value slot = fn_scroll_begin(3, area); assert(slot.number == 1);
+        g_cur->lay.y += 300;
+        if (!step) fn_focus_set(2, request);
+        nested[1] = fn_text_input(2, nested);
+        fn_scroll_end(1, &slot); fn_child_end(0, NULL); gui_nav_end();
+        if (!step) assert(g_cur->focus_wait_target == gui_hash("rv-nested") && !g_cur->focused);
+        else assert(g_cur->focused == gui_hash("rv-nested") && !g_cur->focus_wait_target);
+    }
+    for (int kind = 0; kind < 5; kind++) {
+        frame(false, false, 500); g_cur->focus_wait_target = gui_hash("rv-nested");
+        if (kind == 0) g_cur->in.clicked = true;
+        if (kind == 1) g_cur->in.scroll_y = -1;
+        if (kind == 2) g_cur->in.key_tab = true;
+        if (kind == 3) strcpy(g_cur->composition, "変換");
+        if (kind == 4) g_cur->closing = true;
+        gui_nav_begin(); assert(!g_cur->focus_retry && !g_cur->focus_wait_target);
+        gui_nav_end(); g_cur->composition[0] = 0; g_cur->closing = false;
+    }
+    frame(false, false, 500); gui_nav_begin();
+    Value parent = modal_list("reveal-cancel", NULL), none = hajimu_string("");
+    g_cur->focus_wait_target = gui_hash("rv-nested");
+    fn_modal_reserve(1, &parent); assert(!g_cur->focus_wait_target && !g_cur->focus_retry);
+    fn_modal_reserve(1, &none); gui_nav_end();
+
+    frame(false, false, 500); gui_nav_begin(); g_cur->focused = g_cur->nav_focus = 0;
+    Value slot = fn_scroll_begin(2, area); g_cur->lay.y += 500;
+    fn_focus_set(2, request); fn_text_input(2, nested);
+    fn_scroll_end(1, &slot); gui_nav_end();
+    assert(g_scrolls[(int)slot.number].scroll_y == 0 && !g_cur->focus_wait_target && !g_cur->focused);
+    frame(false, false, 500); gui_nav_begin(); area[2] = hajimu_string("reveal-horizontal");
+    slot = fn_scroll_begin(3, area); g_cur->lay.x = 1000; g_cur->lay.y += 500;
+    fn_focus_set(2, request); fn_text_input(2, nested); fn_scroll_end(1, &slot); gui_nav_end();
+    assert(g_scrolls[(int)slot.number].scroll_y == 0 && !g_cur->focus_wait_target && !g_cur->focused);
+
+    area[2] = hajimu_string("reveal-oversized");
+    for (int step = 0; step < 2; step++) {
+        frame(false, false, 500); gui_nav_begin(); slot = fn_scroll_begin(3, area);
+        g_cur->lay.y += 400;
+        if (!step) fn_focus_set(2, request);
+        gui_nav_control(906, g_cur->lay.x + 12, g_cur->lay.y, 100, 200);
+        g_cur->lay.y += 200; fn_scroll_end(1, &slot); gui_nav_end();
+        assert(g_scrolls[(int)slot.number].scroll_y == 400);
+        if (step) assert(g_cur->nav_focus == 906 && !g_cur->focus_wait_target);
+    }
+    frame(false, false, 500); g_cur->focus_wait_target = 907;
+    gui_nav_begin(); gui_nav_control(908, 0, 0, 100, 30); gui_nav_end();
+    assert(!g_cur->focus_wait_target && g_cur->nav_focus != 907);
+    Value invalid[] = {hajimu_number(0), hajimu_number(1)};
+    fn_focus_set(2, invalid); assert(!g_cur->focus_request);
+    g_cur->nav_focus = g_cur->focused = 0; g_cur->nav_enabled = false;
+}
+
 static void check_keyboard_choices(void) {
     Value choices = hajimu_array();
     hajimu_array_push(&choices, hajimu_string("左"));
@@ -2156,6 +2255,7 @@ int main(void) {
     check_navigation_current_frame();
     check_navigation_modals();
     check_focus_request();
+    check_focus_reveal();
     check_keyboard_choices();
     check_combo_popup();
     assert(fn_focus_traversal(0, NULL).boolean);

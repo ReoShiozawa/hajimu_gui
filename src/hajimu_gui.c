@@ -101,6 +101,7 @@
  * ===================================================================*/
 
 #define GUI_MAX_APPS         8
+#define GUI_MAX_SCROLL       16
 #define GUI_MAX_MODALS       16
 #define GUI_PADDING         14.0f
 #define GUI_MARGIN           8.0f
@@ -371,8 +372,18 @@ typedef struct {
     int nav_direction;
     bool nav_autofocus;
     bool focus_request;
+    bool focus_reveal, focus_shifted, focus_path_valid;
     int focus_offset;
-    uint32_t focus_target;
+    uint32_t focus_target, focus_wait_target, focus_retry;
+    float focus_y, focus_h;
+    int focus_path_count;
+    struct {
+        uint32_t id;
+        uint64_t epoch;
+        int slot;
+        float origin;
+        bool child, done;
+    } focus_path[GUI_MAX_SCROLL];
     bool nav_mouse_pending, nav_mouse_claimed;
     GuiScrollState scroll_states[GUI_SCROLL_STATE_MAX];
     uint64_t scroll_state_clock;
@@ -400,7 +411,7 @@ typedef struct {
     bool text_context_published;
     uint32_t text_context_id;
     uint64_t composition_version, composition_notified;
-    struct { uint32_t id; bool text; float x, y, h; } nav_current[512];
+    struct { uint32_t id; bool text, visible; float x, y, h; } nav_current[512];
     int nav_current_count;
     /* 上限付きの一覧状態。別ウィンドウや剰余の一致で状態を共有しない。 */
     struct {
@@ -843,7 +854,6 @@ static float g_padding_extra = 0;
 static float g_min_w = 0, g_min_h = 0, g_max_w = 0, g_max_h = 0;
 
 /* --- Phase 12: 高度なレイアウト --- */
-#define GUI_MAX_SCROLL       16
 #define GUI_MAX_GRID         16
 #define GUI_MAX_GROUP        16
 #define GUI_SCROLLBAR_W      10.0f
@@ -1245,6 +1255,7 @@ static inline void gui_pos(float *x, float *y, float *w) {
 
 /* 次のイベント取得より前にOS側も切り替え、欄を移った直後の入力を失わない。 */
 static void gui_nav_focus_entry(int index) {
+    if (!g_cur->nav_current[index].visible) return;
     uint32_t id = g_cur->nav_current[index].id;
     if (g_cur->focused != id) {
         hjp_stop_text_input();
@@ -1283,8 +1294,35 @@ static void gui_nav_move(int direction) {
     for (int i = 0; i < g_cur->nav_current_count; i++)
         if (g_cur->nav_current[i].id == g_cur->nav_focus) index = i;
     if (index < 0) index = direction < 0 ? 0 : -1;
-    index = (index + (direction < 0 ? -1 : 1) + g_cur->nav_current_count) % g_cur->nav_current_count;
-    gui_nav_focus_entry(index);
+    for (int step = 0; step < g_cur->nav_current_count; step++) {
+        index = (index + (direction < 0 ? -1 : 1) + g_cur->nav_current_count) % g_cur->nav_current_count;
+        if (g_cur->nav_current[index].visible) { gui_nav_focus_entry(index); break; }
+    }
+}
+
+static void gui_focus_capture(float x, float y, float w, float h) {
+    g_cur->focus_y = y; g_cur->focus_h = h;
+    g_cur->focus_path_count = 0;
+    g_cur->focus_path_valid = true;
+    float left = 0, right = g_cur->win_w;
+    int depth = g_dialog_depth[g_cur - g_apps];
+    if (depth) {
+        GuiDialogScope *scope = &g_dialog_scopes[g_cur - g_apps][depth - 1];
+        left = fmaxf(left, scope->content_x); right = fminf(right, scope->content_x + scope->content_w);
+    }
+    for (int i = 0; i < GUI_MAX_SCROLL; i++) if (g_scrolls[i].active) {
+        GuiScrollRegion *region = &g_scrolls[i];
+        int n = g_cur->focus_path_count++;
+        g_cur->focus_path[n].id = region->state_id;
+        g_cur->focus_path[n].epoch = region->state_epoch;
+        g_cur->focus_path[n].slot = i;
+        g_cur->focus_path[n].origin = region->scroll_y;
+        g_cur->focus_path[n].child = region->state_child;
+        g_cur->focus_path[n].done = false;
+        if (!region->state_id) g_cur->focus_path_valid = false;
+        left = fmaxf(left, region->x); right = fminf(right, region->x + region->w);
+    }
+    if (x >= right || x + w <= left) g_cur->focus_path_valid = false;
 }
 
 static void gui_nav_begin(void) {
@@ -1301,6 +1339,12 @@ static void gui_nav_begin(void) {
     g_cur->nav_current_count = 0;
     g_cur->focus_request = false;
     g_cur->focus_target = 0;
+    g_cur->focus_retry = g_cur->focus_wait_target;
+    if (g_cur->closing || g_cur->composition[0] || g_cur->in.clicked || g_cur->in.scroll_y || g_cur->in.key_tab)
+        g_cur->focus_retry = 0;
+    g_cur->focus_wait_target = 0;
+    g_cur->focus_reveal = g_cur->focus_shifted = false;
+    g_cur->focus_path_count = 0;
     g_cur->nav_direction = 0;
     g_cur->nav_mouse_pending = g_cur->in.clicked;
     g_cur->nav_mouse_claimed = false;
@@ -1344,8 +1388,15 @@ static void gui_nav_end(void) {
     }
     bool requested = false;
     if (g_cur->focus_request && g_cur->focus_target && !g_cur->closing && !g_cur->composition[0]) {
-        for (int i = 0; i < g_cur->nav_current_count; i++) {
+        if (g_cur->focus_shifted) {
+            bool complete = g_cur->focus_path_valid;
+            for (int i = 0; i < g_cur->focus_path_count; i++) if (!g_cur->focus_path[i].done) complete = false;
+            if (complete) g_cur->focus_wait_target = g_cur->focus_target;
+            requested = true;
+        }
+        for (int i = 0; !requested && i < g_cur->nav_current_count; i++) {
             if (g_cur->nav_current[i].id != g_cur->focus_target) continue;
+            if (!g_cur->nav_current[i].visible) break;
             if (!g_cur->nav_enabled && !g_cur->nav_current[i].text) break;
             gui_nav_focus_entry(i);
             g_cur->combo_open = 0;
@@ -1355,19 +1406,21 @@ static void gui_nav_end(void) {
     }
     g_cur->focus_request = false;
     g_cur->focus_target = 0;
+    g_cur->focus_retry = 0;
     if (g_cur->nav_enabled && !g_cur->closing && !g_cur->composition[0] && !requested) {
         if (g_cur->nav_direction) {
             gui_nav_move(g_cur->nav_direction);
             g_cur->combo_open = 0;
         }
-        else if (g_cur->nav_autofocus && !g_cur->nav_focus && g_cur->nav_current_count)
-            gui_nav_focus_entry(0);
+        else if (g_cur->nav_autofocus && !g_cur->nav_focus)
+            for (int i = 0; i < g_cur->nav_current_count; i++)
+                if (g_cur->nav_current[i].visible) { gui_nav_focus_entry(i); break; }
     }
     g_cur->nav_direction = 0;
     g_cur->nav_autofocus = false;
     bool found = false;
     for (int i = 0; i < g_cur->nav_current_count; i++)
-        if (g_cur->nav_current[i].id == g_cur->nav_focus) found = true;
+        if (g_cur->nav_current[i].visible && g_cur->nav_current[i].id == g_cur->nav_focus) found = true;
     if (!found && !(g_cur->modal_focus_pending && !g_cur->modal_focus_validate)) {
         if (g_cur->focused && g_cur->focused == g_cur->nav_focus) {
             g_cur->focused = 0;
@@ -1383,9 +1436,11 @@ static void gui_nav_end(void) {
 }
 
 static bool gui_nav_register(uint32_t id, float x, float y, float w, float h) {
+    if (!isfinite(x) || !isfinite(y) || !isfinite(w) || !isfinite(h)) return false;
     float vx = x, vy = y, vw = w, vh = h;
-    if (!gui_visible_rect(&vx, &vy, &vw, &vh)) return false;
-    if ((!g_cur->nav_enabled && !g_cur->focus_request) || g_cur->closing || g_disabled || w <= 0 || h <= 0 ||
+    bool visible = gui_visible_rect(&vx, &vy, &vw, &vh);
+    if (!visible && !(g_cur->focus_request && g_cur->focus_reveal && !g_cur->focus_target)) return false;
+    if ((!g_cur->nav_enabled && !g_cur->focus_request && !g_cur->focus_retry) || g_cur->closing || g_disabled || w <= 0 || h <= 0 ||
         (g_cur->modal_title[0] && !g_cur->modal_entered)) return false;
     bool registered = false;
     for (int i = 0; i < g_cur->nav_current_count; i++)
@@ -1394,13 +1449,20 @@ static bool gui_nav_register(uint32_t id, float x, float y, float w, float h) {
         int index = g_cur->nav_current_count++;
         memset(&g_cur->nav_current[index], 0, sizeof(g_cur->nav_current[index]));
         g_cur->nav_current[index].id = id;
+        g_cur->nav_current[index].visible = visible;
         g_cur->nav_current[index].x = x; g_cur->nav_current[index].y = y; g_cur->nav_current[index].h = h;
         if (g_cur->focus_request && !g_cur->focus_target) {
             if (g_cur->focus_offset) g_cur->focus_offset--;
-            else g_cur->focus_target = id;
+            else {
+                g_cur->focus_target = id;
+                if (g_cur->focus_reveal) gui_focus_capture(x, y, w, h);
+            }
         }
     }
-    if (g_cur->in.clicked && gui_hit(g_cur->in.mx, g_cur->in.my, vx, vy, vw, vh)) {
+    if (visible && g_cur->focus_retry == id) {
+        g_cur->focus_request = true; g_cur->focus_target = id; g_cur->focus_retry = 0;
+    }
+    if (visible && g_cur->in.clicked && gui_hit(g_cur->in.mx, g_cur->in.my, vx, vy, vw, vh)) {
         g_cur->nav_mouse_claimed = true;
         if (g_cur->combo_open && g_cur->combo_open != id) g_cur->combo_open = 0;
         if (g_cur->focused && g_cur->focused != id) {
@@ -1409,7 +1471,7 @@ static bool gui_nav_register(uint32_t id, float x, float y, float w, float h) {
         }
         g_cur->nav_focus = id;
     }
-    return g_cur->nav_focus == id;
+    return visible && g_cur->nav_focus == id;
 }
 
 static void gui_nav_text(uint32_t id, float x, float y, float w, float h) {
@@ -5307,6 +5369,7 @@ static Value fn_modal_reserve(int argc, Value *argv) {
         g_cur->nav_current_count = 0;
         g_cur->focus_request = false;
         g_cur->focus_target = 0;
+        g_cur->focus_wait_target = g_cur->focus_retry = 0;
         g_cur->nav_direction = 0;
         g_cur->nav_autofocus = count > 0 && !g_cur->nav_focus;
         g_cur->nav_mouse_pending = g_cur->nav_mouse_claimed = false;
@@ -7659,6 +7722,47 @@ static void gui_scroll_state_save(const GuiScrollRegion *region) {
     }
 }
 
+/* 表示位置だけを先に変更し、フォーカスは次フレームの可視確認後に渡す。 */
+static void gui_focus_scroll(GuiScrollRegion *region, int slot) {
+    if (!g_cur->focus_request || !g_cur->focus_reveal || !g_cur->focus_target || !g_cur->focus_path_valid ||
+        g_cur->closing || g_cur->composition[0] || g_disabled ||
+        (g_cur->modal_title[0] && !g_cur->modal_entered)) return;
+    if (!g_cur->nav_enabled) {
+        bool text = false;
+        for (int i = 0; i < g_cur->nav_current_count; i++)
+            if (g_cur->nav_current[i].id == g_cur->focus_target) text = g_cur->nav_current[i].text;
+        if (!text) return;
+    }
+    for (int i = 0; i < g_cur->focus_path_count; i++) {
+        if (g_cur->focus_path[i].done || g_cur->focus_path[i].slot != slot ||
+            g_cur->focus_path[i].id != region->state_id || g_cur->focus_path[i].epoch != region->state_epoch ||
+            g_cur->focus_path[i].child != region->state_child) continue;
+        g_cur->focus_path[i].done = true;
+        float top = region->y, bottom = top + region->h;
+        if (!i) {
+            top = fmaxf(0, top); bottom = fminf(bottom, g_cur->win_h);
+            int depth = g_dialog_depth[g_cur - g_apps];
+            if (depth) {
+                GuiDialogScope *scope = &g_dialog_scopes[g_cur - g_apps][depth - 1];
+                top = fmaxf(top, scope->content_y); bottom = fminf(bottom, scope->content_y + scope->content_h);
+            }
+        }
+        if (!isfinite(region->content_h) || !isfinite(region->scroll_y) || bottom <= top) {
+            g_cur->focus_path_valid = false; return;
+        }
+        float origin = g_cur->focus_path[i].origin;
+        float y = g_cur->focus_y - (region->scroll_y - origin);
+        float desired = region->scroll_y;
+        if (y < top || g_cur->focus_h > bottom - top) desired += y - top;
+        else if (y + g_cur->focus_h > bottom) desired += y + g_cur->focus_h - bottom;
+        region->scroll_y = fmaxf(0, fminf(desired, fmaxf(0, region->content_h - region->h)));
+        float delta = region->scroll_y - origin;
+        g_cur->focus_y -= delta;
+        if (fabsf(delta) > 0.01f) g_cur->focus_shifted = true;
+        return;
+    }
+}
+
 /* ---------------------------------------------------------------
  * スクロール領域開始(幅, 高さ[, ID])
  *   クリッピング+ スクロールバー付き領域を開始。
@@ -7801,6 +7905,7 @@ static Value fn_scroll_end(int argc, Value *argv) {
     hjpStroke(vg);
 
     /* レイアウト復元 */
+    gui_focus_scroll(sr, slot);
     gui_scroll_state_save(sr);
     g_cur->layout_scope_depth = sr->saved_scope_depth;
     g_cur->lay.x = sr->saved_x;
@@ -9264,6 +9369,7 @@ static Value fn_child_end(int argc, Value *argv) {
             GuiScrollRegion *sr = &g_scrolls[i];
             sr->content_h = (g_cur->lay.y + sr->scroll_y) - sr->y;
             sr->scroll_y = fmaxf(0, fminf(sr->scroll_y, sr->content_h - sr->h));
+            gui_focus_scroll(sr, i);
             gui_scroll_state_save(sr);
             hjpRestore(g_cur->vg);
             g_cur->layout_scope_depth = sr->saved_scope_depth;
@@ -10070,7 +10176,8 @@ static Value gui_dict3(const char *k1, Value v1,
 
 /* フォーカス設定(オフセット) — 次ウィジェットにフォーカスを移す */
 static Value fn_focus_set(int argc, Value *argv) {
-    if (!g_cur || argc != 1 || argv[0].type != VALUE_NUMBER || !isfinite(argv[0].number) ||
+    if (!g_cur || argc < 1 || argc > 2 || (argc == 2 && argv[1].type != VALUE_BOOL) ||
+        argv[0].type != VALUE_NUMBER || !isfinite(argv[0].number) ||
         argv[0].number < 0 || argv[0].number >= 512 || floor(argv[0].number) != argv[0].number ||
         g_cur->closing || g_disabled || g_cur->composition[0] ||
         (g_cur->modal_title[0] && !g_cur->modal_entered)) return hajimu_null();
@@ -10078,6 +10185,10 @@ static Value fn_focus_set(int argc, Value *argv) {
     g_cur->focus_request = true;
     g_cur->focus_offset = (int)argv[0].number;
     g_cur->focus_target = 0;
+    g_cur->focus_reveal = argc == 2 && argv[1].boolean;
+    g_cur->focus_shifted = false;
+    g_cur->focus_path_count = 0;
+    g_cur->focus_wait_target = g_cur->focus_retry = 0;
     return hajimu_null();
 }
 
@@ -25153,7 +25264,7 @@ static HajimuPluginFunc gui_functions[] = {
     {"元に戻す",             fn_undo,            1, 1},
     {"やり直す",             fn_redo,            1, 1},
     /* --- Phase 18: アクセシビリティ + パフォーマンス --- */
-    {"フォーカス設定",       fn_focus_set,       1, 1},
+    {"フォーカス設定",       fn_focus_set,       1, 2},
     {"フォーカス取得",       fn_focus_get,       0, 0},
     {"タブ順序",             fn_tab_order,       1, 1},
     {"仮想スクロール",       fn_virtual_scroll,  2, 2},
@@ -26329,7 +26440,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.48.0",
+        .version        = "14.49.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,
