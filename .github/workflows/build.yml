@@ -85,6 +85,10 @@ jobs:
         if: runner.os != 'Windows'
         run: GRAPHEME_SANITIZE=1 sh tests/check-grapheme.sh
 
+      - name: POSIXプロセスタスクの回帰検査
+        if: runner.os != 'Windows'
+        run: TASK_SANITIZE=1 sh tests/check-tasks.sh
+
       - name: Unicode境界テスト (Windows)
         if: runner.os == 'Windows'
         shell: msys2 {0}
