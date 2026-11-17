@@ -9,7 +9,10 @@
 #include <math.h>
 
 /* GUIスレッドだけが管理する子プロセス。言語ランタイムを共有しない。 */
-#ifndef _WIN32
+#ifdef _WIN32
+#include <windows.h>
+typedef HANDLE HjpTaskPipe;
+#else
 #include <spawn.h>
 #include <signal.h>
 #include <sys/wait.h>
@@ -24,10 +27,13 @@
 #define HJP_TASK_KILL kill
 #endif
 extern char **environ;
+typedef int HjpTaskPipe;
+#endif
+#include <errno.h>
 #define HJP_TASK_OUTPUT_LIMIT 16384
 #define HJP_TASK_READ_BUDGET 16384
 typedef struct {
-    int fd;
+    HjpTaskPipe fd;
     unsigned char bytes[HJP_TASK_OUTPUT_LIMIT];
     size_t length;
     uint64_t total;
@@ -35,14 +41,19 @@ typedef struct {
     int error;
 } HjpTaskOutput;
 typedef struct {
-    int id, state, exit_code, error;
+    int id, state, error;
+    int64_t exit_code;
+#ifdef _WIN32
+    HANDLE pid, job;
+#else
     pid_t pid;
+#endif
     const void *owner;
     bool notified;
     bool cancel_requested;
     bool capture_output;
     HjpTaskOutput out, err;
-    int progress_fd;
+    HjpTaskPipe progress_fd;
     double progress;
     char progress_line[128];
     size_t progress_length;
@@ -52,9 +63,21 @@ enum { HJP_TASK_RUNNING = 1, HJP_TASK_SUCCEEDED, HJP_TASK_FAILED, HJP_TASK_CANCE
 static HjpTask hjp_tasks[32];
 static int hjp_task_next_id = 1;
 
-static void hjp_task_close_fd(int *fd) {
+static bool hjp_task_pipe_open(HjpTaskPipe fd) {
+#ifdef _WIN32
+    return fd && fd != INVALID_HANDLE_VALUE;
+#else
+    return fd >= 0;
+#endif
+}
+static void hjp_task_close_fd(HjpTaskPipe *fd) {
+#ifdef _WIN32
+    if (hjp_task_pipe_open(*fd)) CloseHandle(*fd);
+    *fd = NULL;
+#else
     if (*fd >= 0) close(*fd);
     *fd = -1;
+#endif
 }
 static void hjp_task_close_io(HjpTask *task) {
     hjp_task_close_fd(&task->out.fd);
@@ -78,24 +101,41 @@ static void hjp_task_keep_output(HjpTaskOutput *output, const unsigned char *byt
     memcpy(output->bytes + output->length, bytes, n);
     output->length += n;
 }
+/* GUIスレッドだけが読む。Windowsも受信済みのバイト数までに制限する。 */
+static int hjp_task_read_some(HjpTaskPipe *fd, unsigned char *bytes, size_t size, bool *eof, int *error) {
+    if (!hjp_task_pipe_open(*fd)) return 0;
+#ifdef _WIN32
+    DWORD available = 0, count = 0;
+    if (PeekNamedPipe(*fd, NULL, 0, NULL, &available, NULL)) {
+        if (!available) return 0;
+        DWORD request = available < size ? available : (DWORD)size;
+        if (ReadFile(*fd, bytes, request, &count, NULL)) {
+            if (count) return (int)count;
+            *eof = true; hjp_task_close_fd(fd); return 0;
+        }
+    }
+    DWORD code = GetLastError();
+    if (code == ERROR_BROKEN_PIPE || code == ERROR_PIPE_NOT_CONNECTED) *eof = true;
+    else *error = (int)code;
+#else
+    ssize_t count = read(*fd, bytes, size);
+    if (count > 0) return (int)count;
+    if (!count) *eof = true;
+    else if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return 0;
+    else *error = errno;
+#endif
+    hjp_task_close_fd(fd);
+    return 0;
+}
 static void hjp_task_read_output(HjpTaskOutput *output) {
     unsigned char buffer[4096];
     size_t remaining = HJP_TASK_READ_BUDGET;
-    while (output->fd >= 0 && remaining) {
-        ssize_t n = read(output->fd, buffer, remaining < sizeof(buffer) ? remaining : sizeof(buffer));
-        if (n > 0) {
+    while (hjp_task_pipe_open(output->fd) && remaining) {
+        int n = hjp_task_read_some(&output->fd, buffer, remaining < sizeof(buffer) ? remaining : sizeof(buffer), &output->eof, &output->error);
+        if (n > 0 && (size_t)n <= sizeof(buffer)) {
             hjp_task_keep_output(output, buffer, (size_t)n);
             remaining -= (size_t)n;
-        } else if (n == 0) {
-            output->eof = true;
-            hjp_task_close_fd(&output->fd);
-        } else {
-            if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-                output->error = errno;
-                hjp_task_close_fd(&output->fd);
-            }
-            break;
-        }
+        } else break;
     }
 }
 static void hjp_task_progress_line(HjpTask *task) {
@@ -120,23 +160,20 @@ static void hjp_task_progress_line(HjpTask *task) {
 static void hjp_task_read_progress(HjpTask *task) {
     unsigned char buffer[4096];
     size_t remaining = HJP_TASK_READ_BUDGET;
-    while (task->progress_fd >= 0 && remaining) {
-        ssize_t n = read(task->progress_fd, buffer, remaining < sizeof(buffer) ? remaining : sizeof(buffer));
+    bool eof = false;
+    int error = 0;
+    while (hjp_task_pipe_open(task->progress_fd) && remaining) {
+        int n = hjp_task_read_some(&task->progress_fd, buffer, remaining < sizeof(buffer) ? remaining : sizeof(buffer), &eof, &error);
         if (n > 0) {
-            for (ssize_t i = 0; i < n; i++) {
+            for (int i = 0; i < n; i++) {
                 if (buffer[i] == '\n') hjp_task_progress_line(task);
                 else if (!buffer[i] || task->progress_length >= sizeof(task->progress_line) - 1) task->progress_overflow = true;
                 else task->progress_line[task->progress_length++] = (char)buffer[i];
             }
             remaining -= (size_t)n;
-        } else if (!n) {
-            hjp_task_progress_line(task);
-            hjp_task_close_fd(&task->progress_fd);
-        } else {
-            if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) hjp_task_close_fd(&task->progress_fd);
-            break;
-        }
+        } else break;
     }
+    if (eof) hjp_task_progress_line(task);
 }
 
 /* 生出力は末尾だけ保持する。文字列APIではNUL/不正UTF-8を置換し、受信途中の文字は保留する。 */
@@ -146,7 +183,7 @@ static size_t hjp_task_output_text(const HjpTaskOutput *output, char *text) {
         unsigned char first = output->bytes[i];
         size_t n = first < 0x80 ? 1 : first >= 0xc2 && first <= 0xdf ? 2 :
             first >= 0xe0 && first <= 0xef ? 3 : first >= 0xf0 && first <= 0xf4 ? 4 : 0;
-        if (n > output->length - i && output->fd >= 0) break;
+        if (n > output->length - i && hjp_task_pipe_open(output->fd)) break;
         bool valid = n && n <= output->length - i && first != 0;
         for (size_t j = 1; valid && j < n; j++) valid = (output->bytes[i + j] & 0xc0) == 0x80;
         if (valid && n >= 3) valid = !(first == 0xe0 && output->bytes[i + 1] < 0xa0) &&
@@ -164,6 +201,7 @@ static HjpTask *hjp_task_find(int id, const void *owner) {
         if (hjp_tasks[i].id == id && hjp_tasks[i].owner == owner) return &hjp_tasks[i];
     return NULL;
 }
+#ifndef _WIN32
 static void hjp_task_poll(HjpTask *task) {
     if (!task || !task->id) return;
     hjp_task_read_output(&task->out);
@@ -250,9 +288,6 @@ cleanup:
     for (int i = 0; i < 3; i++) { hjp_task_close_fd(&pipes[i][0]); hjp_task_close_fd(&pipes[i][1]); }
     return -1;
 }
-static inline int hjp_task_start(const void *owner, char *const *args) {
-    return hjp_task_start_with_io(owner, args, false, false);
-}
 static bool hjp_task_cancel(HjpTask *task) {
     if (!task || !task->pid || task->cancel_requested) return false;
     hjp_task_poll(task);
@@ -263,6 +298,12 @@ static bool hjp_task_cancel(HjpTask *task) {
     task->state = HJP_TASK_CANCELLING;
     task->error = 0;
     return true;
+}
+#else
+#include "hjp_tasks_win32.h"
+#endif
+static inline int hjp_task_start(const void *owner, char *const *args) {
+    return hjp_task_start_with_io(owner, args, false, false);
 }
 /* 1回だけ取消/回収を進める。待機0、完了1、要求失敗-1。所有権は回収まで保持する。 */
 static int hjp_tasks_close_step(const void *owner, int *error) {
@@ -286,13 +327,15 @@ static void hjp_tasks_close(const void *owner) {
         while (hjp_tasks[i].pid) {
             hjp_task_poll(&hjp_tasks[i]);
             if (hjp_tasks[i].pid) {
-                struct timespec pause = {0, 1000000};
-                nanosleep(&pause, NULL);
+#ifdef _WIN32
+                Sleep(1);
+#else
+                struct timespec pause = {0, 1000000}; nanosleep(&pause, NULL);
+#endif
             }
         }
         hjp_task_close_io(&hjp_tasks[i]);
         memset(&hjp_tasks[i], 0, sizeof(hjp_tasks[i]));
     }
 }
-#endif
 #endif

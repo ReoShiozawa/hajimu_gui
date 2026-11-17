@@ -605,9 +605,7 @@ static bool gui_request_close(GuiApp *app) {
 
 static bool gui_close_ready(GuiApp *app) {
     int result = 1, error = 0;
-#ifndef _WIN32
     result = hjp_tasks_close_step(app, &error);
-#endif
     if (result == 1) { app->closing = false; return true; }
     if (result < 0) {
         app->closing = false;
@@ -1864,9 +1862,7 @@ static Value fn_draw_loop(int argc, Value *argv) {
 
         /* ── ユーザーコールバック実行 ── */
         g_cur = app;
-#ifndef _WIN32
         for (size_t ti = 0; ti < 32; ti++) if (hjp_tasks[ti].owner == app) hjp_task_poll(&hjp_tasks[ti]);
-#endif
         GuiInput frame_input = app->in;
         gui_nav_begin();
         g_frame_count++;
@@ -2014,9 +2010,7 @@ static Value fn_draw_loop(int argc, Value *argv) {
         }
     }
 
-#ifndef _WIN32
     hjp_tasks_close(app);
-#endif
     app->loop_active = false;
     gui_histories_close(app);
     return hajimu_null();
@@ -2052,9 +2046,7 @@ static Value fn_close_state(int argc, Value *argv) {
             pending_request = app->os_close_pending;
             state = app->closing ? "終了処理中" : app->running ? "実行中" : "停止";
             frames = app->close_frames; error = app->close_error;
-#ifndef _WIN32
             for (size_t i = 0; i < 32; i++) if (hjp_tasks[i].id && hjp_tasks[i].owner == app && hjp_tasks[i].pid) pending++;
-#endif
         }
     }
     Value result = make_dict();
@@ -2105,9 +2097,7 @@ static Value fn_app_quit(int argc, Value *argv) {
     for (int i = 0; i < app->text_buf_count; i++) free(app->text_bufs[i].buf);
     memset(app->text_bufs, 0, sizeof(app->text_bufs));
     app->text_buf_count = 0;
-#ifndef _WIN32
     hjp_tasks_close(app);
-#endif
 
     if (app->vg) { hjpDeleteGL3(app->vg); app->vg = NULL; }
     if (app->gl) { hjp_gl_delete_context(app->gl); app->gl = NULL; }
@@ -17596,9 +17586,6 @@ static Value fn_async_exec(int argc, Value *argv) {
         fprintf(stderr, "[hajimu_gui] 非同期実行: 実行中のアプリで実行ファイル/引数の辞書と無を指定してください。共有クロージャの実行は未対応です。\n");
         return hajimu_number(-1);
     }
-#ifdef _WIN32
-    return hajimu_number(-1);
-#else
     Value executable = hajimu_null(), args = hajimu_null();
     bool capture = false, progress = false;
     for (int i = 0; i < argv[0].dict.length; i++) {
@@ -17619,10 +17606,8 @@ static Value fn_async_exec(int argc, Value *argv) {
         process_args[i + 1] = args.array.elements[i].string.data;
     }
     return hajimu_number(hjp_task_start_with_io(g_cur, process_args, capture, progress));
-#endif
 }
 
-#ifndef _WIN32
 static HjpTask *gui_task_lookup(Value id) {
     if (id.type != VALUE_NUMBER || !isfinite(id.number) || id.number <= 0 ||
         id.number >= INT_MAX || id.number != floor(id.number)) return NULL;
@@ -17633,37 +17618,31 @@ static double gui_task_progress(HjpTask *task) {
     if (task->state == HJP_TASK_SUCCEEDED) return 100;
     return task->state == HJP_TASK_RUNNING && task->progress >= 0 ? fmin(99, task->progress) : -1;
 }
-#endif
 
 /* タスク進捗(タスク) → 数値 */
 static Value fn_task_progress(int argc, Value *argv) {
     (void)argc;
-#ifndef _WIN32
     if (argc >= 1) {
         HjpTask *task = gui_task_lookup(argv[0]);
         hjp_task_poll(task);
         return hajimu_number(gui_task_progress(task));
     }
-#endif
     return hajimu_number(-1); /* 実行中は割合不明。失敗・不明IDも成功扱いにしない。 */
 }
 
 /* タスクキャンセル(タスク) → 真偽 */
 static Value fn_task_cancel(int argc, Value *argv) {
     (void)argc;
-#ifndef _WIN32
     if (argc >= 1) return hajimu_bool(hjp_task_cancel(gui_task_lookup(argv[0])));
-#endif
     return hajimu_bool(false);
 }
 
 static Value fn_task_state(int argc, Value *argv) {
     (void)argc;
     const char *state = "不明";
-    int exit_code = -1;
+    int64_t exit_code = -1;
     double progress = -1;
     int error = 0;
-#ifndef _WIN32
     HjpTask *task = argc >= 1 ? gui_task_lookup(argv[0]) : NULL;
     hjp_task_poll(task);
     if (task) {
@@ -17673,7 +17652,6 @@ static Value fn_task_state(int argc, Value *argv) {
         progress = gui_task_progress(task);
         error = task->error;
     }
-#endif
     Value result = gui_dict2("状態", hajimu_string(state), "終了コード", hajimu_number(exit_code));
     dict_set(&result, "進捗", hajimu_number(progress));
     dict_set(&result, "エラー番号", hajimu_number(error));
@@ -17682,7 +17660,6 @@ static Value fn_task_state(int argc, Value *argv) {
 
 static Value fn_task_output(int argc, Value *argv) {
     Value result = make_dict();
-#ifndef _WIN32
     HjpTask *task = argc >= 1 ? gui_task_lookup(argv[0]) : NULL;
     hjp_task_poll(task);
     char out[HJP_TASK_OUTPUT_LIMIT * 3 + 1], err[HJP_TASK_OUTPUT_LIMIT * 3 + 1];
@@ -17696,42 +17673,24 @@ static Value fn_task_output(int argc, Value *argv) {
     dict_set(&result, "標準エラーバイト数", hajimu_number(task ? (double)task->err.total : 0));
     dict_set(&result, "標準出力切詰め", hajimu_bool(task && task->out.truncated));
     dict_set(&result, "標準エラー切詰め", hajimu_bool(task && task->err.truncated));
-    dict_set(&result, "読取終了", hajimu_bool(task && task->out.fd < 0 && task->err.fd < 0));
+    dict_set(&result, "読取終了", hajimu_bool(task && !hjp_task_pipe_open(task->out.fd) && !hjp_task_pipe_open(task->err.fd)));
     dict_set(&result, "読取完了", hajimu_bool(task && (!task->capture_output || (task->out.eof && task->err.eof))));
     dict_set(&result, "標準出力読取エラー", hajimu_number(task ? task->out.error : 0));
     dict_set(&result, "標準エラー読取エラー", hajimu_number(task ? task->err.error : 0));
-#else
-    (void)argc; (void)argv;
-    dict_set(&result, "有効", hajimu_bool(false));
-    dict_set(&result, "取得有効", hajimu_bool(false));
-    dict_set(&result, "標準出力", hajimu_string(""));
-    dict_set(&result, "標準エラー", hajimu_string(""));
-    dict_set(&result, "標準出力バイト数", hajimu_number(0));
-    dict_set(&result, "標準エラーバイト数", hajimu_number(0));
-    dict_set(&result, "標準出力切詰め", hajimu_bool(false));
-    dict_set(&result, "標準エラー切詰め", hajimu_bool(false));
-    dict_set(&result, "標準出力読取エラー", hajimu_number(0));
-    dict_set(&result, "標準エラー読取エラー", hajimu_number(0));
-    dict_set(&result, "読取終了", hajimu_bool(false));
-    dict_set(&result, "読取完了", hajimu_bool(false));
-#endif
     return result;
 }
 
 static Value fn_task_release(int argc, Value *argv) {
     (void)argc;
-#ifndef _WIN32
     HjpTask *task = argc >= 1 ? gui_task_lookup(argv[0]) : NULL;
     hjp_task_poll(task);
     if (task && !task->pid) { hjp_task_close_io(task); memset(task, 0, sizeof(*task)); return hajimu_bool(true); }
-#endif
     return hajimu_bool(false);
 }
 
 /* 完了イベントの配送は呼出元のGUIスレッドで行い、クロージャを保持しない。 */
 static Value fn_task_notify(int argc, Value *argv) {
     if (!g_cur || g_cur->closing || argc < 2 || argv[1].type != VALUE_FUNCTION || !hajimu_runtime_available()) return hajimu_bool(false);
-#ifndef _WIN32
     HjpTask *task = gui_task_lookup(argv[0]);
     hjp_task_poll(task);
     if (task && !task->pid && !task->notified) {
@@ -17740,7 +17699,6 @@ static Value fn_task_notify(int argc, Value *argv) {
         hajimu_call(&argv[1], 1, &event);
         return hajimu_bool(true);
     }
-#endif
     return hajimu_bool(false);
 }
 
