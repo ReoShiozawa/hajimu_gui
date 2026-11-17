@@ -362,6 +362,9 @@ typedef struct {
     bool nav_enabled;
     int nav_direction;
     bool nav_autofocus;
+    bool focus_request;
+    int focus_offset;
+    uint32_t focus_target;
     bool nav_mouse_pending, nav_mouse_claimed;
     char modal_title[256];
     bool modal_entered, modal_input_saved;
@@ -944,8 +947,6 @@ typedef struct {
     int      order;
 } GuiTabOrder;
 
-static uint32_t    g_focus_next      = 0;   /* 次フレームでフォーカスするID */
-static bool        g_focus_set       = false;
 static GuiTabOrder g_tab_orders[GUI_MAX_TAB_ORDER];
 static int         g_tab_order_count = 0;
 static float       g_table_col_w[GUI_MAX_TABLES][16]; /* テーブル列幅 */
@@ -1237,7 +1238,7 @@ static void gui_nav_focus_entry(int index) {
         g_cur->text_context_id = 0;
         g_cur->text_context_published = false;
     }
-    g_cur->nav_focus = id;
+    g_cur->nav_focus = g_cur->nav_enabled ? id : 0;
     g_cur->focused = 0;
     g_cur->modal_focus_pending = false;
     if (!g_cur->nav_current[index].text) return;
@@ -1285,6 +1286,8 @@ static void gui_nav_begin(void) {
     g_cur->modal_focus_validate = g_cur->modal_focus_pending;
     for (int i = 0; i < g_cur->modal_count; i++) g_cur->modals[i].drawn = false;
     g_cur->nav_current_count = 0;
+    g_cur->focus_request = false;
+    g_cur->focus_target = 0;
     g_cur->nav_direction = 0;
     g_cur->nav_mouse_pending = g_cur->in.clicked;
     g_cur->nav_mouse_claimed = false;
@@ -1326,7 +1329,19 @@ static void gui_nav_end(void) {
         g_cur->combo_open = 0;
         hjp_stop_text_input();
     }
-    if (g_cur->nav_enabled && !g_cur->closing && !g_cur->composition[0]) {
+    bool requested = false;
+    if (g_cur->focus_request && g_cur->focus_target && !g_cur->closing && !g_cur->composition[0]) {
+        for (int i = 0; i < g_cur->nav_current_count; i++) {
+            if (g_cur->nav_current[i].id != g_cur->focus_target) continue;
+            gui_nav_focus_entry(i);
+            g_cur->combo_open = 0;
+            requested = true;
+            break;
+        }
+    }
+    g_cur->focus_request = false;
+    g_cur->focus_target = 0;
+    if (g_cur->nav_enabled && !g_cur->closing && !g_cur->composition[0] && !requested) {
         if (g_cur->nav_direction) {
             gui_nav_move(g_cur->nav_direction);
             g_cur->combo_open = 0;
@@ -1356,7 +1371,7 @@ static void gui_nav_end(void) {
 static bool gui_nav_register(uint32_t id, float x, float y, float w, float h) {
     float vx = x, vy = y, vw = w, vh = h;
     if (!gui_visible_rect(&vx, &vy, &vw, &vh)) return false;
-    if (!g_cur->nav_enabled || g_cur->closing || g_disabled || w <= 0 || h <= 0 ||
+    if ((!g_cur->nav_enabled && !g_cur->focus_request) || g_cur->closing || g_disabled || w <= 0 || h <= 0 ||
         (g_cur->modal_title[0] && !g_cur->modal_entered)) return false;
     bool registered = false;
     for (int i = 0; i < g_cur->nav_current_count; i++)
@@ -1366,6 +1381,10 @@ static bool gui_nav_register(uint32_t id, float x, float y, float w, float h) {
         memset(&g_cur->nav_current[index], 0, sizeof(g_cur->nav_current[index]));
         g_cur->nav_current[index].id = id;
         g_cur->nav_current[index].x = x; g_cur->nav_current[index].y = y; g_cur->nav_current[index].h = h;
+        if (g_cur->focus_request && !g_cur->focus_target) {
+            if (g_cur->focus_offset) g_cur->focus_offset--;
+            else g_cur->focus_target = id;
+        }
     }
     if (g_cur->in.clicked && gui_hit(g_cur->in.mx, g_cur->in.my, vx, vy, vw, vh)) {
         g_cur->nav_mouse_claimed = true;
@@ -5269,6 +5288,8 @@ static Value fn_modal_reserve(int argc, Value *argv) {
         g_cur->modal_focus_pending = g_cur->focused != 0;
         g_cur->modal_focus_validate = false;
         g_cur->nav_current_count = 0;
+        g_cur->focus_request = false;
+        g_cur->focus_target = 0;
         g_cur->nav_direction = 0;
         g_cur->nav_autofocus = count > 0 && !g_cur->nav_focus;
         g_cur->nav_mouse_pending = g_cur->nav_mouse_claimed = false;
@@ -9951,11 +9972,14 @@ static Value gui_dict3(const char *k1, Value v1,
 
 /* フォーカス設定(オフセット) — 次ウィジェットにフォーカスを移す */
 static Value fn_focus_set(int argc, Value *argv) {
-    (void)argc;
-    int offset = (int)argv[0].number;
-    g_focus_set = true;
-    /* offset: 0=次ウィジェット, 1=その次, ... */
-    g_focus_next = (uint32_t)offset;
+    if (!g_cur || argc != 1 || argv[0].type != VALUE_NUMBER || !isfinite(argv[0].number) ||
+        argv[0].number < 0 || argv[0].number >= 512 || floor(argv[0].number) != argv[0].number ||
+        g_cur->closing || g_disabled || g_cur->composition[0] ||
+        (g_cur->modal_title[0] && !g_cur->modal_entered)) return hajimu_null();
+    /* 入力編集を終えてから適用し、同じフレームの文字を移動先へ配送しない。 */
+    g_cur->focus_request = true;
+    g_cur->focus_offset = (int)argv[0].number;
+    g_cur->focus_target = 0;
     return hajimu_null();
 }
 
@@ -26207,7 +26231,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.46.0",
+        .version        = "14.47.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,

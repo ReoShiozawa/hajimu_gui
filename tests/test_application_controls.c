@@ -1588,6 +1588,77 @@ static void check_navigation_modals(void) {
     g_cur->nav_enabled = false; g_cur->nav_focus = 0;
 }
 
+static void check_focus_request(void) {
+    Value zero = hajimu_number(0), one = hajimu_number(1);
+    Value first[] = {hajimu_string("request-first"), hajimu_string("前")};
+    Value second[] = {hajimu_string("request-second"), hajimu_string("")};
+    g_cur->nav_enabled = true;
+    g_cur->nav_focus = g_cur->focused = gui_hash("request-first");
+    frame(false, false, 500); gui_nav_begin();
+    strcpy(g_cur->in.text_input, "追"); g_cur->in.text_input_len = (int)strlen("追");
+    Value edited = fn_text_input(2, first);
+    fn_focus_set(1, &zero);
+    Value unchanged = fn_text_input(2, second);
+    assert(!strcmp(edited.string.data, "前追") && !strcmp(unchanged.string.data, ""));
+    assert(g_cur->focused == gui_hash("request-first"));
+    gui_nav_end(); assert(g_cur->focused == gui_hash("request-second"));
+    assert(!g_cur->focus_request && !g_cur->focus_target);
+
+    frame(false, false, 500); gui_nav_begin(); fn_focus_set(1, &one);
+    g_disabled = true; gui_nav_control(900, 0, 0, 100, 30); g_disabled = false;
+    gui_nav_control(900, -1000, -1000, 100, 30);
+    gui_nav_control(901, 0, 0, 100, 30);
+    gui_nav_control(901, 0, 0, 100, 30);
+    gui_nav_control(902, 0, 40, 100, 30);
+    gui_nav_end(); assert(g_cur->nav_focus == 902 && !g_cur->focused);
+    frame(false, false, 500); gui_nav_begin(); fn_focus_set(1, &one);
+    gui_nav_control(901, 0, 0, 100, 30); gui_nav_end();
+    frame(false, false, 500); gui_nav_begin();
+    gui_nav_control(901, 0, 0, 100, 30); gui_nav_control(902, 0, 40, 100, 30);
+    gui_nav_end(); assert(!g_cur->nav_focus);
+
+    frame(false, false, 500); gui_nav_begin();
+    Value invalid[] = {hajimu_null(), hajimu_number(-1), hajimu_number(NAN),
+        hajimu_number(INFINITY), hajimu_number(512), hajimu_number(0.5)};
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        fn_focus_set(1, &invalid[i]); assert(!g_cur->focus_request);
+    }
+    fn_focus_set(0, NULL); assert(!g_cur->focus_request);
+    g_disabled = true; fn_focus_set(1, &zero); g_disabled = false; assert(!g_cur->focus_request);
+    strcpy(g_cur->composition, "変換"); fn_focus_set(1, &zero); assert(!g_cur->focus_request);
+    g_cur->composition[0] = 0;
+    g_cur->closing = true; fn_focus_set(1, &zero); g_cur->closing = false; assert(!g_cur->focus_request);
+    GuiApp *original = g_cur;
+    GuiApp other = {0}; other.composition = other.composition_inline;
+    g_cur = &other; fn_focus_set(1, &zero);
+    assert(other.focus_request && !original->focus_request);
+    g_cur = NULL; fn_focus_set(1, &zero); g_cur = original;
+    gui_nav_end();
+
+    g_cur->nav_enabled = false;
+    frame(false, false, 500); gui_nav_begin(); fn_focus_set(1, &zero);
+    fn_text_input(2, second); gui_nav_end();
+    assert(g_cur->focused == gui_hash("request-second") && !g_cur->nav_focus);
+    frame(false, false, 500); gui_nav_begin(); fn_text_input(2, second); gui_nav_end();
+    assert(g_cur->focused == gui_hash("request-second"));
+
+    g_cur->nav_enabled = true;
+    Value none = hajimu_string(""), parent = modal_list("request-parent", NULL);
+    Value dialog[] = {hajimu_string("request-parent"), hajimu_bool(true)};
+    frame(false, false, 500); gui_nav_begin(); fn_focus_set(1, &zero);
+    fn_modal_reserve(1, &parent); assert(!g_cur->focus_request);
+    fn_focus_set(1, &zero); assert(!g_cur->focus_request);
+    if (fn_dialog_begin(2, dialog).boolean) {
+        fn_focus_set(1, &one);
+        float x = g_cur->lay.x + 12, y = g_cur->lay.y;
+        gui_nav_control(903, x, y, 100, 30); gui_nav_control(904, x, y + 40, 100, 30);
+        fn_dialog_end(0, NULL);
+    } else assert(false);
+    gui_nav_end(); assert(g_cur->nav_focus == 904);
+    frame(false, false, 500); gui_nav_begin(); fn_modal_reserve(1, &none); gui_nav_end();
+    g_cur->nav_focus = g_cur->focused = 0; g_cur->nav_enabled = false;
+}
+
 static void check_keyboard_choices(void) {
     Value choices = hajimu_array();
     hajimu_array_push(&choices, hajimu_string("左"));
@@ -1981,6 +2052,7 @@ int main(void) {
     assert(limited->len == (int)strlen(oversized) && !strcmp(limited->buf, oversized));
     check_navigation_current_frame();
     check_navigation_modals();
+    check_focus_request();
     check_keyboard_choices();
     check_combo_popup();
     assert(fn_focus_traversal(0, NULL).boolean);
