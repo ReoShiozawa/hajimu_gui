@@ -118,6 +118,7 @@ int wmain(int argc, wchar_t **argv) {
     swprintf(copied, 32768, L"%ls\\日本語 空白.exe", directory);
     assert(CopyFileW(self, copied, TRUE));
     char *executable = utf8(copied);
+    puts("Windows task lifetime tests starting");
     DWORD baseline; assert(GetProcessHandleCount(GetCurrentProcess(), &baseline));
     assert(SetEnvironmentVariableW(L"HAJIMU_PROGRESS_FD", L"123"));
     assert(SetEnvironmentVariableW(L"HAJIMU_PROGRESS_HANDLE", L"456"));
@@ -125,6 +126,8 @@ int wmain(int argc, wchar_t **argv) {
     char *arguments[] = {executable, "--args", "", "日本語 空白", "quote\"inside", "C:\\末尾の空白 \\", "\\\\\"", "&echo not-a-shell|{};%PATH%", NULL};
     HjpTask *task = start_task(arguments, true, false); wait_task(task);
     assert(task->state == HJP_TASK_SUCCEEDED); release_task(task);
+    DWORD after_first; assert(GetProcessHandleCount(GetCurrentProcess(), &after_first));
+    fprintf(stderr, "handles baseline=%lu first-task=%lu\n", (unsigned long)baseline, (unsigned long)after_first);
     char *env[] = {executable, "--env", NULL};
     task = start_task(env, false, false); wait_task(task); assert(task->exit_code == 0); release_task(task);
     char *io[] = {executable, "--io", NULL};
@@ -188,9 +191,12 @@ int wmain(int argc, wchar_t **argv) {
     failure_stage = 0;
     for (int i = 0; i < 30; i++) {
         task = start_task(env, true, false); wait_task(task); assert(!task->exit_code); release_task(task);
+        DWORD count; assert(GetProcessHandleCount(GetCurrentProcess(), &count));
+        fprintf(stderr, "handles repetition=%d count=%lu\n", i, (unsigned long)count);
     }
     hjp_tasks_close(&failure_stage);
     DWORD final; assert(GetProcessHandleCount(GetCurrentProcess(), &final));
+    fprintf(stderr, "handles final=%lu baseline=%lu\n", (unsigned long)final, (unsigned long)baseline);
     assert(final == baseline);
     wchar_t unchanged[80]; assert(GetEnvironmentVariableW(L"HAJIMU_PROGRESS_HANDLE", unchanged, 80) && !wcscmp(unchanged, L"456"));
     free(executable); assert(DeleteFileW(copied)); assert(RemoveDirectoryW(directory));

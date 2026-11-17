@@ -17597,12 +17597,15 @@ static Value fn_async_exec(int argc, Value *argv) {
             else progress = argv[0].dict.values[i].boolean;
         }
     }
-    if (executable.type != VALUE_STRING || !executable.string.data[0] ||
-        args.type != VALUE_ARRAY || args.array.length > 64) return hajimu_number(-1);
+    if (executable.type != VALUE_STRING || !executable.string.data || executable.string.byte_length <= 0 ||
+        strlen(executable.string.data) != (size_t)executable.string.byte_length ||
+        args.type != VALUE_ARRAY || args.array.length < 0 || args.array.length > 64) return hajimu_number(-1);
     char *process_args[66] = {0};
     process_args[0] = executable.string.data;
     for (int i = 0; i < args.array.length; i++) {
-        if (args.array.elements[i].type != VALUE_STRING) return hajimu_number(-1);
+        Value argument = args.array.elements[i];
+        if (argument.type != VALUE_STRING || !argument.string.data || argument.string.byte_length < 0 ||
+            strlen(argument.string.data) != (size_t)argument.string.byte_length) return hajimu_number(-1);
         process_args[i + 1] = args.array.elements[i].string.data;
     }
     return hajimu_number(hjp_task_start_with_io(g_cur, process_args, capture, progress));
