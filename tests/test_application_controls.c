@@ -1816,13 +1816,21 @@ static void check_focus_reveal(void) {
         if (!step) assert(g_cur->focus_wait_target == gui_hash("rv-nested") && !g_cur->focused);
         else assert(g_cur->focused == gui_hash("rv-nested") && !g_cur->focus_wait_target);
     }
-    for (int kind = 0; kind < 5; kind++) {
+    GuiTextBuf *accessible = gui_get_text_buf(gui_hash("rv-upper"), "");
+    accessible->ax_visible = accessible->ax_enabled = true;
+    HjpEvent ax_focus = {.type = HJP_EVENT_ACCESSIBILITY_FOCUS};
+    ax_focus.edit.window = g_cur->window; ax_focus.edit.generation = hjp_window_get_id(g_cur->window);
+    ax_focus.edit.id = accessible->id; ax_focus.edit.cursor = 1;
+    g_cur->focus_wait_target = gui_hash("rv-nested");
+    assert(gui_apply_accessibility_focus(g_cur, &ax_focus) && !g_cur->focus_wait_target);
+    for (int kind = 0; kind < 6; kind++) {
         frame(false, false, 500); g_cur->focus_wait_target = gui_hash("rv-nested");
         if (kind == 0) g_cur->in.clicked = true;
         if (kind == 1) g_cur->in.scroll_y = -1;
         if (kind == 2) g_cur->in.key_tab = true;
         if (kind == 3) strcpy(g_cur->composition, "変換");
         if (kind == 4) g_cur->closing = true;
+        if (kind == 5) gui_focus_cancel(g_cur);
         gui_nav_begin(); assert(!g_cur->focus_retry && !g_cur->focus_wait_target);
         gui_nav_end(); g_cur->composition[0] = 0; g_cur->closing = false;
     }

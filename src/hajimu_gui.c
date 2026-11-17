@@ -604,7 +604,12 @@ static void gui_histories_close(const void *owner) {
         memset(&g_histories[i], 0, sizeof(g_histories[i]));
     }
 }
+static void gui_focus_cancel(GuiApp *app) {
+    app->focus_request = app->focus_reveal = false;
+    app->focus_target = app->focus_wait_target = app->focus_retry = 0;
+}
 static void gui_begin_close(GuiApp *app) {
+    gui_focus_cancel(app);
     hjp_event_queue_clear(&app->events);
     app->os_close_pending = false;
     app->running = false;
@@ -1787,6 +1792,7 @@ static Value fn_draw_loop(int argc, Value *argv) {
                 app->os_close_pending = true;
                 break;
             case HJP_EVENT_INPUT_RESET:
+                gui_focus_cancel(app);
                 app->in = (GuiInput){0};
                 app->focused = app->nav_focus = app->active = app->text_drag = app->combo_open = 0;
                 gui_ime_update(app, "");
@@ -1830,6 +1836,7 @@ static Value fn_draw_loop(int argc, Value *argv) {
                     app->win_h = ev.window.data2;
                 }
                 if (ev.window.event == HJP_WINDOWEVENT_FOCUS_LOST) {
+                    gui_focus_cancel(app);
                     app->in.down = false;
                     app->in.mod_ctrl = app->in.mod_shift = false;
                     app->active = app->text_drag = app->combo_open = 0;
@@ -3305,6 +3312,7 @@ static bool gui_apply_accessibility_focus(GuiApp *app, const HjpEvent *event) {
             if (app->composition[0] || app->focused != tb->id) return false;
             app->focused = app->nav_focus = app->active = 0;
             app->text_context_id = app->text_drag = 0;
+            gui_focus_cancel(app);
             return true;
         }
         if (app->composition[0] && app->focused != tb->id) return false;
@@ -3312,6 +3320,7 @@ static bool gui_apply_accessibility_focus(GuiApp *app, const HjpEvent *event) {
         app->nav_focus = app->nav_enabled ? tb->id : 0;
         app->text_context_id = tb->id;
         app->text_drag = app->active = 0;
+        gui_focus_cancel(app);
         return true;
     }
     return false;
@@ -5367,9 +5376,7 @@ static Value fn_modal_reserve(int argc, Value *argv) {
         g_cur->modal_focus_pending = g_cur->focused != 0;
         g_cur->modal_focus_validate = false;
         g_cur->nav_current_count = 0;
-        g_cur->focus_request = false;
-        g_cur->focus_target = 0;
-        g_cur->focus_wait_target = g_cur->focus_retry = 0;
+        gui_focus_cancel(g_cur);
         g_cur->nav_direction = 0;
         g_cur->nav_autofocus = count > 0 && !g_cur->nav_focus;
         g_cur->nav_mouse_pending = g_cur->nav_mouse_claimed = false;
