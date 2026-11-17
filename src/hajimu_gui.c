@@ -1333,6 +1333,7 @@ static void gui_nav_end(void) {
     if (g_cur->focus_request && g_cur->focus_target && !g_cur->closing && !g_cur->composition[0]) {
         for (int i = 0; i < g_cur->nav_current_count; i++) {
             if (g_cur->nav_current[i].id != g_cur->focus_target) continue;
+            if (!g_cur->nav_enabled && !g_cur->nav_current[i].text) break;
             gui_nav_focus_entry(i);
             g_cur->combo_open = 0;
             requested = true;

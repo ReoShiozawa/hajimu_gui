@@ -1642,6 +1642,10 @@ static void check_focus_request(void) {
     frame(false, false, 500); gui_nav_begin(); fn_text_input(2, second); gui_nav_end();
     assert(g_cur->focused == gui_hash("request-second"));
 
+    frame(false, false, 500); gui_nav_begin(); fn_focus_set(1, &zero);
+    gui_nav_control(905, 0, 0, 100, 30); gui_nav_end();
+    assert(g_cur->focused == gui_hash("request-second"));
+
     g_cur->nav_enabled = true;
     Value none = hajimu_string(""), parent = modal_list("request-parent", NULL);
     Value dialog[] = {hajimu_string("request-parent"), hajimu_bool(true)};
