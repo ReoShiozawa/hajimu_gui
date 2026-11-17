@@ -1804,6 +1804,20 @@ static void check_compact_rows(void) {
     g_cur->nav_enabled = false; g_cur->nav_focus = 0;
 }
 
+static void check_async_arguments(void) {
+    char embedded[] = {'a', 0, 'b', 0};
+    Value invalid = hajimu_string("placeholder");
+    invalid.string.data = embedded; invalid.string.byte_length = 3;
+    Value settings = make_dict(), list = hajimu_array();
+    dict_set(&settings, "実行ファイル", invalid);
+    dict_set(&settings, "引数", list);
+    Value args[] = {settings, hajimu_null()};
+    assert(fn_async_exec(2, args).number == -1);
+    dict_set(&settings, "実行ファイル", hajimu_string("/bin/sh"));
+    hajimu_array_push(&list, invalid); dict_set(&settings, "引数", list); args[0] = settings;
+    assert(fn_async_exec(2, args).number == -1);
+}
+
 static void check_virtual_rows(void) {
     GuiScrollRegion saved[GUI_MAX_SCROLL]; memcpy(saved, g_scrolls, sizeof(saved));
     memset(g_scrolls, 0, sizeof(g_scrolls));
@@ -1953,6 +1967,7 @@ int main(void) {
     check_popup_loop();
     check_compact_rows();
     check_virtual_rows();
+    check_async_arguments();
     check_modal_stack();
     check_modal_forms();
     check_responsive_fields();
