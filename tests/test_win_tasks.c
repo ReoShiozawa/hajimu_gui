@@ -4,16 +4,8 @@
 #include <wchar.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <stdbool.h>
 
 static int failure_stage;
-static bool tracing;
-static void trace_stage(const char *stage) {
-    if (!tracing) return;
-    DWORD count; assert(GetProcessHandleCount(GetCurrentProcess(), &count));
-    fprintf(stderr, "task stage=%s handles=%lu\n", stage, (unsigned long)count);
-}
-#define HJP_TASK_TRACE trace_stage
 static BOOL assign_job(HANDLE job, HANDLE process) {
     if (failure_stage == 1) { SetLastError(ERROR_ACCESS_DENIED); return FALSE; }
     return AssignProcessToJobObject(job, process);
@@ -138,15 +130,22 @@ int wmain(int argc, wchar_t **argv) {
         NULL, NULL, &native_startup, &native_process));
     assert(WaitForSingleObject(native_process.hProcess, 15000) == WAIT_OBJECT_0);
     CloseHandle(native_process.hProcess); CloseHandle(native_process.hThread);
+    DWORD after_process; assert(GetProcessHandleCount(GetCurrentProcess(), &after_process));
+    wchar_t native_resolved[32768];
+    assert(SearchPathW(NULL, copied, L".exe", 32768, native_resolved, NULL));
+    DWORD after_search; assert(GetProcessHandleCount(GetCurrentProcess(), &after_search));
+    HANDLE native_pipe[2];
+    SECURITY_ATTRIBUTES native_security = {sizeof(native_security), NULL, TRUE};
+    assert(CreatePipe(&native_pipe[0], &native_pipe[1], &native_security, 0));
+    CloseHandle(native_pipe[0]); CloseHandle(native_pipe[1]);
     DWORD baseline; assert(GetProcessHandleCount(GetCurrentProcess(), &baseline));
-    fprintf(stderr, "native CreateProcess control: cold=%lu warmed=%lu\n", (unsigned long)cold, (unsigned long)baseline);
+    fprintf(stderr, "native API control: cold=%lu process=%lu search=%lu pipes=%lu\n",
+        (unsigned long)cold, (unsigned long)after_process, (unsigned long)after_search, (unsigned long)baseline);
     assert(SetEnvironmentVariableW(L"HAJIMU_PROGRESS_FD", L"123"));
     assert(SetEnvironmentVariableW(L"HAJIMU_PROGRESS_HANDLE", L"456"));
 
     char *arguments[] = {executable, "--args", "", "日本語 空白", "quote\"inside", "C:\\末尾の空白 \\", "\\\\\"", "&echo not-a-shell|{};%PATH%", NULL};
-    tracing = true;
     HjpTask *task = start_task(arguments, true, false); wait_task(task);
-    tracing = false;
     assert(task->state == HJP_TASK_SUCCEEDED); release_task(task);
     DWORD after_first; assert(GetProcessHandleCount(GetCurrentProcess(), &after_first));
     fprintf(stderr, "handles baseline=%lu first-task=%lu\n", (unsigned long)baseline, (unsigned long)after_first);
