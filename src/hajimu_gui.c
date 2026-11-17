@@ -611,7 +611,7 @@ static bool gui_close_ready(GuiApp *app) {
         app->closing = false;
         app->running = true;
         app->close_error = error;
-        fprintf(stderr, "[hajimu_gui] 終了取消: タスク停止要求に失敗しました (errno=%d)\n", error);
+        fprintf(stderr, "[hajimu_gui] 終了取消: タスク停止要求に失敗しました (code=%d)\n", error);
     }
     return false;
 }
@@ -5858,7 +5858,9 @@ static Value fn_process_launch(int argc, Value *argv) {
 static Value fn_executable_path(int argc, Value *argv) {
     (void)argc;
     (void)argv;
+#if defined(__APPLE__) || defined(__linux__)
     char path[4096] = {0};
+#endif
 #ifdef __APPLE__
     uint32_t path_size = (uint32_t)sizeof(path);
     if (_NSGetExecutablePath(path, &path_size) != 0) return hajimu_null();
@@ -5871,9 +5873,10 @@ static Value fn_executable_path(int argc, Value *argv) {
     path[length] = '\0';
     return hajimu_string(path);
 #else
-    DWORD length = GetModuleFileNameA(NULL, path, (DWORD)sizeof(path));
-    if (length == 0 || length >= sizeof(path)) return hajimu_null();
-    return hajimu_string(path);
+    char *utf8 = hjp_task_executable_path();
+    if (!utf8) return hajimu_null();
+    Value result = hajimu_string(utf8);
+    free(utf8); return result;
 #endif
 }
 
@@ -26211,7 +26214,7 @@ static Value fn_api_status(int argc, Value *argv) {
             state = "部分対応"; reason = "フレーム内の変換通知とmacOS文書選択/置換を接続。実IME・長い未確定文字表示・他OSは未完了";
         } else if (found->fn == fn_async_exec || found->fn == fn_task_progress || found->fn == fn_task_notify ||
                    found->fn == fn_task_output || found->fn == fn_task_state || found->fn == fn_task_cancel || found->fn == fn_task_release) {
-            state = "部分対応"; reason = "POSIXタスク・出力/進捗IPC・GUI内終了待機。ループ外の破棄は同期、任意関数・Windowsは未完了";
+            state = "部分対応"; reason = "POSIX/Windowsプロセスタスク・出力/進捗IPC・GUI内終了待機。ループ外破棄は同期、任意関数/標準入力送信/WindowsのKaname実操作は未完了";
         } else if (found->fn == fn_a11y_name || found->fn == fn_a11y_desc || found->fn == fn_a11y_role || found->fn == fn_sr_announce) {
             state = "部分対応"; reason = "macOSの基本部品と通常入力欄の編集/選択/フォーカス。外部AX・実読み上げ・テーブル/ツリー・他OSは未完了";
         } else if (found->fn == fn_focus_traversal) {
@@ -26246,7 +26249,7 @@ HAJIMU_PLUGIN_ABI_EXPORT()
 HAJIMU_PLUGIN_EXPORT HajimuPluginInfo *hajimu_plugin_init(void) {
     static HajimuPluginInfo info = {
         .name           = "hajimu_gui",
-        .version        = "14.44.0",
+        .version        = "14.45.0",
         .author         = "Reo Shiozawa",
         .description    = "はじむ用 GUI パッケージ — 自製プラットフォーム + 即時モード",
         .functions      = gui_functions,
