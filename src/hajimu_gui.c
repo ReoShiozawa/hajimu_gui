@@ -46,6 +46,7 @@
 #include <limits.h>
 #include <float.h>
 #include "hjp_tasks.h"
+#include "hjp_files.h"
 #include "hjp_event_queue.h"
 #include "hjp_grapheme.h"
 #include "hjp_layout.h"
@@ -5516,53 +5517,20 @@ static Value fn_file_dialog(int argc, Value *argv) {
  * はじむ標準の文字列経由コピーでは NUL を含む画像・音声を保持できないため、
  * GUI で選択した素材をそのままプロジェクトへ取り込む用途に提供する。
  * ---------------------------------------------------------------*/
+static bool gui_copy_progress(uint64_t done, uint64_t total, void *context) {
+    Value values[] = {hajimu_number((double)done), hajimu_number((double)total)};
+    Value result = hajimu_call((Value *)context, 2, values);
+    return result.type == VALUE_BOOL && result.boolean;
+}
+static bool gui_file_argument(Value value) {
+    return value.type == VALUE_STRING && value.string.data && value.string.byte_length > 0 &&
+        strlen(value.string.data) == (size_t)value.string.byte_length;
+}
 static Value fn_file_copy(int argc, Value *argv) {
-    if (argc < 2 || argv[0].type != VALUE_STRING ||
-        argv[1].type != VALUE_STRING) {
-        return hajimu_bool(false);
-    }
-
-    const char *src_path = argv[0].string.data;
-    const char *dst_path = argv[1].string.data;
-    if (!src_path || !dst_path || src_path[0] == '\0' || dst_path[0] == '\0') {
-        return hajimu_bool(false);
-    }
-    if (strcmp(src_path, dst_path) == 0) {
-        return hajimu_bool(true);
-    }
-
-    FILE *src = fopen(src_path, "rb");
-    if (!src) {
-        return hajimu_bool(false);
-    }
-    FILE *dst = fopen(dst_path, "wb");
-    if (!dst) {
-        fclose(src);
-        return hajimu_bool(false);
-    }
-
-    unsigned char buffer[64 * 1024];
-    bool ok = true;
-    size_t bytes_read = 0;
-    while ((bytes_read = fread(buffer, 1, sizeof(buffer), src)) > 0) {
-        if (fwrite(buffer, 1, bytes_read, dst) != bytes_read) {
-            ok = false;
-            break;
-        }
-    }
-    if (ferror(src) || fflush(dst) != 0) {
-        ok = false;
-    }
-    if (fclose(src) != 0) {
-        ok = false;
-    }
-    if (fclose(dst) != 0) {
-        ok = false;
-    }
-    if (!ok) {
-        remove(dst_path);
-    }
-    return hajimu_bool(ok);
+    if (argc < 2 || argc > 3 || !gui_file_argument(argv[0]) || !gui_file_argument(argv[1]) ||
+        (argc == 3 && (argv[2].type != VALUE_FUNCTION || !hajimu_runtime_available()))) return hajimu_bool(false);
+    return hajimu_bool(hjp_file_copy(argv[0].string.data, argv[1].string.data,
+        argc == 3 ? gui_copy_progress : NULL, argc == 3 ? &argv[2] : NULL));
 }
 
 /* ---------------------------------------------------------------
@@ -5572,7 +5540,7 @@ static Value fn_file_copy(int argc, Value *argv) {
  * ディレクトリは誤操作の被害が大きいため受け付けない。
  * ---------------------------------------------------------------*/
 static Value fn_file_delete(int argc, Value *argv) {
-    if (argc < 1 || argv[0].type != VALUE_STRING) {
+    if (argc < 1 || !gui_file_argument(argv[0])) {
         return hajimu_bool(false);
     }
 
@@ -5582,20 +5550,17 @@ static Value fn_file_delete(int argc, Value *argv) {
     }
 
     /* 通常ファイルとして開いて1バイト読み、ディレクトリを除外する。 */
-    FILE *probe = fopen(path, "rb");
+    HjpFileStamp stamp;
+    FILE *probe = hjp_file_read_regular(path, &stamp);
     if (!probe) {
         return hajimu_bool(false);
     }
-    (void)fgetc(probe);
-    bool is_file = !ferror(probe);
-    if (fclose(probe) != 0) {
-        is_file = false;
-    }
+    bool is_file = fclose(probe) == 0;
     if (!is_file) {
         return hajimu_bool(false);
     }
 
-    return hajimu_bool(remove(path) == 0);
+    return hajimu_bool(hjp_file_remove(path));
 }
 
 /* ---------------------------------------------------------------
@@ -5607,24 +5572,17 @@ static Value fn_file_delete(int argc, Value *argv) {
  * ---------------------------------------------------------------*/
 #ifdef _WIN32
 static wchar_t *gui_file_path_to_wide(const char *path) {
-    if (!path || path[0] == '\0') return NULL;
-    int length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
-    if (length <= 0) return NULL;
-    wchar_t *wide = (wchar_t *)malloc((size_t)length * sizeof(wchar_t));
-    if (!wide) return NULL;
-    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, length) <= 0) {
-        free(wide);
-        return NULL;
-    }
-    return wide;
+    return hjp_file_wide(path);
 }
 #endif
 
 static Value fn_file_replace(int argc, Value *argv) {
-    if (argc < 2 || argv[0].type != VALUE_STRING ||
-        argv[1].type != VALUE_STRING) {
+    if (argc < 2 || argc > 3 || !gui_file_argument(argv[0]) || !gui_file_argument(argv[1]) ||
+        (argc == 3 && argv[2].type != VALUE_BOOL)) {
         return hajimu_bool(false);
     }
+    if (argc == 3 && !argv[2].boolean)
+        return hajimu_bool(hjp_file_publish(argv[0].string.data, argv[1].string.data, false));
 
     const char *temporary_path = argv[0].string.data;
     const char *target_path = argv[1].string.data;
@@ -24912,15 +24870,15 @@ static HajimuPluginFunc gui_functions[] = {
     {"履歴まとめ終了", fn_history_group_end, 2, 2},
     {"履歴破棄", fn_history_destroy, 1, 1},
     {"ファイルダイアログ",   fn_file_dialog,   0, 2},
-    {"ファイルコピー",       fn_file_copy,     2, 2},
-    {"file_copy",             fn_file_copy,     2, 2},
+    {"ファイルコピー",       fn_file_copy,     2, 3},
+    {"file_copy",             fn_file_copy,     2, 3},
     {"ファイル削除",         fn_file_delete,   1, 1},
     {"file_delete",           fn_file_delete,   1, 1},
-    {"ファイル置換",         fn_file_replace,  2, 2},
+    {"ファイル置換",         fn_file_replace,  2, 3},
     {"ファイルロック取得",   fn_file_lock,     1, 1},
     {"ファイルロック解放",   fn_file_unlock,   1, 1},
     {"ディレクトリ移動",     fn_directory_move,2, 2},
-    {"file_replace",          fn_file_replace,  2, 2},
+    {"file_replace",          fn_file_replace,  2, 3},
     {"外部プロセス起動",     fn_process_launch, 2, 2},
     {"process_launch",        fn_process_launch, 2, 2},
     {"実行ファイルパス",     fn_executable_path, 0, 0},

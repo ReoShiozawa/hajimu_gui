@@ -89,6 +89,10 @@ jobs:
         if: runner.os != 'Windows'
         run: TASK_SANITIZE=1 sh tests/check-tasks.sh
 
+      - name: バイナリファイル処理の回帰検査 (macOS / Linux)
+        if: runner.os != 'Windows'
+        run: FILE_SANITIZE=1 sh tests/check-files.sh
+
       - name: Unicode境界テスト (Windows)
         if: runner.os == 'Windows'
         shell: msys2 {0}
@@ -107,6 +111,11 @@ jobs:
         if: runner.os == 'Windows'
         shell: msys2 {0}
         run: sh tests/check-win-tasks.sh
+
+      - name: バイナリファイル処理の回帰検査 (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: sh tests/check-files.sh
 
       - name: macOSネイティブ操作の回帰検査
         if: runner.os == 'macOS'
