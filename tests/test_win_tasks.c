@@ -119,7 +119,17 @@ int wmain(int argc, wchar_t **argv) {
     assert(CopyFileW(self, copied, TRUE));
     char *executable = utf8(copied);
     puts("Windows task lifetime tests starting");
+    DWORD cold; assert(GetProcessHandleCount(GetCurrentProcess(), &cold));
+    /* Win32自身の初回初期化と所有ハンドルの寿命を分け、直接起動を対照にする。 */
+    STARTUPINFOW native_startup = {0}; native_startup.cb = sizeof(native_startup);
+    PROCESS_INFORMATION native_process;
+    wchar_t native_command[32768]; swprintf(native_command, 32768, L"\"%ls\" --exit 0", copied);
+    assert(CreateProcessW(copied, native_command, NULL, NULL, FALSE, CREATE_NO_WINDOW,
+        NULL, NULL, &native_startup, &native_process));
+    assert(WaitForSingleObject(native_process.hProcess, 15000) == WAIT_OBJECT_0);
+    CloseHandle(native_process.hProcess); CloseHandle(native_process.hThread);
     DWORD baseline; assert(GetProcessHandleCount(GetCurrentProcess(), &baseline));
+    fprintf(stderr, "native CreateProcess control: cold=%lu warmed=%lu\n", (unsigned long)cold, (unsigned long)baseline);
     assert(SetEnvironmentVariableW(L"HAJIMU_PROGRESS_FD", L"123"));
     assert(SetEnvironmentVariableW(L"HAJIMU_PROGRESS_HANDLE", L"456"));
 
@@ -128,6 +138,7 @@ int wmain(int argc, wchar_t **argv) {
     assert(task->state == HJP_TASK_SUCCEEDED); release_task(task);
     DWORD after_first; assert(GetProcessHandleCount(GetCurrentProcess(), &after_first));
     fprintf(stderr, "handles baseline=%lu first-task=%lu\n", (unsigned long)baseline, (unsigned long)after_first);
+    assert(after_first == baseline);
     char *env[] = {executable, "--env", NULL};
     task = start_task(env, false, false); wait_task(task); assert(task->exit_code == 0); release_task(task);
     char *io[] = {executable, "--io", NULL};
@@ -192,7 +203,7 @@ int wmain(int argc, wchar_t **argv) {
     for (int i = 0; i < 30; i++) {
         task = start_task(env, true, false); wait_task(task); assert(!task->exit_code); release_task(task);
         DWORD count; assert(GetProcessHandleCount(GetCurrentProcess(), &count));
-        fprintf(stderr, "handles repetition=%d count=%lu\n", i, (unsigned long)count);
+        assert(count == baseline);
     }
     hjp_tasks_close(&failure_stage);
     DWORD final; assert(GetProcessHandleCount(GetCurrentProcess(), &final));
